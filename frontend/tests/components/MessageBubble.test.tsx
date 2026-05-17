@@ -35,4 +35,20 @@ describe("MessageBubble", () => {
     );
     expect(screen.getByText(/provider 500/i)).toBeInTheDocument();
   });
+
+  it("renders user content as plain text (no HTML execution)", () => {
+    render(
+      <MessageBubble
+        message={{
+          role: "user",
+          content: "<img src=x onerror=alert(1)>",
+          run_id: null,
+        }}
+      />,
+    );
+    // The literal angle brackets must be present in textContent — no <img> element.
+    expect(screen.getByText(/<img src=x onerror=alert\(1\)>/)).toBeInTheDocument();
+    const article = screen.getByText(/<img/).closest("article");
+    expect(article?.querySelector("img")).toBeNull();
+  });
 });

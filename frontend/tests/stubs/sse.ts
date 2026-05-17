@@ -1,12 +1,14 @@
 import { http, HttpResponse } from "msw";
 
+import { API_BASE_URL } from "@/lib/api";
+
 const enc = new TextEncoder();
 
 function sseChunk(event: string, data: unknown): Uint8Array {
   return enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
-export const chitchatHappyPath = http.post("http://localhost:8000/chat", () => {
+export const chitchatHappyPath = http.post(`${API_BASE_URL}/chat`, () => {
   const stream = new ReadableStream({
     start(controller) {
       controller.enqueue(

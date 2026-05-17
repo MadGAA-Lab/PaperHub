@@ -17,6 +17,7 @@ interface ChatState {
   appendTrace: (sessionId: number, run_id: number, record: ToolCallRecord) => void;
   finaliseMessage: (sessionId: number, run_id: number, content: string) => void;
   errorMessage: (sessionId: number, run_id: number, error: string) => void;
+  failPendingAssistant: (sessionId: number, error: string) => void;
   patchAssistantRunId: (sessionId: number, runId: number) => void;
   reset: () => void;
 }
@@ -122,6 +123,24 @@ export const useChatStore = create<ChatState>((set) => ({
               ...sess,
               messages: sess.messages.map((m) =>
                 m.run_id === run_id && m.role === "assistant"
+                  ? { ...m, status: "error", error }
+                  : m,
+              ),
+            }
+          : sess,
+      ),
+    })),
+
+  failPendingAssistant: (sessionId, error) =>
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === sessionId
+          ? {
+              ...sess,
+              messages: sess.messages.map((m, i, arr) =>
+                i === arr.length - 1
+                  && m.role === "assistant"
+                  && (m.status === "streaming" || m.status === undefined)
                   ? { ...m, status: "error", error }
                   : m,
               ),
