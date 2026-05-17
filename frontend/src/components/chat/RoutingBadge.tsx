@@ -23,9 +23,10 @@ export function RoutingBadge({ decision }: { decision: RoutingDecision }) {
       <Tooltip>
         <TooltipTrigger
           render={
-            <span
+            <button
+              type="button"
               data-conf={confLevel}
-              className="inline-flex items-center gap-2 text-xs"
+              className="inline-flex items-center gap-2 text-xs cursor-default focus:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm"
             />
           }
         >

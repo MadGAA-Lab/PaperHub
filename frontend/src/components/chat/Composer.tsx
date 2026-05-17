@@ -1,4 +1,4 @@
-import { KeyboardEvent, useState } from "react";
+import { KeyboardEvent, useRef, useState } from "react";
 import { Send } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -11,12 +11,14 @@ interface Props {
 
 export function Composer({ onSubmit, disabled }: Props) {
   const [value, setValue] = useState("");
+  const ref = useRef<HTMLTextAreaElement>(null);
 
   const submit = () => {
     const trimmed = value.trim();
     if (!trimmed || disabled) return;
     onSubmit(trimmed);
     setValue("");
+    ref.current?.focus();
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -30,6 +32,7 @@ export function Composer({ onSubmit, disabled }: Props) {
     <div className="border-t border-border bg-card p-3">
       <div className="flex items-end gap-2 max-w-3xl mx-auto">
         <Textarea
+          ref={ref}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={onKeyDown}

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ThemeProvider } from "next-themes";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -29,7 +29,8 @@ describe("ThemeToggle", () => {
     expect(document.documentElement.classList.contains("dark")).toBe(false);
     await userEvent.click(screen.getByRole("button", { name: /theme/i }));
     // next-themes updates classList asynchronously after the resolved theme settles.
-    await new Promise((r) => setTimeout(r, 0));
-    expect(document.documentElement.classList.contains("dark")).toBe(true);
+    await waitFor(() =>
+      expect(document.documentElement.classList.contains("dark")).toBe(true),
+    );
   });
 });
