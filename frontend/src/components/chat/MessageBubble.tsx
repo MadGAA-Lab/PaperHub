@@ -1,4 +1,5 @@
-import { marked } from "marked";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import type { ChatMessage } from "@/types/domain";
 
@@ -22,14 +23,12 @@ export function MessageBubble({ message }: Props) {
         ) : isUser ? (
           <p className="whitespace-pre-wrap">{message.content}</p>
         ) : (
-          <div
-            // Assistant content comes from our own LLM, not user input. Switch
-            // to a structured renderer (react-markdown) in Plan D when citation
-            // buttons need to be injected.
-            dangerouslySetInnerHTML={{
-              __html: marked.parse(message.content || " ", { async: false }),
-            }}
-          />
+          // react-markdown renders to React elements (no dangerouslySetInnerHTML).
+          // Raw HTML in source is not rendered as HTML by default — exactly what
+          // we want for arbitrary tool-result strings flowing into assistant content.
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            {message.content || " "}
+          </ReactMarkdown>
         )}
         {message.status === "streaming" && (
           <span aria-label="streaming" className="inline-flex ml-2 gap-1">

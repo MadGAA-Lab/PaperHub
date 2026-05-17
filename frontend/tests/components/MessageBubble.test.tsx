@@ -51,4 +51,22 @@ describe("MessageBubble", () => {
     const article = screen.getByText(/<img/).closest("article");
     expect(article?.querySelector("img")).toBeNull();
   });
+
+  it("renders assistant raw HTML as escaped text (no script execution)", () => {
+    render(
+      <MessageBubble
+        message={{
+          role: "assistant",
+          content: "Result: <img src=x onerror=alert(1)>",
+          run_id: 1,
+          status: "ok",
+        }}
+      />,
+    );
+    const article = screen.getByText(/result/i).closest("article");
+    // No <img> element should exist — react-markdown renders it as text.
+    expect(article?.querySelector("img")).toBeNull();
+    // The literal characters should appear (react-markdown shows them as text).
+    expect(article?.textContent).toContain("<img");
+  });
 });
