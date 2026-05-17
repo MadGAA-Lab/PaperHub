@@ -1,1 +1,2 @@
-"""PaperHub backend package."""
+def hello() -> str:
+    return "Hello from paperhub!"
