@@ -27,10 +27,3 @@ Other intentional adjustments during execution:
   `patchAssistantRunId`'s "last assistant message with run_id===null" guard.
 
 Anyone reading the plan-doc alongside the diff should consult this file first.
-
-## Known follow-ups from post-merge review
-
-(Both items below were addressed in follow-up commits on the Plan B branch — no longer outstanding.)
-
-- ~~Double error surface on pre-event failure~~ — resolved: `useChatStream.ts` now splits by phase. Pre-event errors keep both surfaces (toast + bubble error); mid-stream errors are inline-only.
-- ~~Assistant content rendered via `dangerouslySetInnerHTML`~~ — resolved: `MessageBubble.tsx` uses `react-markdown` (with `remark-gfm`) for assistant content. Raw HTML in source is escaped, not executed. `marked` + `@types/marked` removed from deps.
