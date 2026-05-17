@@ -1,14 +1,17 @@
+import { Shell } from "@/components/layout/Shell";
+import { Sidebar } from "@/components/layout/Sidebar";
 import { Toaster } from "@/components/ui/sonner";
 
 function App() {
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <main className="container py-10">
-        <h1 className="text-2xl font-semibold">PaperHub</h1>
-        <p className="text-muted-foreground mt-2">Plan B in progress.</p>
-      </main>
+    <>
+      <Shell sidebar={<Sidebar />}>
+        <div className="flex flex-1 items-center justify-center text-muted-foreground">
+          ChatPage placeholder — Task 13 will render here.
+        </div>
+      </Shell>
       <Toaster />
-    </div>
+    </>
   );
 }
 
