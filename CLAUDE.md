@@ -90,16 +90,7 @@ End-to-end smoke (backend + frontend together, mocked LLM, from repo root):
 
 ## Plan A known follow-ups
 
-Non-blocking polish flagged during Plan A reviews. Pick these up in a cleanup PR or fold into Plan B as opportunity allows:
-
-1. Expose `Tracer.connection` public property → remove `# noqa: SLF001` in `agents/router.py`.
-2. Replace tracer's positional 14-tuple INSERT with named bindings (schema-evolution safety).
-3. Drop redundant `apply_schema(conn)` from `api/chat.py` (lifespan already runs it).
-4. Drop redundant `await conn.commit()` after `executescript` in `db/migrate.py`.
-5. Add explicit `ON DELETE` policy to `papers.paper_content_id`.
-6. Decide on FK constraint for `messages.run_id` (currently a soft int reference).
-7. Sanitise exception strings before writing them to `messages.content` on the error path of `api/chat.py`.
-8. Add SSE error-path + mid-stream cancellation tests for `api/chat.py`.
+All Plan A follow-ups closed during Plan C cleanup pass.
 
 ## Plan B known follow-ups
 
@@ -114,17 +105,7 @@ Tracked here. Highlights:
 
 ## Plan C known follow-ups
 
-Non-blocking polish flagged during Plan C reviews. Pick these up in a cleanup PR or fold into Plan D as opportunity allows:
-
-1. **Drop unused `chunker.target` parameter** in `pipelines/chunker.py`. The signature declares `target: int = 800` but the body only uses `hard`. Either implement target-aware early-close at natural boundaries, or drop the parameter. Spec defect carried through Task 4.
-2. **Task 8 SQLite transaction polish:** wrap `_persist_paper_content` + `_persist_chunks` in a single transaction (commit once after chunks) to eliminate the partial-write window. Replace `# type: ignore[index]` on `last_insert_rowid()` fetches with `assert row is not None` guards for consistency. Replace bare `assert` in `_link_to_session` with explicit `RuntimeError` for prod safety.
-3. **Define a `Reranker` Protocol** in `rag/reranker.py` so `retriever.py` doesn't import the private `_CrossEncoderReranker` name. Mirrors the `Embedder` Protocol pattern.
-4. **Schema migration gap:** `paper_content.abstract` was added in Plan C Task 10 but `migrate.py` uses `CREATE TABLE IF NOT EXISTS`, which silently skips column additions on pre-existing DBs. Add a proper migration step (ALTER TABLE) or a versioned migrations table before any team-shared dev DB exists.
-5. **Graph / API divergence:** `agents/graph.py` still registers `_stub_paper_search` and `_stub_paper_qa` as graph nodes; the API path bypasses the graph entirely and dispatches directly. If a future task wires `graph.ainvoke()` back into the request path (e.g., for Compare-mode in Plan G), the stubs will silently shadow the real handlers. Update graph wiring before then.
-6. **Extract `chat.py`/`papers.py` chroma-fallback helper.** The `getattr(request.app.state, "chroma", None) or ChromaStore(settings.chroma_dir)` pattern is duplicated in both files. Move to a shared `api/deps.py` helper.
-7. **`papers.py` assert in production path:** `attach_from_library` uses `assert papers_row is not None` after `INSERT OR IGNORE`+`SELECT`. Replace with `if papers_row is None: raise HTTPException(500, ...)` so `-O` mode doesn't degrade to AttributeError.
-8. **`papers.paper_content_id` FK missing `ON DELETE` policy** — generalised Plan A follow-up. Decide CASCADE vs RESTRICT and document.
-9. **`paper_qa_v1.yaml`** embeds `{chunks_context}` in the system prompt, defeating prompt caching when chunks change between turns. Move to user turn or per-call cache key when Plan E perf work lands.
+All Plan C follow-ups closed.
 
 ## Restricted operations
 
