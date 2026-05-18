@@ -1,0 +1,27 @@
+\documentclass{article}
+\usepackage{cite}
+\title{A Tiny Test Paper on Mixture of Experts}
+\author{Test Author}
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This paper presents a tiny example of a Mixture-of-Experts routing scheme,
+useful only for testing the PaperHub ingestion pipeline.
+\end{abstract}
+
+\section{Introduction}
+The Mixture-of-Experts (MoE) architecture activates only a subset of experts
+per input token. This reduces the compute cost while preserving model capacity.
+
+\section{Method}
+We propose a simple top-2 gating function that selects the two highest-scoring
+experts for each token. Expert collapse is mitigated by a load-balancing loss
+\cite{shazeer2017}.
+
+\section{Conclusion}
+The proposed scheme matches dense baselines at 30\% of the FLOPs.
+
+\bibliography{refs}
+\bibliographystyle{plain}
+\end{document}
