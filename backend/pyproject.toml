@@ -56,7 +56,4 @@ ignore_missing_imports = true
 module = ["pymupdf.*"]
 ignore_missing_imports = true
 
-[[tool.mypy.overrides]]
-module = ["sentence_transformers.*"]
-ignore_missing_imports = true
 
