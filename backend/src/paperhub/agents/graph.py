@@ -43,12 +43,6 @@ def build_graph(deps: GraphDeps) -> Any:
             collected.append(token)
         return {**state, "final_response": "".join(collected)}
 
-    async def _stub_paper_search(state: AgentState) -> AgentState:
-        return {**state, "final_response": await stub_response(state, intent="paper_search")}
-
-    async def _stub_paper_qa(state: AgentState) -> AgentState:
-        return {**state, "final_response": await stub_response(state, intent="paper_qa")}
-
     async def _stub_slides(state: AgentState) -> AgentState:
         return {**state, "final_response": await stub_response(state, intent="slides")}
 
@@ -61,18 +55,14 @@ def build_graph(deps: GraphDeps) -> Any:
     g = StateGraph(AgentState)
     g.add_node("router", _router)
     g.add_node("chitchat", _chitchat)
-    g.add_node("paper_search", _stub_paper_search)
-    g.add_node("paper_qa", _stub_paper_qa)
     g.add_node("slides", _stub_slides)
     g.add_node("library_stats", _stub_library_stats)
     g.add_edge(START, "router")
     g.add_conditional_edges("router", _route, {
         "chitchat": "chitchat",
-        "paper_search": "paper_search",
-        "paper_qa": "paper_qa",
         "slides": "slides",
         "library_stats": "library_stats",
     })
-    for terminal in ["chitchat", "paper_search", "paper_qa", "slides", "library_stats"]:
+    for terminal in ["chitchat", "slides", "library_stats"]:
         g.add_edge(terminal, END)
     return g.compile()
