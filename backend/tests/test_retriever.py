@@ -14,20 +14,17 @@ from paperhub.rag.retriever import RetrievedChunk, Retriever, _candidate_k
 # ---------------------------------------------------------------------------
 
 class _FakeEmbedder:
-    """Returns deterministic 384-dim zero vector."""
-
-    def embed(self, texts: list[str]) -> np.ndarray:
-        return np.zeros((len(texts), 384), dtype=np.float32)
-
-    def was_called(self) -> bool:
-        return self._called
+    """Returns deterministic 384-dim zero vector, tracking call count."""
 
     def __init__(self) -> None:
         self._called = False
 
-    def embed(self, texts: list[str]) -> np.ndarray:  # noqa: F811  (redef intentional)
+    def embed(self, texts: list[str]) -> np.ndarray:
         self._called = True
         return np.zeros((len(texts), 384), dtype=np.float32)
+
+    def was_called(self) -> bool:
+        return self._called
 
 
 class _FakeChromaStore:
