@@ -248,6 +248,9 @@ async def test_build_tool_schemas_delegates_to_registry() -> None:
         async def aggregate_tool_schemas(self) -> list[Any]:
             return list(canned)
 
+        async def has_tool(self, name: str) -> bool:
+            return any(s.get("function", {}).get("name") == name for s in canned)
+
     out = await build_tool_schemas(_FakeRegistry())  # type: ignore[arg-type]
     assert out == canned
 

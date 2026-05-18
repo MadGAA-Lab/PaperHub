@@ -45,16 +45,7 @@ async def get_paper_search_slot(mcp_registry: MCPRegistry) -> str:
     example assumes search-first discovery; a registry advertising only
     ``web.fetch`` would let v2 mislead the agent into calling fetch with no
     URL in hand.
-
-    Implementation note: prefers ``has_tool`` when available, otherwise falls
-    back to scanning ``aggregate_tool_schemas`` so test stubs that pre-date
-    ``has_tool`` (and only implement the aggregator) keep working.
     """
-    has_tool = getattr(mcp_registry, "has_tool", None)
-    if callable(has_tool):
-        return "paper_search/v2" if await has_tool("web.search") else "paper_search/v1"
-    schemas = await mcp_registry.aggregate_tool_schemas()
-    for entry in schemas:
-        if entry.get("function", {}).get("name") == "web.search":
-            return "paper_search/v2"
+    if await mcp_registry.has_tool("web.search"):
+        return "paper_search/v2"
     return "paper_search/v1"

@@ -59,6 +59,9 @@ class FakeRegistry:
     async def aggregate_tool_schemas(self) -> list[dict[str, Any]]:
         return list(self.schemas)
 
+    async def has_tool(self, name: str) -> bool:
+        return any(s["function"]["name"] == name for s in self.schemas)
+
     async def call(self, name: str, args: dict[str, Any]) -> Any:
         self.calls.append((name, args))
         handler = self.handlers.get(name)

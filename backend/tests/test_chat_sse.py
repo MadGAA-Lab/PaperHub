@@ -28,6 +28,9 @@ class _FakeMcpRegistry:
     async def aggregate_tool_schemas(self) -> list[Any]:
         return []
 
+    async def has_tool(self, name: str) -> bool:
+        return False
+
     async def call(self, name: str, args: dict[str, Any]) -> Any:  # pragma: no cover
         raise RuntimeError(
             f"_FakeMcpRegistry.call invoked unexpectedly for {name!r} — test "

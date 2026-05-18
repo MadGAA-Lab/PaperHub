@@ -65,6 +65,9 @@ class _FakeRegistry:
     async def aggregate_tool_schemas(self) -> list[Any]:
         return list(self._schemas)
 
+    async def has_tool(self, name: str) -> bool:
+        return any(s["function"]["name"] == name for s in self._schemas)
+
     async def call(self, name: str, args: dict[str, Any]) -> Any:
         # Late-import so per-test patches on the module-level dispatcher
         # names (e.g. ``patch("paperhub.agents.research_tools.search_library_dispatch")``)

@@ -99,6 +99,11 @@ class _FakeRegistry:
         # is fine — the LLM is mocked and asks for tools by name regardless.
         return []
 
+    async def has_tool(self, name: str) -> bool:
+        # Subgraph tests don't advertise web.search; paper_search slot
+        # selection should resolve to v1 (papers.* only).
+        return False
+
     async def call(self, name: str, args: dict[str, Any]) -> Any:
         from dataclasses import asdict, is_dataclass
 
