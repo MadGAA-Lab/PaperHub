@@ -29,6 +29,7 @@ from typing import Any
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
+from .client_context import current_client_headers_context
 from .config import MCPServerConfig
 from .errors import MCPToolError, MCPUnavailableError
 
@@ -56,6 +57,14 @@ class MCPClient:
         self._stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
         self._connected = False
+        # Headers the current session was opened with (bound to the
+        # underlying httpx client by `streamablehttp_client`). Compared
+        # against the per-request `ClientHeadersContext` on every
+        # `call_tool` so a chat request with a different session_id
+        # transparently reconnects rather than reusing the previous
+        # request's session header. ``None`` means "connected without a
+        # contextvar set" (operator smoke path).
+        self._session_headers: dict[str, str] | None = None
         # Reverse alias map: exposed-name → upstream-name, populated lazily.
         self._reverse_aliases: dict[str, str] = {
             exposed: upstream for upstream, exposed in config.aliases.items()
@@ -139,8 +148,9 @@ class MCPClient:
     async def _open_session(self, url: str) -> None:
         stack = AsyncExitStack()
         try:
+            headers = _build_outbound_headers()
             read, write, _get_session_id = await stack.enter_async_context(
-                streamablehttp_client(url)
+                streamablehttp_client(url, headers=headers)
             )
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
@@ -149,11 +159,13 @@ class MCPClient:
             raise
         self._stack = stack
         self._session = session
+        self._session_headers = headers
 
     async def _close_stack_silently(self) -> None:
         stack = self._stack
         self._stack = None
         self._session = None
+        self._session_headers = None
         if stack is None:
             return
         try:
@@ -174,6 +186,7 @@ class MCPClient:
         `MCPServerConfig.expose`, and have `MCPServerConfig.aliases`
         applied to the final tool name.
         """
+        await self._refresh_session_headers_if_drifted()
         session = self._require_session()
         result = await session.list_tools()
 
@@ -211,7 +224,16 @@ class MCPClient:
             MCPUnavailableError: on timeout or transport failure.
             MCPToolError: if the tool is not exposed, or the upstream
                 response has ``isError=True``.
+
+        Per-request header refresh: if the current
+        :class:`ClientHeadersContext` carries a different ``session_id`` /
+        ``run_id`` than the live session was opened with, the session is
+        torn down and reopened so the new headers reach the server. The
+        underlying `streamablehttp_client` binds headers to its httpx
+        client at construction time, so the only way to swap is to
+        reconnect.
         """
+        await self._refresh_session_headers_if_drifted()
         session = self._require_session()
 
         upstream_name = self._reverse_aliases.get(name, name)
@@ -275,3 +297,60 @@ class MCPClient:
                 "call connect() first"
             )
         return self._session
+
+    async def _refresh_session_headers_if_drifted(self) -> None:
+        """If the live session was opened with different headers than the
+        current :class:`ClientHeadersContext` would produce, tear it down
+        and reconnect.
+
+        Necessary because the streamable-HTTP transport binds headers to
+        its httpx client at construction time — there is no per-RPC
+        override. Different chat requests share the same registry-cached
+        :class:`MCPClient`; without this refresh, the second chat request
+        would send the first request's ``X-Paperhub-Session-Id``.
+
+        No-op when the client is not connected (the next ``connect()``
+        will pick up the current contextvar naturally), or when the
+        headers already match (the hot path: same request running multiple
+        tool calls in sequence).
+        """
+        if not self._connected:
+            return
+        desired = _build_outbound_headers()
+        if desired == self._session_headers:
+            return
+        _LOG.debug(
+            "mcp.client refreshing session headers server=%s old=%s new=%s",
+            self._config.name,
+            self._session_headers,
+            desired,
+        )
+        await self._close_stack_silently()
+        self._connected = False
+        url = self._config.url
+        assert url is not None
+        await self._open_session(url)
+        self._connected = True
+
+
+def _build_outbound_headers() -> dict[str, str] | None:
+    """Read the per-request :class:`ClientHeadersContext` and return the
+    headers dict to attach to the outbound streamable-HTTP POST, or
+    ``None`` when no context is set.
+
+    Headers are bound to the underlying httpx client at
+    `streamablehttp_client` construction time (there is no per-RPC
+    override), so the connection is opened with whatever this function
+    returns at that moment.  When a subsequent ``call_tool`` runs under a
+    different :class:`ClientHeadersContext` (typical for the
+    registry-cached MCPClient serving multiple chat requests in one
+    process), :meth:`MCPClient._refresh_session_headers_if_drifted` tears
+    the session down and reopens it so the new context wins.
+    """
+    ctx = current_client_headers_context()
+    if ctx is None:
+        return None
+    headers: dict[str, str] = {"X-Paperhub-Session-Id": str(ctx.session_id)}
+    if ctx.run_id is not None:
+        headers["X-Paperhub-Run-Id"] = str(ctx.run_id)
+    return headers

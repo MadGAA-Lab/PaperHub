@@ -33,6 +33,11 @@ from paperhub.config import load_settings
 from paperhub.db.connection import open_db
 from paperhub.db.tool_calls import drain_tool_calls_since
 from paperhub.llm.litellm_adapter import LiteLlmAdapter
+from paperhub.mcp.client_context import (
+    ClientHeadersContext,
+    reset_client_headers_context,
+    set_client_headers_context,
+)
 from paperhub.mcp.registry import MCPRegistry
 from paperhub.models.events import (
     ErrorEvent,
@@ -396,6 +401,16 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> EventSourceRespon
                 "history": [h.model_dump() for h in req.history],
             }
             last_emitted_step = -1
+            # Outbound MCP-client headers: any `MCPClient.call_tool` made
+            # by the LangGraph subgraphs below (including the loopback
+            # `papers.*` server on this same FastAPI app) reads this
+            # contextvar and forwards `X-Paperhub-Session-Id` /
+            # `X-Paperhub-Run-Id` headers — the loopback's FastMCP
+            # middleware requires the session header or it rejects with a
+            # 400 (Task v2.5-7).
+            headers_token = set_client_headers_context(
+                ClientHeadersContext(session_id=session_id, run_id=run_id),
+            )
             try:
                 router_kwargs: dict[str, Any] = {}
                 if router_mock is not None:
@@ -546,5 +561,11 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> EventSourceRespon
                 err_evt = ErrorEvent(run_id=run_id, branch="", message=safe_msg)
                 yield {"event": err_evt.type,
                        "data": err_evt.model_dump_json(exclude={"type"})}
+            finally:
+                # Reset before the async-generator returns; otherwise the
+                # contextvar would leak into the next request that happens
+                # to run on the same asyncio task (FastAPI workers pool
+                # tasks). Reset is cheap and idempotent.
+                reset_client_headers_context(headers_token)
 
     return EventSourceResponse(stream_events())

@@ -11,6 +11,12 @@ re-exported here once that module lands.
 from __future__ import annotations
 
 from .client import MCPClient
+from .client_context import (
+    ClientHeadersContext,
+    current_client_headers_context,
+    reset_client_headers_context,
+    set_client_headers_context,
+)
 from .config import MCPServerConfig, load_mcp_servers
 from .errors import MCPError, MCPToolError, MCPUnavailableError
 from .registry import MCPRegistry
@@ -23,6 +29,7 @@ from .server_context import (
 )
 
 __all__ = [
+    "ClientHeadersContext",
     "MCPClient",
     "MCPError",
     "MCPRegistry",
@@ -31,9 +38,12 @@ __all__ = [
     "MCPUnavailableError",
     "PaperhubPapersRequestContext",
     "build_paperhub_papers_server",
+    "current_client_headers_context",
     "current_request_context",
     "load_mcp_servers",
     "mount_paperhub_papers_on",
+    "reset_client_headers_context",
     "reset_request_context",
+    "set_client_headers_context",
     "set_request_context",
 ]
