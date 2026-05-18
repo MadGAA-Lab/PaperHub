@@ -64,6 +64,52 @@ def test_render_latex_falls_back_when_pandoc_exits_nonzero(
     )
 
 
+def test_render_latex_falls_back_to_raw_envelope_when_pylatexenc_fails(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """When pandoc fails AND pylatexenc crashes, render_html must still
+    produce a readable HTML file (raw-escaped LaTeX in a <pre>) and never
+    propagate the exception.
+
+    Bug from arxiv:2503.05641 (iclr2026_conference.tex): pandoc exit 252,
+    then pylatexenc IndexError deep in macro handler. POST /papers 500'd
+    and wasted 80+s of upstream download/extract work.
+    """
+    fixture = tmp_path / "hostile.tex"
+    fixture.write_text(
+        r"\documentclass{article}\begin{document}"
+        r"\some_macro_that_will_explode{}"
+        r"\end{document}",
+        encoding="utf-8",
+    )
+    out = tmp_path / "source.html"
+
+    with (
+        patch(
+            "paperhub.pipelines.renderer._render_latex_pandoc",
+            side_effect=subprocess.CalledProcessError(
+                returncode=252,
+                cmd=["pandoc"],
+                stderr="parse failed",
+            ),
+        ),
+        patch(
+            "paperhub.pipelines.renderer._render_latex_pylatexenc",
+            side_effect=IndexError("list index out of range"),
+        ),
+        caplog.at_level("WARNING", logger="paperhub.pipelines.renderer"),
+    ):
+        render_html(source=fixture, kind="latex", out_path=out)
+
+    html_text = out.read_text(encoding="utf-8")
+    assert "<!DOCTYPE html>" in html_text
+    assert "<pre" in html_text
+    # The raw LaTeX source is visible, HTML-escaped
+    assert "\\some_macro_that_will_explode" in html_text
+    # pylatexenc-failure warning was logged
+    assert any("pylatexenc failed" in r.message for r in caplog.records)
+
+
 def test_render_latex_pandoc_resolves_input_relative_to_source_dir(tmp_path: Path) -> None:
     """Pandoc must resolve \\input{...} relative to the .tex file's own directory,
     not the process cwd. Otherwise multi-file arxiv sources break silently."""

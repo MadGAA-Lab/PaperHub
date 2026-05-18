@@ -27,6 +27,7 @@ def render_html(*, source: Path, kind: Literal["latex", "pdf"], out_path: Path) 
         if shutil.which("pandoc"):
             try:
                 _render_latex_pandoc(source, out_path)
+                return out_path
             except subprocess.CalledProcessError as exc:
                 # Idiosyncratic LaTeX commonly trips pandoc with non-zero exit.
                 # Fall back to pylatexenc so the upstream pipeline (which has
@@ -39,9 +40,18 @@ def render_html(*, source: Path, kind: Literal["latex", "pdf"], out_path: Path) 
                     exc.returncode,
                     (exc.stderr or "")[:500],
                 )
-                _render_latex_pylatexenc(source, out_path)
-        else:
+        # pandoc absent OR exited non-zero — try pylatexenc.
+        try:
             _render_latex_pylatexenc(source, out_path)
+            return out_path
+        except Exception as exc:  # noqa: BLE001 — pylatexenc raises bare Exception subclasses on hostile LaTeX
+            logger.warning(
+                "pylatexenc failed on %s (%s: %s); falling back to raw-text envelope.",
+                source,
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            _render_latex_raw_envelope(source, out_path)
     else:
         raise ValueError(f"unknown kind: {kind!r}")
     return out_path
@@ -82,6 +92,23 @@ def _render_latex_pylatexenc(tex_path: Path, out_path: Path) -> None:
     # Minimal HTML envelope so the canvas can scroll-into-view by char offsets.
     escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     body = "<pre style='white-space:pre-wrap'>" + escaped + "</pre>"
+    out_path.write_text(
+        f"<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>{body}</body></html>",
+        encoding="utf-8",
+    )
+
+
+def _render_latex_raw_envelope(tex_path: Path, out_path: Path) -> None:
+    """Last-resort HTML envelope: HTML-escape the raw .tex bytes inside <pre>.
+
+    Used when both pandoc and pylatexenc fail to parse the source. Citation
+    Canvas chunk navigation still works because chunk offsets are computed
+    against the flattened LaTeX body, not this HTML view.
+    """
+    import html
+
+    raw = tex_path.read_bytes().decode("utf-8", errors="replace")
+    body = "<pre style='white-space:pre-wrap'>" + html.escape(raw) + "</pre>"
     out_path.write_text(
         f"<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>{body}</body></html>",
         encoding="utf-8",
