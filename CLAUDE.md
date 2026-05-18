@@ -15,7 +15,7 @@ The SRS is decomposed into 7 sequential plans, each producing working/testable s
 | Plan | Status | Document |
 | --- | --- | --- |
 | A — Backend foundation + Router-only chat | **complete** | [2026-05-17-paperhub-A-backend-foundation.md](docs/superpowers/plans/2026-05-17-paperhub-A-backend-foundation.md) |
-| B — Frontend foundation | pending | not yet written |
+| B — Frontend foundation | **complete** | [2026-05-18-paperhub-B-frontend-foundation.md](docs/superpowers/plans/2026-05-18-paperhub-B-frontend-foundation.md) |
 | C — Paper Pipeline + Research Agent | pending | not yet written |
 | D — Search results + Reference Sources + Citation Canvas | pending | not yet written |
 | E — SQL Agent + sqlite MCP | pending | not yet written |
@@ -60,6 +60,23 @@ Replay any past run from SQLite:
 uv run paperhub-replay --run-id <N>
 ```
 
+## Frontend quality gates
+
+Before any PR, from `frontend/`:
+
+```powershell
+npm test          # Vitest + RTL + MSW; 25 tests as of Plan B
+npm run typecheck # tsc strict
+npm run lint      # ESLint flat config
+npm run build     # Vite production build
+```
+
+End-to-end smoke (backend + frontend together, mocked LLM, from repo root):
+
+```powershell
+.\scripts\smoke_e2e.ps1
+```
+
 ## Where things live
 
 - `backend/src/paperhub/` — application code (db, models, tracing, llm, agents, api, cli)
@@ -82,6 +99,17 @@ Non-blocking polish flagged during Plan A reviews. Pick these up in a cleanup PR
 6. Decide on FK constraint for `messages.run_id` (currently a soft int reference).
 7. Sanitise exception strings before writing them to `messages.content` on the error path of `api/chat.py`.
 8. Add SSE error-path + mid-stream cancellation tests for `api/chat.py`.
+
+## Plan B known follow-ups
+
+Tracked here. Highlights:
+
+1. Bundle size 418 KB JS raw — code-split when Citation Canvas + Compare-split land.
+2. Drop dead deps in `frontend/package.json`: `autoprefixer`, `postcss`, `tailwindcss-animate`, redundant `@typescript-eslint/*`.
+3. Refactor 5 chat-store actions to a shared `updateAssistantMessage` helper.
+4. Replace hardcoded `session_id: null` in `useChatStream.ts` once backend session persistence ships.
+5. Wire `RejectionPill` when Plan E/G surfaces `status==="rejected"` tool_calls.
+6. Replace MessageBubble's inline streaming-dots markup with `<LoadingDots />`.
 
 ## Restricted operations
 
