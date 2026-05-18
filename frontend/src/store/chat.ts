@@ -51,6 +51,28 @@ function deriveTitle(content: string): string {
   return (lastSpace > 20 ? cut.slice(0, lastSpace) : cut) + "…";
 }
 
+/**
+ * Mutates a single assistant message matched by run_id inside the given
+ * session's messages array.  No-ops silently if the session or message is
+ * not found — callers don't need to guard.
+ */
+function patchMessageByRunId(
+  sessions: ChatSession[],
+  sessionId: number,
+  run_id: number,
+  patch: Partial<ChatMessage>,
+): ChatSession[] {
+  return sessions.map((sess) => {
+    if (sess.id !== sessionId) return sess;
+    return {
+      ...sess,
+      messages: sess.messages.map((m) =>
+        m.run_id === run_id && m.role === "assistant" ? { ...m, ...patch } : m,
+      ),
+    };
+  });
+}
+
 export const useChatStore = create<ChatState>()(
   persist(
     (set, get) => ({
@@ -95,82 +117,53 @@ export const useChatStore = create<ChatState>()(
 
       setRouting: (sessionId, run_id, decision) =>
         set((s) => ({
-          sessions: s.sessions.map((sess) =>
-            sess.id === sessionId
-              ? {
-                  ...sess,
-                  messages: sess.messages.map((m) =>
-                    m.run_id === run_id && m.role === "assistant"
-                      ? { ...m, routing_decision: decision }
-                      : m,
-                  ),
-                }
-              : sess,
-          ),
+          sessions: patchMessageByRunId(s.sessions, sessionId, run_id, {
+            routing_decision: decision,
+          }),
         })),
 
       appendToken: (sessionId, run_id, text) =>
-        set((s) => ({
-          sessions: s.sessions.map((sess) =>
-            sess.id === sessionId
-              ? {
-                  ...sess,
-                  messages: sess.messages.map((m) =>
-                    m.run_id === run_id && m.role === "assistant"
-                      ? { ...m, content: m.content + text }
-                      : m,
-                  ),
-                }
-              : sess,
-          ),
-        })),
+        set((s) => {
+          const sess = s.sessions.find((x) => x.id === sessionId);
+          const msg = sess?.messages.find(
+            (m) => m.run_id === run_id && m.role === "assistant",
+          );
+          if (!msg) return s;
+          return {
+            sessions: patchMessageByRunId(s.sessions, sessionId, run_id, {
+              content: msg.content + text,
+            }),
+          };
+        }),
 
       appendTrace: (sessionId, run_id, record) =>
-        set((s) => ({
-          sessions: s.sessions.map((sess) =>
-            sess.id === sessionId
-              ? {
-                  ...sess,
-                  messages: sess.messages.map((m) =>
-                    m.run_id === run_id && m.role === "assistant"
-                      ? { ...m, trace: [...(m.trace ?? []), record] }
-                      : m,
-                  ),
-                }
-              : sess,
-          ),
-        })),
+        set((s) => {
+          const sess = s.sessions.find((x) => x.id === sessionId);
+          const msg = sess?.messages.find(
+            (m) => m.run_id === run_id && m.role === "assistant",
+          );
+          if (!msg) return s;
+          return {
+            sessions: patchMessageByRunId(s.sessions, sessionId, run_id, {
+              trace: [...(msg.trace ?? []), record],
+            }),
+          };
+        }),
 
       finaliseMessage: (sessionId, run_id, content) =>
         set((s) => ({
-          sessions: s.sessions.map((sess) =>
-            sess.id === sessionId
-              ? {
-                  ...sess,
-                  messages: sess.messages.map((m) =>
-                    m.run_id === run_id && m.role === "assistant"
-                      ? { ...m, content, status: "ok" }
-                      : m,
-                  ),
-                }
-              : sess,
-          ),
+          sessions: patchMessageByRunId(s.sessions, sessionId, run_id, {
+            content,
+            status: "ok",
+          }),
         })),
 
       errorMessage: (sessionId, run_id, error) =>
         set((s) => ({
-          sessions: s.sessions.map((sess) =>
-            sess.id === sessionId
-              ? {
-                  ...sess,
-                  messages: sess.messages.map((m) =>
-                    m.run_id === run_id && m.role === "assistant"
-                      ? { ...m, status: "error", error }
-                      : m,
-                  ),
-                }
-              : sess,
-          ),
+          sessions: patchMessageByRunId(s.sessions, sessionId, run_id, {
+            status: "error",
+            error,
+          }),
         })),
 
       failPendingAssistant: (sessionId, error) =>
