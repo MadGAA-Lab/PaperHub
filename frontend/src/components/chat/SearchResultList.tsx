@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import type { SearchResultCandidate } from "@/types/domain";
-import { ingestPaper } from "@/lib/api";
+import { ingestPaper, listSessionReferences } from "@/lib/api";
 import { useChatStore } from "@/store/chat";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -17,6 +17,7 @@ function AddButton({ candidate, sessionId }: AddButtonProps) {
   );
   const addedPaperIds = useChatStore((s) => s.addedPaperIds);
   const markPaperAdded = useChatStore((s) => s.markPaperAdded);
+  const setReferences = useChatStore((s) => s.setReferences);
 
   if (candidate.auto_added) {
     return (
@@ -79,6 +80,9 @@ function AddButton({ candidate, sessionId }: AddButtonProps) {
       await ingestPaper(sessionId, candidate.paper_id);
       markPaperAdded(candidate.paper_id);
       setState("added");
+      // Refresh the reference drawer so it reflects the newly added paper
+      const refs = await listSessionReferences(sessionId);
+      setReferences(sessionId, refs);
     } catch {
       setState("error");
     }

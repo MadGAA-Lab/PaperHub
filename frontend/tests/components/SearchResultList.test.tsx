@@ -7,7 +7,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { SearchResultList } from "@/components/chat/SearchResultList";
 import { useChatStore } from "@/store/chat";
 import { API_BASE_URL } from "@/lib/api";
-import type { SearchResultCandidate } from "@/types/domain";
+import type { ReferenceItem, SearchResultCandidate } from "@/types/domain";
 
 function makeCandidate(
   overrides: Partial<SearchResultCandidate> = {},
@@ -30,17 +30,32 @@ function makeCandidate(
   };
 }
 
+const ingestResponse = {
+  paper_content_id: 1,
+  papers_id: 1,
+  cache_hit: false,
+  title: "Attention Is All You Need",
+};
+
+const sampleRefList: ReferenceItem[] = [
+  {
+    papers_id: 1,
+    paper_content_id: 1,
+    enabled: true,
+    added_at: "2024-01-01T00:00:00",
+    arxiv_id: "1706.03762",
+    title: "Attention Is All You Need",
+    year: 2017,
+    kind: "arxiv",
+  },
+];
+
 const server = setupServer(
   http.post(`${API_BASE_URL}/papers`, () =>
-    HttpResponse.json(
-      {
-        paper_content_id: 1,
-        papers_id: 1,
-        cache_hit: false,
-        title: "Attention Is All You Need",
-      },
-      { status: 201 },
-    ),
+    HttpResponse.json(ingestResponse, { status: 201 }),
+  ),
+  http.get(`${API_BASE_URL}/papers`, () =>
+    HttpResponse.json(sampleRefList),
   ),
 );
 
@@ -112,5 +127,23 @@ describe("SearchResultList", () => {
     expect(
       useChatStore.getState().addedPaperIds.has("arxiv:1706.03762"),
     ).toBe(true);
+  });
+
+  it("refreshes session references after successful add", async () => {
+    render(
+      <SearchResultList
+        candidates={[makeCandidate()]}
+        sessionId={1}
+      />,
+    );
+    const addBtn = screen.getByRole("button", { name: /add as reference/i });
+    await userEvent.click(addBtn);
+
+    // After the add resolves, the store should have the fetched reference list
+    await waitFor(() => {
+      expect(
+        useChatStore.getState().referencesBySession[1],
+      ).toEqual(sampleRefList);
+    });
   });
 });
