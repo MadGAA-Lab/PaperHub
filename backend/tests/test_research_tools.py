@@ -194,17 +194,36 @@ async def test_add_paper_unrecognised_prefix_raises(
 
 
 def test_to_fts5_query_single_token() -> None:
-    assert _to_fts5_query("transformer") == "transformer"
+    assert _to_fts5_query("transformer") == '"transformer"'
 
 
 def test_to_fts5_query_multi_word_ands() -> None:
-    assert _to_fts5_query("transformers attention") == "transformers AND attention"
+    assert _to_fts5_query("transformers attention") == '"transformers" AND "attention"'
 
 
 def test_to_fts5_query_strips_operators() -> None:
     # FTS5 special chars should be stripped, not passed through.
     # Tokens separated by spaces: special chars within each token are dropped.
-    assert _to_fts5_query('"transformers" -attention') == "transformers AND attention"
+    assert _to_fts5_query('"transformers" -attention') == '"transformers" AND "attention"'
+
+
+@pytest.mark.parametrize(
+    "query,expected_in_match",
+    [
+        ("attention AND transformer", ['"attention"', '"AND"', '"transformer"']),
+        ("attention OR transformer", ['"attention"', '"OR"', '"transformer"']),
+        ("attention NOT transformer", ['"attention"', '"NOT"', '"transformer"']),
+        ("attention NEAR transformer", ['"attention"', '"NEAR"', '"transformer"']),
+        ("Pros AND Cons", ['"Pros"', '"AND"', '"Cons"']),
+    ],
+)
+def test_to_fts5_query_quotes_reserved_keywords_as_literals(
+    query: str, expected_in_match: list[str]
+) -> None:
+    out = _to_fts5_query(query)
+    for tok in expected_in_match:
+        assert tok in out, f"expected {tok!r} as literal phrase in {out!r}"
+    assert out.count(" AND ") == len(expected_in_match) - 1
 
 
 def test_to_fts5_query_empty_returns_empty() -> None:
@@ -258,3 +277,26 @@ async def test_search_library_empty_query_returns_empty(
         session_id=session_id,
     )
     assert hits == []
+
+
+async def test_search_library_handles_reserved_keyword_queries(
+    migrated_db: aiosqlite.Connection,
+) -> None:
+    """User queries containing FTS5 reserved keywords (AND/OR/NOT/NEAR) must
+    not crash the dispatcher — they should be treated as literal tokens."""
+    session_id = await _make_session(migrated_db)
+    # Seed a paper whose text contains the literal word "AND" and "attention".
+    await _insert_paper_content(
+        migrated_db,
+        arxiv_id="2401.44444",
+        title="Attention AND Transformers",
+        abstract="We study attention and transformer interactions.",
+    )
+    # Call with a query that would previously cause an FTS5 syntax error.
+    hits = await search_library_dispatch(
+        query="attention AND transformer",
+        max_results=5,
+        conn=migrated_db,
+        session_id=session_id,
+    )
+    assert isinstance(hits, list)

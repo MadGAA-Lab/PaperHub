@@ -175,9 +175,12 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 def _to_fts5_query(query: str) -> str:
     """Sanitize a free-text query into an FTS5 MATCH expression.
 
-    Strategy: split into tokens, drop FTS5 operator characters, AND them
-    together. This gives Google-style multi-word AND semantics, which is
-    what a non-technical user expects from a search box.
+    Strategy: split into tokens, strip FTS5 operator characters, double-quote
+    each surviving token so FTS5 reserved keywords (AND/OR/NOT/NEAR) become
+    literal tokens. Join with AND for Google-style multi-word semantics.
+
+    Trade-off: this also disables FTS5 wildcards (`transformer*`) and column
+    filters. Acceptable for Plan C; a richer query DSL is a Plan F follow-up.
     """
     tokens = [
         "".join(c for c in tok if c.isalnum() or c == "_")
@@ -186,7 +189,8 @@ def _to_fts5_query(query: str) -> str:
     tokens = [t for t in tokens if t]  # drop empties
     if not tokens:
         return ""
-    return " AND ".join(tokens)
+    # Quote each token so reserved keywords (AND/OR/NOT/NEAR) are literal.
+    return " AND ".join(f'"{t}"' for t in tokens)
 
 
 async def search_library_dispatch(

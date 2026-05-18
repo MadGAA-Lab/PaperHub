@@ -422,6 +422,35 @@ async def test_get_library_q_filter_handles_multi_word(
     assert len(items) >= 1
 
 
+async def test_get_library_handles_reserved_keyword_q(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """q parameter must not crash on FTS5 reserved keywords (AND/OR/NOT/NEAR).
+    Previously these were passed unquoted to MATCH, producing a syntax error → 500."""
+    db_path = await _get_db_path(tmp_path, monkeypatch)
+
+    async with aiosqlite.connect(db_path) as conn:
+        await apply_schema(conn)
+        session_id = await _seed_session(conn)
+        await _seed_paper_content(
+            conn,
+            content_key="arxiv:1706.03762",
+            title="Attention Is All You Need",
+            arxiv_id="1706.03762",
+            abstract="transformer architecture with self-attention",
+        )
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(
+            "/papers/library",
+            params={"session_id": session_id, "q": "attention AND transformer"},
+        )
+
+    assert r.status_code == 200, r.text
+
+
 async def test_get_html_410_when_file_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
