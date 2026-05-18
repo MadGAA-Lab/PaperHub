@@ -8,6 +8,7 @@ only picks are NEVER downloaded.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections.abc import AsyncIterator
@@ -28,7 +29,7 @@ from paperhub.db.tool_calls import drain_tool_calls_since
 from paperhub.llm.adapter import LlmAdapter
 from paperhub.llm.prompts.registry import PromptRegistry
 from paperhub.pipelines.paper_pipeline import PaperPipeline
-from paperhub.rag.retriever import Retriever
+from paperhub.rag.retriever import RetrievedChunk, Retriever
 from paperhub.tracing.tracer import Tracer
 
 
@@ -401,39 +402,92 @@ async def paper_qa_stream(
 ) -> AsyncIterator[str | FinalOnlyMessage]:
     """Stream paper_qa tokens.
 
-    Workflow: resolve enabled_paper_content_ids → retrieve → rerank → format
-    chunk context → stream LLM answer with [chunk:<id>] markers.
+    N=0: yields FinalOnlyMessage (no enabled papers).
+    N=1: single-paper path — retrieve + generate, citing paper by title.
+    N>=2: map-reduce — parallel per-paper retrieval + analysis, then synthesis.
     """
     user_message = state["user_message"]
     session_id = state["session_id"]
 
+    # 1. Resolve enabled paper rows + titles in one query.
     async with tracer.step(
         agent="research", tool="paper_qa:resolve", model=None,
     ) as step:
         step.record_args({"session_id": session_id})
         async with conn.execute(
-            "SELECT paper_content_id FROM papers "
-            "WHERE session_id = ? AND enabled = 1",
+            "SELECT pc.id, pc.title FROM papers p "
+            "JOIN paper_content pc ON pc.id = p.paper_content_id "
+            "WHERE p.session_id = ? AND p.enabled = 1 "
+            "ORDER BY p.added_at",
             (session_id,),
         ) as cur:
             rows = await cur.fetchall()
-        enabled_ids = [int(r[0]) for r in rows]
-        step.record_result({"enabled_paper_content_ids": enabled_ids})
+        enabled_papers: list[tuple[int, str]] = [
+            (int(r[0]), str(r[1]) if r[1] else f"Paper {r[0]}") for r in rows
+        ]
+        step.record_result(
+            {"enabled": [{"id": i, "title": t} for i, t in enabled_papers]},
+        )
 
-    if not enabled_ids:
+    if not enabled_papers:
         yield FinalOnlyMessage(
             "No references are enabled for this session. Add a paper to the "
             "Reference Sources panel first, then ask again.",
         )
         return
 
-    placeholders = ",".join("?" * len(enabled_ids))
+    if len(enabled_papers) == 1:
+        # Single-paper path: functionally identical to old join-RAG when N=1,
+        # but now cites by title.
+        async for tok in _paper_qa_single_paper(
+            enabled_papers[0],
+            user_message=user_message,
+            adapter=adapter,
+            tracer=tracer,
+            model=model,
+            retriever=retriever,
+            conn=conn,
+            state=state,
+            **adapter_kwargs,
+        ):
+            yield tok
+        return
+
+    # N >= 2: map-reduce path.
+    async for tok in _paper_qa_map_reduce(
+        enabled_papers,
+        user_message=user_message,
+        adapter=adapter,
+        tracer=tracer,
+        model=model,
+        retriever=retriever,
+        conn=conn,
+        state=state,
+        **adapter_kwargs,
+    ):
+        yield tok
+
+
+async def _paper_qa_single_paper(
+    paper: tuple[int, str],
+    *,
+    user_message: str,
+    adapter: LlmAdapter,
+    tracer: Tracer,
+    model: str,
+    retriever: Retriever,
+    conn: aiosqlite.Connection,
+    state: AgentState,
+    **adapter_kwargs: Any,
+) -> AsyncIterator[str | FinalOnlyMessage]:
+    """Single-paper path: retrieve top-k chunks, stream LLM citing by title."""
+    pid, title = paper
+
     async with conn.execute(
-        f"SELECT COUNT(*) FROM chunks WHERE paper_content_id IN ({placeholders})",  # noqa: S608
-        enabled_ids,
+        "SELECT COUNT(*) FROM chunks WHERE paper_content_id = ?", (pid,),
     ) as cur:
-        row = await cur.fetchone()
-    corpus_size = int(row[0]) if row else 0
+        count_row = await cur.fetchone()
+    corpus_size = int(count_row[0]) if count_row else 0
 
     async with tracer.step(
         agent="research", tool="paper_qa:retrieve", model=None,
@@ -441,7 +495,7 @@ async def paper_qa_stream(
         step.record_args({"query": user_message, "corpus_size": corpus_size})
         retrieved = retriever.retrieve(
             user_message,
-            enabled_paper_content_ids=enabled_ids,
+            enabled_paper_content_ids=[pid],
             corpus_size=corpus_size,
             top_k=10,
         )
@@ -452,8 +506,7 @@ async def paper_qa_stream(
         return
 
     chunks_context = "\n\n".join(
-        f"[chunk:{r.chunk_id}] (paper {r.paper_content_id})\n{r.text}"
-        for r in retrieved
+        f"[chunk:{r.chunk_id}]\n{r.text}" for r in retrieved
     )
 
     async with tracer.step(
@@ -464,6 +517,7 @@ async def paper_qa_stream(
         async for token in adapter.stream(
             slot="paper_qa/v1",
             variables={
+                "title": title,
                 "user_message": user_message,
                 "chunks_context": chunks_context,
             },
@@ -473,4 +527,121 @@ async def paper_qa_stream(
         ):
             collected.append(token)
             yield token
+        step.record_result({"length": sum(len(c) for c in collected)})
+
+
+# Chunks per paper in the map step — balance between context size and signal.
+_K_PER_PAPER = 5
+
+
+async def _paper_qa_map_reduce(
+    papers: list[tuple[int, str]],
+    *,
+    user_message: str,
+    adapter: LlmAdapter,
+    tracer: Tracer,
+    model: str,
+    retriever: Retriever,
+    conn: aiosqlite.Connection,
+    state: AgentState,
+    **adapter_kwargs: Any,
+) -> AsyncIterator[str | FinalOnlyMessage]:
+    """Map-reduce path for N>=2 papers.
+
+    Map: fan out parallel per-paper retrieval + LLM analysis.
+    Reduce: stream synthesizer LLM over the per-paper analyses.
+    """
+
+    async def _analyze_one_paper(
+        pid: int, title: str,
+    ) -> tuple[int, str, list[RetrievedChunk], str]:
+        """Returns (paper_content_id, title, chunks, per_paper_analysis_text)."""
+        async with conn.execute(
+            "SELECT COUNT(*) FROM chunks WHERE paper_content_id = ?", (pid,),
+        ) as cur:
+            count_row = await cur.fetchone()
+        corpus = int(count_row[0]) if count_row else 0
+
+        async with tracer.step(
+            agent="research", tool="paper_qa:map", model=model,
+        ) as step:
+            step.record_args(
+                {"paper_content_id": pid, "title": title, "k": _K_PER_PAPER},
+            )
+            chunks = retriever.retrieve(
+                user_message,
+                enabled_paper_content_ids=[pid],
+                corpus_size=corpus,
+                top_k=_K_PER_PAPER,
+            )
+
+            if not chunks:
+                step.record_result({"chunk_ids": [], "analysis": "(no chunks)"})
+                return (pid, title, [], "(no relevant chunks found in this paper)")
+
+            chunks_text = "\n\n".join(
+                f"[chunk:{c.chunk_id}]\n{c.text}" for c in chunks
+            )
+            analysis_text = ""
+            async for tok in adapter.stream(
+                slot="paper_qa_per_paper/v1",
+                variables={
+                    "title": title,
+                    "chunks": chunks_text,
+                    "user_message": user_message,
+                },
+                model=model,
+                history=None,
+                **adapter_kwargs,
+            ):
+                analysis_text += tok
+            step.record_result(
+                {
+                    "chunk_ids": [c.chunk_id for c in chunks],
+                    "analysis_len": len(analysis_text),
+                },
+            )
+
+        return (pid, title, chunks, analysis_text)
+
+    # Fan out in parallel.
+    results: list[tuple[int, str, list[RetrievedChunk], str]] = list(
+        await asyncio.gather(*[_analyze_one_paper(pid, title) for pid, title in papers]),
+    )
+
+    # If every paper returned no chunks, short-circuit.
+    if all(not chunks for _, _, chunks, _ in results):
+        yield FinalOnlyMessage(
+            "No relevant chunks were found in the enabled references.",
+        )
+        return
+
+    # Build the per-paper block for the synthesizer.
+    per_paper_block = "\n\n---\n\n".join(
+        f'## "{title}"\n{analysis}' for _, title, _, analysis in results
+    )
+
+    # Reduce step: stream synthesis to the user.
+    async with tracer.step(
+        agent="research", tool="paper_qa:synthesize", model=model,
+    ) as step:
+        step.record_args(
+            {
+                "n_papers": len(results),
+                "n_chunks": sum(len(c) for _, _, c, _ in results),
+            },
+        )
+        collected: list[str] = []
+        async for tok in adapter.stream(
+            slot="paper_qa_synthesize/v1",
+            variables={
+                "user_message": user_message,
+                "per_paper_analyses": per_paper_block,
+            },
+            model=model,
+            history=state.get("history"),
+            **adapter_kwargs,
+        ):
+            collected.append(tok)
+            yield tok
         step.record_result({"length": sum(len(c) for c in collected)})
