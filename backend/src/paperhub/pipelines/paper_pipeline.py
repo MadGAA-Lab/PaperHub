@@ -43,6 +43,7 @@ class IngestResult:
     paper_content_id: int
     papers_id: int
     cache_hit: bool
+    title: str
 
 
 def compute_content_key(
@@ -99,11 +100,21 @@ class PaperPipeline:
         if row is not None:
             paper_content_id = int(row[0])
             papers_id = await self._link_to_session(req.session_id, paper_content_id)
-            return IngestResult(paper_content_id, papers_id, cache_hit=True)
+            async with self._conn.execute(
+                "SELECT title FROM paper_content WHERE id = ?",
+                (paper_content_id,),
+            ) as cur:
+                title_row = await cur.fetchone()
+            title = str(title_row[0]) if title_row is not None else ""
+            return IngestResult(
+                paper_content_id, papers_id, cache_hit=True, title=title,
+            )
 
         # Cache miss — full ingest.
-        paper_content_id, papers_id = await self._fresh_ingest(req, content_key)
-        return IngestResult(paper_content_id, papers_id, cache_hit=False)
+        paper_content_id, papers_id, title = await self._fresh_ingest(req, content_key)
+        return IngestResult(
+            paper_content_id, papers_id, cache_hit=False, title=title,
+        )
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -128,8 +139,11 @@ class PaperPipeline:
         self,
         req: IngestRequest,
         content_key: str,
-    ) -> tuple[int, int]:
-        """Run the full ingest pipeline and persist results."""
+    ) -> tuple[int, int, str]:
+        """Run the full ingest pipeline and persist results.
+
+        Returns (paper_content_id, papers_id, title).
+        """
         if req.arxiv_id is not None:
             return await self._ingest_arxiv(req, content_key)
         return await self._ingest_upload(req, content_key)
@@ -138,7 +152,7 @@ class PaperPipeline:
         self,
         req: IngestRequest,
         content_key: str,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, str]:
         assert req.arxiv_id is not None
         arxiv_id = req.arxiv_id
 
@@ -191,13 +205,13 @@ class PaperPipeline:
         )
 
         papers_id = await self._link_to_session(req.session_id, paper_content_id)
-        return paper_content_id, papers_id
+        return paper_content_id, papers_id, str(metadata.get("title", ""))
 
     async def _ingest_upload(
         self,
         req: IngestRequest,
         content_key: str,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, str]:
         assert req.upload_path is not None and req.upload_kind is not None
         sha = content_key.split(":", 1)[1]
         cache_dir = self._cache_root / "upload" / sha
@@ -257,7 +271,7 @@ class PaperPipeline:
         )
 
         papers_id = await self._link_to_session(req.session_id, paper_content_id)
-        return paper_content_id, papers_id
+        return paper_content_id, papers_id, str(metadata.get("title", ""))
 
     async def _persist_paper_content(
         self,
@@ -274,8 +288,8 @@ class PaperPipeline:
         await self._conn.execute(
             "INSERT INTO paper_content "
             "(content_key, kind, arxiv_id, sha256, title, authors_json, year, "
-            "source_path, source_dir_path, html_path) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "abstract, source_path, source_dir_path, html_path) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 content_key,
                 kind,
@@ -284,6 +298,7 @@ class PaperPipeline:
                 str(metadata.get("title", "")),
                 json.dumps(metadata.get("authors", [])),
                 metadata.get("year"),
+                str(metadata.get("abstract", "")),
                 str(source_path),
                 str(source_dir_path),
                 str(html_path),
@@ -322,4 +337,5 @@ class PaperPipeline:
             "title": r.title,
             "authors": r.authors,
             "year": r.year,
+            "abstract": r.abstract,
         }

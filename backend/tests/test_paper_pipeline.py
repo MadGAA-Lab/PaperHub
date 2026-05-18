@@ -160,6 +160,7 @@ async def test_ingest_arxiv_cache_miss_creates_paper_content_and_chunks(
         )
 
     assert result.cache_hit is False
+    assert result.title == _FAKE_ARXIV_RESULT.title
 
     # Verify paper_content row.
     async with conn.execute(
@@ -235,6 +236,8 @@ async def test_ingest_arxiv_cache_hit_skips_pipeline(
     assert result1.cache_hit is False
     assert result2.cache_hit is True
     assert result2.paper_content_id == result1.paper_content_id
+    assert result1.title == _FAKE_ARXIV_RESULT.title
+    assert result2.title == _FAKE_ARXIV_RESULT.title
 
     # download_arxiv_source must have been called exactly once (not twice).
     download_mock.assert_called_once()
