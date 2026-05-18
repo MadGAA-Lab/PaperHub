@@ -4,8 +4,10 @@ import { ChatThread } from "@/components/chat/ChatThread";
 import { Composer } from "@/components/chat/Composer";
 import { useChatStream } from "@/hooks/useChatStream";
 import { useChatStore } from "@/store/chat";
+import { useGlobalShortcuts } from "@/hooks/useGlobalShortcuts";
 
 export function ChatPage() {
+  useGlobalShortcuts();
   const sessions = useChatStore((s) => s.sessions);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const newSession = useChatStore((s) => s.newSession);

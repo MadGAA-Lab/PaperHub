@@ -121,6 +121,14 @@ describe("chat store", () => {
     );
   });
 
+  it("toggleSidebar flips sidebarCollapsed", () => {
+    expect(useChatStore.getState().sidebarCollapsed).toBe(false);
+    useChatStore.getState().toggleSidebar();
+    expect(useChatStore.getState().sidebarCollapsed).toBe(true);
+    useChatStore.getState().toggleSidebar();
+    expect(useChatStore.getState().sidebarCollapsed).toBe(false);
+  });
+
   it("removeMessage removes the message at the specified index", () => {
     const id = useChatStore.getState().newSession();
     useChatStore.getState().appendMessage(id, {

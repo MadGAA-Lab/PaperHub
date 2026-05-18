@@ -5,9 +5,9 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { ThemeToggle } from "@/components/layout/ThemeToggle";
 
-function renderWithProvider() {
+function renderWithProvider(defaultTheme = "light") {
   return render(
-    <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
+    <ThemeProvider attribute="class" defaultTheme={defaultTheme} enableSystem={false}>
       <ThemeToggle />
     </ThemeProvider>,
   );
@@ -24,13 +24,26 @@ describe("ThemeToggle", () => {
     expect(screen.getByRole("button", { name: /theme/i })).toBeInTheDocument();
   });
 
-  it("toggles the dark class on the html element on click", async () => {
-    renderWithProvider();
-    expect(document.documentElement.classList.contains("dark")).toBe(false);
-    await userEvent.click(screen.getByRole("button", { name: /theme/i }));
-    // next-themes updates classList asynchronously after the resolved theme settles.
+  it("cycles Light → Dark → System → Light over three clicks", async () => {
+    renderWithProvider("light");
+    const button = screen.getByRole("button", { name: /theme/i });
+
+    // Start: light — click → dark
+    await userEvent.click(button);
     await waitFor(() =>
       expect(document.documentElement.classList.contains("dark")).toBe(true),
+    );
+
+    // Dark → system (next-themes with enableSystem=false treats system like light)
+    await userEvent.click(button);
+    await waitFor(() =>
+      expect(button).toHaveAttribute("aria-label", expect.stringContaining("System")),
+    );
+
+    // System → light
+    await userEvent.click(button);
+    await waitFor(() =>
+      expect(button).toHaveAttribute("aria-label", expect.stringContaining("Light")),
     );
   });
 });
