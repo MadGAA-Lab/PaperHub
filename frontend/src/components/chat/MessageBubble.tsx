@@ -5,6 +5,7 @@ import { toast } from "sonner";
 
 import type { ChatMessage } from "@/types/domain";
 import { Button } from "@/components/ui/button";
+import { LoadingDots } from "@/components/states/LoadingDots";
 
 interface Props {
   message: ChatMessage;
@@ -52,15 +53,7 @@ export function MessageBubble({ message, onRetry }: Props) {
           ) : isStreamingEmpty ? (
             // Pre-token waiting state — tight three-dot cluster so it reads
             // as a real "…" typing indicator, not stretched apart.
-            <div
-              role="status"
-              aria-label="streaming"
-              className="flex items-center gap-1 py-1"
-            >
-              <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground motion-safe:animate-pulse" />
-              <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground motion-safe:animate-pulse [animation-delay:200ms]" />
-              <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground motion-safe:animate-pulse [animation-delay:400ms]" />
-            </div>
+            <LoadingDots ariaLabel="streaming" />
           ) : (
             // react-markdown renders to React elements (no dangerouslySetInnerHTML).
             // Raw HTML in source is not rendered as HTML by default — exactly what
