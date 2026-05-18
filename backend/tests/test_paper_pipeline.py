@@ -327,3 +327,89 @@ async def test_ingest_pdf_from_url_persists_pdf_upload_kind(
     ) as cur:
         papers_row = await cur.fetchone()
     assert papers_row is not None
+
+
+# ---------------------------------------------------------------------------
+# M1: behavior-level test — metadata_override skips _lookup_arxiv_metadata
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ingest_arxiv_skips_lookup_when_metadata_override_provided(
+    migrated_db: aiosqlite.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: when an IngestRequest carries a metadata_override,
+    _ingest_arxiv must skip the arxiv metadata query entirely (Bug 1 fix
+    for SS-driven adds — see commit d3834a6)."""
+    from paperhub.pipelines.paper_pipeline import ArxivMetadata
+
+    chroma = ChromaStore(tmp_path / "chroma")
+    pipeline = PaperPipeline(
+        migrated_db,
+        papers_cache_dir=tmp_path / "papers_cache",
+        chroma=chroma,
+        embedder=FakeEmbedder(),
+    )
+
+    # Stub download_arxiv_source so we don't hit the network.
+    # Copy the fixture source dir so the pipeline can parse it.
+    fake_source_dir = tmp_path / "fake_source"
+    fake_source_dir.mkdir()
+    for src in _ARXIV_SAMPLE.iterdir():
+        shutil.copy(src, fake_source_dir / src.name)
+
+    def _fake_download(arxiv_id: str, *, cache_root: Path) -> Path:
+        target = cache_root / arxiv_id / "source"
+        target.mkdir(parents=True, exist_ok=True)
+        for src in fake_source_dir.iterdir():
+            shutil.copy(src, target / src.name)
+        return target
+
+    monkeypatch.setattr(
+        "paperhub.pipelines.paper_pipeline.download_arxiv_source",
+        _fake_download,
+    )
+
+    # Guard: _lookup_arxiv_metadata must NOT be called.
+    lookup_mock = MagicMock(
+        side_effect=AssertionError(
+            "_lookup_arxiv_metadata must not be called when metadata_override is set"
+        )
+    )
+    monkeypatch.setattr(pipeline, "_lookup_arxiv_metadata", lookup_mock)
+
+    # Insert chat_sessions row so the papers FK doesn't fail.
+    await migrated_db.execute("INSERT INTO chat_sessions DEFAULT VALUES")
+    await migrated_db.commit()
+    async with migrated_db.execute("SELECT last_insert_rowid()") as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    session_id = int(row[0])
+
+    override = ArxivMetadata(
+        title="Override Title from SS",
+        abstract="An abstract that arxiv never tells us about.",
+        authors=["Alice"],
+        year=2024,
+    )
+    result = await pipeline.ingest(
+        IngestRequest(
+            session_id=session_id,
+            arxiv_id="9999.99999",
+            metadata_override=override,
+        )
+    )
+
+    assert result.title == "Override Title from SS"
+    lookup_mock.assert_not_called()
+
+    # Persisted paper_content row reflects the override.
+    async with migrated_db.execute(
+        "SELECT title, authors_json, year FROM paper_content WHERE id = ?",
+        (result.paper_content_id,),
+    ) as cur:
+        pc_row = await cur.fetchone()
+    assert pc_row is not None
+    assert pc_row[0] == "Override Title from SS"
