@@ -56,4 +56,8 @@ ignore_missing_imports = true
 module = ["pymupdf.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["pylatexenc.*"]
+ignore_missing_imports = true
+
 
