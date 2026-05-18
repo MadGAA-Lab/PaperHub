@@ -1,5 +1,9 @@
 import { useCallback, useRef } from "react";
-import type { RoutingDecision, ToolCallRecord } from "@/types/domain";
+import type {
+  RoutingDecision,
+  SearchResultCandidate,
+  ToolCallRecord,
+} from "@/types/domain";
 import { streamChat } from "@/lib/sse";
 import { useChatStore } from "@/store/chat";
 
@@ -9,6 +13,10 @@ interface RoutingData { run_id: number; branch: string; decision: RoutingDecisio
 interface TokenData { run_id: number; branch: string; text: string; }
 interface FinalData { run_id: number; branch: string; message_id: number; content: string; }
 interface ErrorData { run_id: number; branch: string; message: string; }
+interface SearchResultsData {
+  run_id: number;
+  candidates: SearchResultCandidate[];
+}
 
 export function useChatStream() {
   const abortRef = useRef<AbortController | null>(null);
@@ -69,6 +77,15 @@ export function useChatStream() {
             } else if (event === "token") {
               const t = data as TokenData;
               store.getState().appendToken(sessionId, t.run_id, t.text);
+            } else if (event === "search_results") {
+              const s = data as SearchResultsData;
+              if (runId === null) {
+                runId = s.run_id;
+                store.getState().patchAssistantRunId(sessionId, runId);
+              }
+              store
+                .getState()
+                .setSearchResults(sessionId, s.run_id, s.candidates);
             } else if (event === "final") {
               const f = data as FinalData;
               store.getState().finaliseMessage(sessionId, f.run_id, f.content);
