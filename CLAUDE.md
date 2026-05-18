@@ -32,6 +32,7 @@ When a plan is in flight, it has a corresponding `feat/plan-X-...` branch. The n
 - **Workflow:** spec → plan → subagent-driven implementation per task → spec compliance review → code quality review → next task. See [superpowers:subagent-driven-development] for the loop.
 - **System binaries:** `pandoc` is an optional dependency used by the Paper Pipeline to render LaTeX → HTML for the Citation Canvas. If absent, the pipeline falls back to `pylatexenc` (pure Python, lower quality). Install via `winget install pandoc` on Windows or your package manager elsewhere.
 - **Test discipline:** every implementation task is TDD. Failing test first, minimal impl, commit.
+- **Fix-now policy (no deferred logical issues):** If a review surfaces an issue, fix it before the next task. **Blockers must be fixed. Non-blocker LOGICAL issues must ALSO be fixed.** Only pure stylistic preferences (naming, comment wording with no semantic difference) may be deferred. Deferred logical items have a track record of becoming critical at the next stage — silent shadowing, partial-write windows, schema drift, masked errors — so we close them at source. The "known follow-ups" sections below are for items genuinely out-of-scope (e.g., waiting on a future plan's surface), not for "we'll get to it later." When in doubt, fix it now.
 
 ## Backend quality gates
 
@@ -94,14 +95,11 @@ All Plan A follow-ups closed during Plan C cleanup pass.
 
 ## Plan B known follow-ups
 
-Tracked here. Highlights:
+Items genuinely blocked on future plan surfaces (not lazy-deferred per the fix-now policy):
 
-1. Bundle size 418 KB JS raw — code-split when Citation Canvas + Compare-split land.
-2. Drop dead deps in `frontend/package.json`: `autoprefixer`, `postcss`, `tailwindcss-animate`, redundant `@typescript-eslint/*`.
-3. Refactor 5 chat-store actions to a shared `updateAssistantMessage` helper.
-4. Replace hardcoded `session_id: null` in `useChatStream.ts` once backend session persistence ships.
-5. Wire `RejectionPill` when Plan E/G surfaces `status==="rejected"` tool_calls.
-6. Replace MessageBubble's inline streaming-dots markup with `<LoadingDots />`.
+1. Bundle code-split (currently ~418 KB raw JS) — natural split point lands with Plan D's Citation Canvas component (lazy-load via React.lazy + Suspense). Cannot split usefully before that surface exists.
+2. Replace hardcoded `session_id: null` in `useChatStream.ts` once backend session-creation API ships. Backend currently auto-creates a session per chat request; once `POST /sessions` exists, frontend should create + persist a session id.
+3. `RejectionPill` is wired but unreachable until Plan E SQL-allowlist or Plan G MCP-permission rejects a tool_call with `status="rejected"`. No frontend change needed; verify the pill renders when those plans land.
 
 ## Plan C known follow-ups
 
