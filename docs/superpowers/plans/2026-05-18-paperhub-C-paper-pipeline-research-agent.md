@@ -3366,6 +3366,26 @@ Additional regression coverage in `tests/test_research_tools.py` — the existin
 
 **Acceptance:** an operator following only CLAUDE.md + README.md can clone the repo, start the backend, run `scripts/smoke_mcp_papers.ps1` and see it pass; install open-webSearch + run `open-websearch serve`, then run `scripts/smoke_mcp_web.ps1` and see it pass; restart the backend and observe v2 paper_search behaviour without reading any other docs.
 
+### Task v2.5-7 — MCPClient header forwarding for loopback session/run context **[ADDED MID-EXECUTION]**
+
+**Why this task exists:** v2.5-6 implementer surfaced a production bug — `MCPClient` did not forward custom HTTP headers, so the agent's loopback dispatch to `papers.search_library` was being rejected with HTTP 400 by the FastMCP middleware (which requires `X-Paperhub-Session-Id`). The bug was masked by `_FakeRegistry` test stubs that bypass the MCP wire.
+
+**Goal:** propagate per-request `session_id` + `run_id` from the chat endpoint through `MCPRegistry.call(...)` → `MCPClient.call_tool(...)` into outbound HTTP headers, using a ContextVar pattern symmetric to the existing inbound `server_context.py`.
+
+**Files:**
+- New: `backend/src/paperhub/mcp/client_context.py` — `ClientHeadersContext` frozen dataclass + `set_/reset_/current_client_headers_context()` over a `ContextVar`. Returns `None` on unset (smoke-script friendly).
+- Modify: `backend/src/paperhub/mcp/client.py` — `_open_session` reads contextvar + passes `headers=` to `streamablehttp_client`. New `_refresh_session_headers_if_drifted` reconnects when contextvar diverges from cached connection's bound headers (under `asyncio.Lock` for concurrent-request safety, with double-checked locking).
+- Modify: `backend/src/paperhub/mcp/__init__.py` — re-export new symbols.
+- Modify: `backend/src/paperhub/api/chat.py` — set/reset contextvar around the agent invocation.
+
+**Tests:**
+- `tests/mcp/test_client_context.py` — unit tests (frozen, isolation across `asyncio.gather`, None-on-unset).
+- `tests/mcp/test_client_headers.py` — integration: fake stub captures request headers, asserts forwarding + drift-reconnect + concurrent-lock semantics.
+- `tests/api/test_chat_mcp_headers.py` — chat endpoint sets contextvar with live session/run ids; resets on error.
+- `tests/api/test_chat_mcp_loopback.py` — **load-bearing end-to-end test**: real uvicorn server, real httpx, real FastMCP middleware, asserts `tool_calls` row written under matching session_id. This is the test that would have caught the bug originally.
+
+**Acceptance:** `uv run pytest -v` clean (282 passing). Loopback test proves the production path works.
+
 ### Quality gates after the v2.5 round
 
 From `backend/`:

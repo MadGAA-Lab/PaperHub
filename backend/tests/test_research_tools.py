@@ -24,7 +24,10 @@ from paperhub.pipelines.paper_pipeline import (
 )
 from paperhub.pipelines.semantic_scholar import SemanticScholarMetadata
 
-pytestmark = pytest.mark.asyncio
+# Note: pyproject sets ``asyncio_mode = "auto"`` — async test functions are
+# auto-marked, so no module-level ``pytestmark`` is needed. Applying one would
+# emit ``PytestWarning: marked with '@pytest.mark.asyncio' but it is not an
+# async function`` for every sync test in this file.
 
 
 async def _insert_paper_content(

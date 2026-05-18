@@ -11,7 +11,6 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosqlite
-import pytest
 
 from paperhub.agents.research import (
     FinalOnlyMessage,
@@ -27,7 +26,10 @@ from paperhub.agents.research_tools import (
 )
 from paperhub.tracing.tracer import Tracer
 
-pytestmark = pytest.mark.asyncio
+# Note: pyproject sets ``asyncio_mode = "auto"`` — async test functions are
+# auto-marked, so no module-level ``pytestmark`` is needed. Applying one would
+# emit ``PytestWarning: marked with '@pytest.mark.asyncio' but it is not an
+# async function`` for every sync test in this file.
 
 
 class _FakeRegistry:

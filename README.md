@@ -11,8 +11,9 @@ PaperHub is built UX-first. Every retrieved chunk has a clickable provenance tra
 | Layer | Status |
 | --- | --- |
 | Backend foundation (FastAPI + LangGraph + SQLite + Tracer + Router) | Plan A complete |
-| Paper Pipeline + Research Agent | Plan C — not started |
-| Frontend (React + Vite + Tailwind + Zustand) | Plan B — not started |
+| Frontend (React + Vite + Tailwind + Zustand) | Plan B complete |
+| Paper Pipeline + Research Agent | Plan C complete (v2.5/v2.6 follow-ups land MCP layer + open-webSearch integration) |
+| Search results + Reference Sources + Citation Canvas | Plan D — not started |
 | SQL Agent + library_stats | Plan E — not started |
 | Slide Pipeline + Report Agent | Plan F — not started |
 | Compare view + MCP surfaces | Plan G — not started |
