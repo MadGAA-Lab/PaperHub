@@ -27,6 +27,16 @@ export function ReferenceSourcesDrawer({ backendSessionId }: Props) {
       ? (referencesBySession[backendSessionId] ?? [])
       : [];
 
+  // Close drawer on Escape key
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [open]);
+
   async function refreshRefs() {
     if (backendSessionId === null) return;
     try {

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
@@ -105,5 +105,31 @@ describe("LibraryBrowserModal", () => {
       expect(onAttached).toHaveBeenCalledTimes(1);
       expect(onClose).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("closes on Escape key", () => {
+    server.use(
+      http.get(`${API_BASE_URL}/papers/library`, () =>
+        HttpResponse.json(sampleItems),
+      ),
+    );
+
+    const onClose = vi.fn();
+    render(
+      <LibraryBrowserModal
+        open
+        onClose={onClose}
+        backendSessionId={1}
+        onAttached={vi.fn()}
+      />,
+    );
+
+    // Modal is open
+    expect(screen.getByRole("dialog", { name: /add from library/i })).toBeInTheDocument();
+
+    // Press Escape
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

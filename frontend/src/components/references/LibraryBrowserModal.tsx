@@ -27,6 +27,16 @@ export function LibraryBrowserModal({
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevOpenRef = useRef(false);
 
+  // Close modal on Escape key
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [open, onClose]);
+
   const fetchLibrary = useCallback(
     async (query: string) => {
       setLoading(true);
