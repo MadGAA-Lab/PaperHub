@@ -284,6 +284,147 @@ async def test_call_tool_does_not_reconnect_within_same_request(
     assert len(captures) == 1, captures
 
 
+async def test_concurrent_drift_refresh_serializes_under_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent ``call_tool`` invocations on **one shared** `MCPClient`
+    (the registry-cached production scenario) with different
+    `ClientHeadersContext` values must NOT interleave their
+    `_close_stack_silently` + `_open_session` sequences.
+
+    The race the lock prevents:
+      1. Task A enters `_refresh_session_headers_if_drifted`, sees drift,
+         calls `_close_stack_silently` → stack is None.
+      2. Task B enters the same method, sees drift (it's also still
+         drifted from `_session_headers`), starts its own close/open.
+      3. Task A calls `_open_session`, installs stack_A + session_A.
+      4. Task B's `_close_stack_silently` runs **after** A's open and
+         tears down stack_A; B then opens stack_B.
+      5. Task A's `session.call_tool` runs on session_A whose underlying
+         transport (stack_A) was just torn down by B → silent failure.
+
+    Detection: we instrument `_open_session` and `_close_stack_silently`
+    so they each record a (task_id, phase) entry. Under serialization we
+    see one task's full ``[open, close, open]`` block before the other's;
+    under the race we see interleaving like ``[open_A, close_A, open_B,
+    close_B (which tears A down!), open_B again]`` — i.e. more than the
+    expected number of operations, or an open immediately followed by a
+    sibling's close.
+
+    With the lock: exactly 3 operations total (1 initial connect + 1
+    close + 1 open for the second context). Without the lock: 5
+    operations (1 initial connect + 2 closes + 2 opens — both tasks
+    independently refresh).
+    """
+    from paperhub.mcp import client as client_mod
+
+    # Record (op, task_name) for every transport-level operation on the
+    # shared client. We watch the SEQUENCE to detect interleaving.
+    ops: list[tuple[str, str]] = []
+
+    @asynccontextmanager
+    async def _factory(
+        url: str,
+        headers: dict[str, str] | None = None,
+        **_: Any,
+    ) -> Any:
+        # Yield to maximize the chance a sibling task interleaves.
+        await asyncio.sleep(0)
+        yield (MagicMock(), MagicMock(), lambda: None)
+
+    def _session_ctor(read: Any, write: Any, *args: Any, **kwargs: Any) -> _FakeSession:
+        return _FakeSession()
+
+    monkeypatch.setattr(client_mod, "streamablehttp_client", _factory)
+    monkeypatch.setattr(client_mod, "ClientSession", _session_ctor)
+
+    # Instrument the two transport-level methods to record ordering.
+    real_open = client_mod.MCPClient._open_session
+    real_close = client_mod.MCPClient._close_stack_silently
+
+    async def _trace_open(self: MCPClient, url: str) -> None:
+        task = asyncio.current_task()
+        name = task.get_name() if task else "?"
+        ops.append(("open_start", name))
+        await real_open(self, url)
+        ops.append(("open_end", name))
+
+    async def _trace_close(self: MCPClient) -> None:
+        task = asyncio.current_task()
+        name = task.get_name() if task else "?"
+        ops.append(("close_start", name))
+        await real_close(self)
+        ops.append(("close_end", name))
+
+    monkeypatch.setattr(client_mod.MCPClient, "_open_session", _trace_open)
+    monkeypatch.setattr(
+        client_mod.MCPClient, "_close_stack_silently", _trace_close,
+    )
+
+    # ONE shared client across both tasks — this is the registry scenario.
+    client = MCPClient(_cfg())
+
+    # Establish an initial session under a *third* context so both
+    # gathered tasks' drift-refresh paths are exercised concurrently.
+    # (Without this pre-connect, the two tasks would race inside
+    # `connect()` itself, which is a separate concern outside this
+    # test's scope — `connect()` is called once at registry startup
+    # in production, not from request-handling tasks.)
+    bootstrap_token = set_client_headers_context(
+        ClientHeadersContext(session_id=999, run_id=None),
+    )
+    try:
+        await client.connect()
+    finally:
+        reset_client_headers_context(bootstrap_token)
+
+    # Clear the bootstrap trace so we only inspect the concurrent
+    # drift-refresh activity.
+    ops.clear()
+
+    async def call_with_context(session_id: int) -> None:
+        ctx = ClientHeadersContext(session_id=session_id, run_id=None)
+        token = set_client_headers_context(ctx)
+        try:
+            await client.call_tool("search_library", {"query": "x"})
+        finally:
+            reset_client_headers_context(token)
+
+    t1 = asyncio.create_task(call_with_context(session_id=1), name="task-1")
+    t2 = asyncio.create_task(call_with_context(session_id=2), name="task-2")
+    await asyncio.gather(t1, t2)
+    await client.disconnect()
+
+    # Filter to drift-refresh ops only (skip the disconnect's close at
+    # the end and the initial connect's open). Across both tasks we
+    # expect: zero, one, or two refreshes — but never an interleaved
+    # close from one task between another task's open_start and
+    # open_end (or vice versa). The lock guarantees that within a
+    # close-open sequence, no sibling task's close or open appears.
+    in_progress: dict[str, str] = {}  # task_name -> current op
+    for op, name in ops:
+        if op.endswith("_start"):
+            kind = op[: -len("_start")]
+            # No other task can have a transport op in flight when we
+            # start one.
+            other_in_progress = {n: k for n, k in in_progress.items() if n != name}
+            assert not other_in_progress, (
+                f"transport op {op} by {name} interleaved with "
+                f"{other_in_progress} — drift-refresh race"
+            )
+            in_progress[name] = kind
+        elif op.endswith("_end"):
+            kind = op[: -len("_end")]
+            assert in_progress.get(name) == kind, (
+                f"unbalanced trace: {op} by {name}, in_progress={in_progress}"
+            )
+            del in_progress[name]
+
+    # Final sanity: both call_tools completed without raising — gather
+    # would have re-raised otherwise. And the final state is connected.
+    assert client.connected is False  # disconnect ran at the end
+
+
 async def test_concurrent_clients_see_isolated_headers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

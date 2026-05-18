@@ -69,6 +69,16 @@ class MCPClient:
         self._reverse_aliases: dict[str, str] = {
             exposed: upstream for upstream, exposed in config.aliases.items()
         }
+        # Serializes drift-refresh reconnects. The registry caches one
+        # `MCPClient` per server name across every FastAPI request, and
+        # each request runs on its own asyncio task — without this lock,
+        # two concurrent requests whose contextvars both drift from the
+        # live session can interleave their tear-down/reopen and end up
+        # calling `session.call_tool` on a stack the sibling just closed.
+        # Created lazily on first use so the lock binds to whatever event
+        # loop actually drives the client, not whatever loop (if any) was
+        # current when the registry constructed the client.
+        self._refresh_lock: asyncio.Lock | None = None
 
     @property
     def name(self) -> str:
@@ -313,24 +323,56 @@ class MCPClient:
         will pick up the current contextvar naturally), or when the
         headers already match (the hot path: same request running multiple
         tool calls in sequence).
+
+        Concurrency: the drift-check + reconnect is serialized under
+        ``self._refresh_lock`` so two concurrent FastAPI requests sharing
+        the registry-cached client cannot interleave a tear-down + reopen
+        (one task closing the stack the other just refreshed). A
+        double-checked locking pattern keeps the fast path lock-free when
+        headers already match, and lets a second waiter that already has
+        the right headers skip the redundant reconnect after the first
+        waiter releases the lock.
         """
         if not self._connected:
             return
         desired = _build_outbound_headers()
         if desired == self._session_headers:
             return
-        _LOG.debug(
-            "mcp.client refreshing session headers server=%s old=%s new=%s",
-            self._config.name,
-            self._session_headers,
-            desired,
-        )
-        await self._close_stack_silently()
-        self._connected = False
-        url = self._config.url
-        assert url is not None
-        await self._open_session(url)
-        self._connected = True
+        if self._refresh_lock is None:
+            # Bind to the running loop on first use; safe because we
+            # already awaited (no synchronous race possible here under
+            # cooperative scheduling).
+            self._refresh_lock = asyncio.Lock()
+        async with self._refresh_lock:
+            # Re-check after acquiring the lock: a sibling task may have
+            # just reconnected with headers that happen to match ours.
+            desired = _build_outbound_headers()
+            if desired == self._session_headers:
+                return
+            _LOG.debug(
+                "mcp.client refreshing session headers server=%s old=%s new=%s",
+                self._config.name,
+                self._session_headers,
+                desired,
+            )
+            url = self._config.url
+            assert url is not None
+            # `_connected` stays True across the swap so a sibling task
+            # reading `_connected` (e.g. another `call_tool`'s fast-path
+            # `if not self._connected: return`) doesn't observe the
+            # in-flight tear-down/reopen as "disconnected". The lock
+            # already excludes another refresh from running concurrently;
+            # holding `_connected=True` is the right surface for the
+            # `_require_session` check that runs after this returns.
+            await self._close_stack_silently()
+            try:
+                await self._open_session(url)
+            except BaseException:
+                # Reopen failed — the live state is inconsistent
+                # (closed stack, `_session=None`). Surface that to the
+                # caller via `_require_session` on the next op.
+                self._connected = False
+                raise
 
 
 def _build_outbound_headers() -> dict[str, str] | None:
