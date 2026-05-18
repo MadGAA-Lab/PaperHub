@@ -16,7 +16,7 @@ from paperhub.agents.research_tools import (
 from paperhub.api.deps import get_chroma
 from paperhub.config import load_settings
 from paperhub.db.connection import open_db
-from paperhub.pipelines.paper_pipeline import PaperPipeline
+from paperhub.pipelines.paper_pipeline import ArxivMetadata, PaperPipeline
 
 router = APIRouter(prefix="/papers", tags=["papers"])
 
@@ -25,6 +25,15 @@ class IngestBody(BaseModel):
     session_id: int
     paper_id: str | None = None  # preferred: "arxiv:<id>" | "library:<pc_id>"
     arxiv_id: str | None = None  # legacy alias
+    # Optional metadata-from-source — lets the caller (frontend or an MCP
+    # client) supply title/abstract/authors/year so the backend doesn't have
+    # to re-fetch from arXiv just to populate paper_content.
+    # Per Bug 1 follow-up M2: any caller that already has the metadata
+    # (Search results, library browse, etc.) should send it.
+    title: str | None = None
+    abstract: str | None = None
+    authors: list[str] | None = None
+    year: int | None = None
 
     @model_validator(mode="after")
     def _exactly_one(self) -> IngestBody:
@@ -105,9 +114,25 @@ async def list_session_references(
 @router.post("", response_model=IngestResponse, status_code=201)
 async def ingest_paper(body: IngestBody, request: Request) -> IngestResponse:
     """Ingest a paper. Accepts paper_id (preferred) or legacy arxiv_id.
-    Cache-aware: second call with the same identifier returns cache_hit=True."""
+    Cache-aware: second call with the same identifier returns cache_hit=True.
+    Optional title/abstract/authors/year fields are forwarded as
+    metadata_override so the arxiv: path can skip the arXiv metadata
+    API call when the caller already has the metadata (M2 fix)."""
     # Normalise: if legacy arxiv_id supplied, convert to paper_id format.
     paper_id = body.paper_id or f"arxiv:{body.arxiv_id}"
+
+    # Build metadata_override from optional fields when the caller supplies them.
+    # Only applies to the arxiv: branch (the dispatcher ignores it for ss: and
+    # library: prefixes — SS metadata is authoritative for ss:, and library:
+    # doesn't ingest).
+    metadata_override: ArxivMetadata | None = None
+    if body.title is not None:
+        metadata_override = ArxivMetadata(
+            title=body.title,
+            abstract=body.abstract or "",
+            authors=body.authors or [],
+            year=body.year,
+        )
 
     settings = load_settings()
     try:
@@ -122,6 +147,7 @@ async def ingest_paper(body: IngestBody, request: Request) -> IngestResponse:
                 pipeline=pipeline,
                 conn=conn,
                 session_id=body.session_id,
+                metadata_override=metadata_override,
             )
     except NoIngestibleSourceError as exc:
         raise HTTPException(

@@ -77,7 +77,12 @@ function AddButton({ candidate, sessionId }: AddButtonProps) {
   async function doIngest() {
     setState("loading");
     try {
-      await ingestPaper(sessionId, candidate.paper_id);
+      await ingestPaper(sessionId, candidate.paper_id, {
+        title: candidate.title,
+        abstract: candidate.abstract,
+        authors: candidate.authors,
+        year: candidate.year,
+      });
       markPaperAdded(candidate.paper_id);
       setState("added");
       // Refresh the reference drawer so it reflects the newly added paper

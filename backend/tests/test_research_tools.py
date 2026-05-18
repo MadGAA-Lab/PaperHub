@@ -15,6 +15,7 @@ from paperhub.agents.research_tools import (
     search_library_dispatch,
 )
 from paperhub.pipelines.paper_pipeline import (
+    ArxivMetadata,
     IngestRequest,
     IngestResult,
     PaperPipeline,
@@ -450,6 +451,70 @@ async def test_search_library_empty_query_returns_empty(
         session_id=session_id,
     )
     assert hits == []
+
+
+async def test_add_paper_to_session_dispatch_arxiv_threads_metadata_override(
+    migrated_db: aiosqlite.Connection,
+) -> None:
+    """arxiv: branch forwards caller-supplied metadata_override to the
+    pipeline so the arXiv metadata API is skipped (M2 fix)."""
+    session_id = await _make_session(migrated_db)
+    pipeline = MagicMock(spec=PaperPipeline)
+    pipeline.ingest = AsyncMock(
+        return_value=IngestResult(
+            paper_content_id=55, papers_id=66, cache_hit=False,
+            title="Override Title",
+        ),
+    )
+
+    override = ArxivMetadata(
+        title="Override Title",
+        abstract="Override abstract.",
+        authors=["Alice", "Bob"],
+        year=2023,
+    )
+    result = await add_paper_to_session_dispatch(
+        "arxiv:2301.00001",
+        pipeline=pipeline,
+        conn=migrated_db,
+        session_id=session_id,
+        metadata_override=override,
+    )
+
+    pipeline.ingest.assert_awaited_once()
+    call_args = pipeline.ingest.await_args
+    assert call_args is not None
+    sent: IngestRequest = call_args.args[0]
+    assert isinstance(sent, IngestRequest)
+    assert sent.metadata_override is override
+    assert result.paper_content_id == 55
+    assert result.title == "Override Title"
+
+
+async def test_add_paper_to_session_dispatch_arxiv_no_override_passes_none(
+    migrated_db: aiosqlite.Connection,
+) -> None:
+    """arxiv: branch without a caller-supplied override passes
+    metadata_override=None to the pipeline (regression guard)."""
+    session_id = await _make_session(migrated_db)
+    pipeline = MagicMock(spec=PaperPipeline)
+    pipeline.ingest = AsyncMock(
+        return_value=IngestResult(
+            paper_content_id=77, papers_id=88, cache_hit=False, title="No Override",
+        ),
+    )
+
+    await add_paper_to_session_dispatch(
+        "arxiv:2301.99999",
+        pipeline=pipeline,
+        conn=migrated_db,
+        session_id=session_id,
+    )
+
+    call_args = pipeline.ingest.await_args
+    assert call_args is not None
+    sent: IngestRequest = call_args.args[0]
+    assert sent.metadata_override is None
 
 
 async def test_search_library_handles_reserved_keyword_queries(

@@ -721,3 +721,93 @@ async def test_post_papers_rejects_both_paper_id_and_arxiv_id(
         )
 
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# M2: POST /papers metadata threading tests
+# ---------------------------------------------------------------------------
+
+
+async def test_post_papers_passes_metadata_to_pipeline_when_provided(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /papers with title/abstract/authors/year set → dispatcher receives
+    a metadata_override matching the body fields (M2 fix: skip arXiv API)."""
+    db_path = await _get_db_path(tmp_path, monkeypatch)
+
+    async with aiosqlite.connect(db_path) as conn:
+        await apply_schema(conn)
+        await _seed_session(conn)  # session_id=1
+
+    captured_req: list[Any] = []
+
+    async def _fake_ingest(self: Any, req: Any) -> IngestResult:
+        captured_req.append(req)
+        return IngestResult(
+            paper_content_id=1, papers_id=1, cache_hit=False,
+            title=req.metadata_override.title if req.metadata_override else "?",
+        )
+
+    import paperhub.pipelines.paper_pipeline as pipeline_module
+
+    with patch.object(pipeline_module.PaperPipeline, "ingest", _fake_ingest):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                "/papers",
+                json={
+                    "session_id": 1,
+                    "paper_id": "arxiv:1706.03762",
+                    "title": "Attention Is All You Need",
+                    "abstract": "Transformer model paper.",
+                    "authors": ["Vaswani", "Shazeer"],
+                    "year": 2017,
+                },
+            )
+
+    assert r.status_code == 201
+    assert r.json()["title"] == "Attention Is All You Need"
+    assert len(captured_req) == 1
+    req = captured_req[0]
+    assert req.metadata_override is not None
+    assert req.metadata_override.title == "Attention Is All You Need"
+    assert req.metadata_override.abstract == "Transformer model paper."
+    assert req.metadata_override.authors == ["Vaswani", "Shazeer"]
+    assert req.metadata_override.year == 2017
+
+
+async def test_post_papers_legacy_body_without_metadata_still_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: POST /papers without optional metadata fields still
+    works and passes metadata_override=None to the pipeline."""
+    db_path = await _get_db_path(tmp_path, monkeypatch)
+
+    async with aiosqlite.connect(db_path) as conn:
+        await apply_schema(conn)
+        await _seed_session(conn)  # session_id=1
+
+    captured_req: list[Any] = []
+
+    async def _fake_ingest(self: Any, req: Any) -> IngestResult:
+        captured_req.append(req)
+        return IngestResult(
+            paper_content_id=1, papers_id=1, cache_hit=False, title="GPT-3",
+        )
+
+    import paperhub.pipelines.paper_pipeline as pipeline_module
+
+    with patch.object(pipeline_module.PaperPipeline, "ingest", _fake_ingest):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                "/papers",
+                json={"session_id": 1, "paper_id": "arxiv:2005.14165"},
+            )
+
+    assert r.status_code == 201
+    assert r.json()["title"] == "GPT-3"
+    assert len(captured_req) == 1
+    assert captured_req[0].metadata_override is None

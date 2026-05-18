@@ -74,10 +74,26 @@ export async function attachFromLibrary(
 export async function ingestPaper(
   sessionId: number,
   paperId: string,
+  metadata?: {
+    title: string;
+    abstract: string | null;
+    authors: string[];
+    year: number | null;
+  },
 ): Promise<IngestResult> {
+  const body: Record<string, unknown> = {
+    session_id: sessionId,
+    paper_id: paperId,
+  };
+  if (metadata) {
+    body.title = metadata.title;
+    body.abstract = metadata.abstract;
+    body.authors = metadata.authors;
+    body.year = metadata.year;
+  }
   return apiFetch<IngestResult>("/papers", {
     method: "POST",
-    body: JSON.stringify({ session_id: sessionId, paper_id: paperId }),
+    body: JSON.stringify(body),
   });
 }
 

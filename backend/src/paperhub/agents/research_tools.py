@@ -436,6 +436,7 @@ async def add_paper_to_session_dispatch(
     pipeline: PaperPipeline,
     conn: aiosqlite.Connection,
     session_id: int,
+    metadata_override: ArxivMetadata | None = None,
 ) -> AddResult:
     """Resolve a prefixed paper_id and attach it to the session.
 
@@ -444,6 +445,13 @@ async def add_paper_to_session_dispatch(
       - the chat endpoint's paper_search branch for ``finalize: true`` picks
 
     NOT exposed to the LLM as a tool (v2.4 design: read-only agent).
+
+    ``metadata_override`` is forwarded to the ``arxiv:`` branch so the
+    caller (POST /papers, chat auto-attach) can supply title/abstract/
+    authors/year when it already has them, skipping the arXiv metadata
+    API round-trip.  The ``ss:`` branch builds its own override from SS
+    metadata (which is authoritative for that paper_id) and ignores the
+    caller-supplied value.  The ``library:`` branch ignores it (no ingest).
 
     Prefix discriminator:
       - ``library:<paper_content_id>`` — cache-hit insert papers row
@@ -464,6 +472,7 @@ async def add_paper_to_session_dispatch(
             pipeline=pipeline,
             conn=conn,
             session_id=session_id,
+            metadata_override=metadata_override,
         )
 
     if paper_id.startswith("ss:"):

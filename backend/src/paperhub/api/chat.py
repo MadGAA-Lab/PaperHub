@@ -38,7 +38,7 @@ from paperhub.models.events import (
     SessionEvent,
     TokenEvent,
 )
-from paperhub.pipelines.paper_pipeline import PaperPipeline
+from paperhub.pipelines.paper_pipeline import ArxivMetadata, PaperPipeline
 from paperhub.rag.retriever import Retriever
 from paperhub.tracing.redactor import redact
 from paperhub.tracing.tracer import Tracer
@@ -169,11 +169,25 @@ async def _process_search_results(
     for c in marked:
         if c.finalize and not c.already_in_session:
             try:
+                # For arxiv: candidates the SearchCandidate already carries
+                # metadata from SS.  Pass it as metadata_override so the
+                # pipeline skips the arXiv metadata API round-trip (M2 fix).
+                # ss: and library: prefixes are left as None — the dispatcher
+                # handles them without a caller-supplied override.
+                md: ArxivMetadata | None = None
+                if c.paper_id.startswith("arxiv:"):
+                    md = ArxivMetadata(
+                        title=c.title,
+                        abstract=c.abstract or "",
+                        authors=list(c.authors),
+                        year=c.year,
+                    )
                 result = await add_paper_to_session_dispatch(
                     c.paper_id,
                     pipeline=pipeline,
                     conn=conn,
                     session_id=session_id,
+                    metadata_override=md,
                 )
                 enriched.append(
                     replace(c, auto_added=True, papers_id=result.papers_id),

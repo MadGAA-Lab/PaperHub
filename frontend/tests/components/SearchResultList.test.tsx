@@ -146,4 +146,36 @@ describe("SearchResultList", () => {
       ).toEqual(sampleRefList);
     });
   });
+
+  it("sends candidate metadata in POST /papers body", async () => {
+    // Intercept the POST and capture the parsed body.
+    const capturedBodies: unknown[] = [];
+    server.use(
+      http.post(`${API_BASE_URL}/papers`, async ({ request }) => {
+        capturedBodies.push(await request.json());
+        return HttpResponse.json(ingestResponse, { status: 201 });
+      }),
+    );
+
+    const candidate = makeCandidate({
+      paper_id: "arxiv:1706.03762",
+      title: "Attention Is All You Need",
+      abstract: "The dominant sequence transduction models...",
+      authors: ["Vaswani", "Shazeer", "Parmar"],
+      year: 2017,
+    });
+
+    render(<SearchResultList candidates={[candidate]} sessionId={1} />);
+    const addBtn = screen.getByRole("button", { name: /add as reference/i });
+    await userEvent.click(addBtn);
+
+    await waitFor(() => expect(capturedBodies.length).toBeGreaterThan(0));
+
+    const body = capturedBodies[0] as Record<string, unknown>;
+    expect(body.paper_id).toBe("arxiv:1706.03762");
+    expect(body.title).toBe("Attention Is All You Need");
+    expect(body.abstract).toBe("The dominant sequence transduction models...");
+    expect(body.authors).toEqual(["Vaswani", "Shazeer", "Parmar"]);
+    expect(body.year).toBe(2017);
+  });
 });
