@@ -476,3 +476,168 @@ async def test_get_html_410_when_file_missing(
         r = await client.get(f"/papers/content/{paper_content_id}/html")
 
     assert r.status_code == 410
+
+
+# ---------------------------------------------------------------------------
+# v2.4-4 tests — GET /papers + POST /papers paper_id discrimination
+# ---------------------------------------------------------------------------
+
+
+async def test_list_session_references_returns_attached_papers_joined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /papers?session_id=N returns all papers joined to paper_content."""
+    db_path = await _get_db_path(tmp_path, monkeypatch)
+
+    async with aiosqlite.connect(db_path) as conn:
+        await apply_schema(conn)
+        session_id = await _seed_session(conn)
+        pc_id = await _seed_paper_content(
+            conn,
+            content_key="arxiv:1706.03762",
+            title="Attention Is All You Need",
+            arxiv_id="1706.03762",
+            year=2017,
+        )
+        papers_id = await _seed_papers_row(
+            conn, session_id=session_id, paper_content_id=pc_id, enabled=1
+        )
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/papers?session_id={session_id}")
+
+    assert r.status_code == 200
+    items = r.json()
+    assert len(items) == 1
+    item = items[0]
+    assert item["papers_id"] == papers_id
+    assert item["paper_content_id"] == pc_id
+    assert item["enabled"] is True
+    assert item["arxiv_id"] == "1706.03762"
+    assert item["title"] == "Attention Is All You Need"
+    assert item["year"] == 2017
+    assert item["kind"] == "arxiv"
+
+
+async def test_post_papers_accepts_paper_id_arxiv_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /papers with paper_id='arxiv:<id>' triggers ingest path."""
+    db_path = await _get_db_path(tmp_path, monkeypatch)
+
+    async with aiosqlite.connect(db_path) as conn:
+        await apply_schema(conn)
+        await _seed_session(conn)  # session_id=1
+
+    async def _fake_ingest(self: Any, req: Any) -> IngestResult:
+        return IngestResult(
+            paper_content_id=1, papers_id=1, cache_hit=False,
+            title="Attention Is All You Need",
+        )
+
+    import paperhub.pipelines.paper_pipeline as pipeline_module
+
+    with patch.object(pipeline_module.PaperPipeline, "ingest", _fake_ingest):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                "/papers",
+                json={"session_id": 1, "paper_id": "arxiv:1706.03762"},
+            )
+
+    assert r.status_code == 201
+    assert r.json()["cache_hit"] is False
+    assert r.json()["title"] == "Attention Is All You Need"
+
+
+async def test_post_papers_accepts_paper_id_library_prefix_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /papers with paper_id='library:<pc_id>' attaches an existing paper_content row."""
+    db_path = await _get_db_path(tmp_path, monkeypatch)
+
+    async with aiosqlite.connect(db_path) as conn:
+        await apply_schema(conn)
+        session_id = await _seed_session(conn)
+        pc_id = await _seed_paper_content(
+            conn,
+            content_key="arxiv:1706.03762",
+            title="Attention Is All You Need",
+            arxiv_id="1706.03762",
+        )
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r1 = await client.post(
+            "/papers",
+            json={"session_id": session_id, "paper_id": f"library:{pc_id}"},
+        )
+        r2 = await client.post(
+            "/papers",
+            json={"session_id": session_id, "paper_id": f"library:{pc_id}"},
+        )
+
+    assert r1.status_code == 201
+    assert r2.status_code == 201
+    assert r1.json()["papers_id"] == r2.json()["papers_id"]
+    assert r1.json()["cache_hit"] is True
+
+
+async def test_post_papers_legacy_arxiv_id_field_still_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /papers with legacy arxiv_id field still accepted (regression guard)."""
+    db_path = await _get_db_path(tmp_path, monkeypatch)
+
+    async with aiosqlite.connect(db_path) as conn:
+        await apply_schema(conn)
+        await _seed_session(conn)  # session_id=1
+
+    async def _fake_ingest(self: Any, req: Any) -> IngestResult:
+        return IngestResult(
+            paper_content_id=1, papers_id=1, cache_hit=True,
+            title="GPT-3",
+        )
+
+    import paperhub.pipelines.paper_pipeline as pipeline_module
+
+    with patch.object(pipeline_module.PaperPipeline, "ingest", _fake_ingest):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                "/papers",
+                json={"session_id": 1, "arxiv_id": "2005.14165"},
+            )
+
+    assert r.status_code == 201
+    assert r.json()["title"] == "GPT-3"
+
+
+async def test_post_papers_rejects_both_paper_id_and_arxiv_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /papers with both paper_id and arxiv_id → 422 validation error."""
+    db_path = await _get_db_path(tmp_path, monkeypatch)
+
+    async with aiosqlite.connect(db_path) as conn:
+        await apply_schema(conn)
+        await _seed_session(conn)
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            "/papers",
+            json={
+                "session_id": 1,
+                "paper_id": "arxiv:1706.03762",
+                "arxiv_id": "1706.03762",
+            },
+        )
+
+    assert r.status_code == 422

@@ -6,20 +6,40 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from paperhub.agents.research_tools import _to_fts5_query
 from paperhub.api.deps import get_chroma
 from paperhub.config import load_settings
 from paperhub.db.connection import open_db
-from paperhub.pipelines.paper_pipeline import IngestRequest, PaperPipeline
+from paperhub.pipelines.paper_pipeline import PaperPipeline
 
 router = APIRouter(prefix="/papers", tags=["papers"])
 
 
 class IngestBody(BaseModel):
     session_id: int
-    arxiv_id: str
+    paper_id: str | None = None  # preferred: "arxiv:<id>" | "library:<pc_id>"
+    arxiv_id: str | None = None  # legacy alias
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> IngestBody:
+        if not (self.paper_id or self.arxiv_id):
+            raise ValueError("provide paper_id or arxiv_id")
+        if self.paper_id and self.arxiv_id:
+            raise ValueError("provide only one of paper_id / arxiv_id")
+        return self
+
+
+class ReferenceItem(BaseModel):
+    papers_id: int
+    paper_content_id: int
+    enabled: bool
+    added_at: str
+    arxiv_id: str | None
+    title: str
+    year: int | None
+    kind: str
 
 
 class IngestResponse(BaseModel):
@@ -46,20 +66,64 @@ class LibraryItem(BaseModel):
     year: int | None
 
 
+@router.get("", response_model=list[ReferenceItem])
+async def list_session_references(
+    session_id: int = Query(..., ge=1),
+) -> list[ReferenceItem]:
+    """List papers attached to a session, joined to paper_content."""
+    settings = load_settings()
+    async with (
+        open_db(settings.db_path) as conn,
+        conn.execute(
+            "SELECT p.id, p.paper_content_id, p.enabled, p.added_at, "
+            "       pc.arxiv_id, pc.title, pc.year, pc.kind "
+            "FROM papers p JOIN paper_content pc ON pc.id = p.paper_content_id "
+            "WHERE p.session_id = ? ORDER BY p.added_at DESC",
+            (session_id,),
+        ) as cur,
+    ):
+        rows = await cur.fetchall()
+    return [
+        ReferenceItem(
+            papers_id=int(r[0]),
+            paper_content_id=int(r[1]),
+            enabled=bool(r[2]),
+            added_at=str(r[3]),
+            arxiv_id=r[4],
+            title=str(r[5] or ""),
+            year=int(r[6]) if r[6] is not None else None,
+            kind=str(r[7]),
+        )
+        for r in rows
+    ]
+
+
 @router.post("", response_model=IngestResponse, status_code=201)
 async def ingest_paper(body: IngestBody, request: Request) -> IngestResponse:
-    """Ingest a paper from arXiv. Cache-aware: second call with the same
-    arxiv_id returns cache_hit=True immediately."""
+    """Ingest a paper. Accepts paper_id (preferred) or legacy arxiv_id.
+    Cache-aware: second call with the same identifier returns cache_hit=True."""
+    # Normalise: if legacy arxiv_id supplied, convert to paper_id format.
+    paper_id = body.paper_id or f"arxiv:{body.arxiv_id}"
+
     settings = load_settings()
-    async with open_db(settings.db_path) as conn:
-        pipeline = PaperPipeline(
-            conn,
-            papers_cache_dir=settings.papers_cache_dir,
-            chroma=get_chroma(request, settings),
-        )
-        result = await pipeline.ingest(
-            IngestRequest(session_id=body.session_id, arxiv_id=body.arxiv_id)
-        )
+    try:
+        async with open_db(settings.db_path) as conn:
+            pipeline = PaperPipeline(
+                conn,
+                papers_cache_dir=settings.papers_cache_dir,
+                chroma=get_chroma(request, settings),
+            )
+            from paperhub.agents.research_tools import add_paper_to_session_dispatch
+
+            result = await add_paper_to_session_dispatch(
+                paper_id=paper_id,
+                reason="",
+                pipeline=pipeline,
+                conn=conn,
+                session_id=body.session_id,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return IngestResponse(
         paper_content_id=result.paper_content_id,
         papers_id=result.papers_id,
@@ -207,6 +271,7 @@ __all__ = [
     "router",
     "IngestBody",
     "IngestResponse",
+    "ReferenceItem",
     "FromLibraryBody",
     "PatchBody",
     "LibraryItem",
