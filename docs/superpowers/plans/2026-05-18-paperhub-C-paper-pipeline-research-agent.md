@@ -2,11 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Land the cache-aware Paper Pipeline (arXiv search + download + LaTeX/PDF extraction + chunking + embedding + Chroma persistence + HTML render for the Canvas), and replace the Plan-A `paper_search` and `paper_qa` stub nodes with a real Research Agent that uses the pipeline end-to-end. CLI smoke proves: (a) re-ingesting a paper hits the cache (sub-second); (b) multi-paper Q&A returns answers with `[chunk:<id>]` citation markers tied to real `chunks.id` rows.
+**Goal:** Land the cache-aware Paper Pipeline (arXiv search + download + LaTeX/PDF extraction + chunking + embedding + Chroma persistence + HTML render for the Canvas), and replace the Plan-A `paper_search` and `paper_qa` stub nodes with a **library-aware, curating Research Agent** (SRS v2.3) that uses the pipeline end-to-end. The agent's mission is to **extend the session's reference set** on the user's behalf: it sees what's already in the session, decides whether to ask a clarifying question or search, prefers already-indexed library papers over re-downloading, refines up to N=3 times, default-adds the top 1-2 suggestions (immediately enabled), and reports what it did. The user retains full deterministic UI control via PATCH/DELETE/POST endpoints to adjust afterwards. CLI smoke proves: (a) re-ingesting a paper hits the cache (sub-second); (b) multi-paper Q&A returns answers with `[chunk:<id>]` citation markers tied to real `chunks.id` rows; (c) a paper_search turn with a vague prompt produces a clarifying question + no `search_arxiv` call; (d) a paper_search turn with a clear prompt produces at least one `add_paper_to_session` tool call, and the resulting `papers` row has `enabled=true`.
 
-**Architecture:** Single FastAPI process (unchanged from Plan A). Three new in-repo packages: `paperhub.pipelines` (ingest), `paperhub.rag` (retrieval + rerank), and the expanded `paperhub.agents.research` module. Cache key is `content_key` (`arxiv:<id>` for arXiv, `sha256:<hex>` for uploads). All artefacts persist under `workspace/papers_cache/` with the layout from SRS §III-7. Chroma is file-backed under `workspace/chroma/` with one shared `paper_chunks` collection metadata-filtered by `paper_content_id`. Embeddings: `sentence-transformers/BAAI/bge-small-en-v1.5` (lazy singleton). Rerank: `cross-encoder/ms-marco-MiniLM-L-6-v2` (lazy singleton). HTML render: pandoc primary, pylatexenc fallback.
+**Why this plan is the project's headline demo:** The course brief emphasizes (i) problem classification, (ii) tool-selection logic, (iii) model-answer-quality comparison, and (iv) tool-call traceability. Plan A's router covers (i); Plan G's Compare view covers (iii); FR-09 + the Plan B trace panel cover (iv). **The Research Agent's per-turn tool-calling loop in this plan covers (ii)** — the most visible "how the Agent picks tools" surface in the entire demo. Every `paper_search` turn in the trace panel will show a sequence like `search_library → (optional) search_arxiv ×1-3 → add_paper_to_session`, with the LLM's `reasoning` field surfaced on each step. That visible loop is what reviewers will grade.
 
-**Tech Stack additions:** `arxiv` (Python client), `pymupdf` (PDF text), `chromadb` (vector store), `sentence-transformers` (embeddings + cross-encoder), `pylatexenc` (LaTeX→HTML fallback), `tiktoken` (chunker tokenization). System dep: `pandoc` (documented as optional — fallback handles its absence). Everything else (FastAPI, LangGraph, LiteLLM, aiosqlite) is unchanged from Plan A.
+**Architecture:** Single FastAPI process (unchanged from Plan A). Three new in-repo packages: `paperhub.pipelines` (ingest + Semantic Scholar helper), `paperhub.rag` (retrieval + rerank), and the expanded `paperhub.agents.research` module. The four research tools (`search_library`, `search_arxiv`, `find_related_papers`, `add_paper_to_session`) ship in this plan as MCP-compatible Python functions (typed args, structured returns, audit-traced); **Plan E wraps the module as the `paperhub-papers` MCP server** so the entire tool layer routes uniformly through MCP — the call signatures don't change, only the transport. Designing the tool contract right in Plan C keeps Plan E's MCP wrapping mechanical. Cache key is `content_key` (`arxiv:<id>` for arXiv, `sha256:<hex>` for uploads). All artefacts persist under `workspace/papers_cache/` with the layout from SRS §III-7. Chroma is file-backed under `workspace/chroma/` with one shared `paper_chunks` collection metadata-filtered by `paper_content_id`. Embeddings: `sentence-transformers/BAAI/bge-small-en-v1.5` (lazy singleton). Rerank: `cross-encoder/ms-marco-MiniLM-L-6-v2` (lazy singleton). HTML render: pandoc primary, pylatexenc fallback.
+
+**Tech Stack additions:** `arxiv` (Python client), `pymupdf` (PDF text), `chromadb` (vector store), `sentence-transformers` (embeddings + cross-encoder), `pylatexenc` (LaTeX→HTML fallback), `tiktoken` (chunker tokenization), `httpx` (already a dep — used here for Semantic Scholar REST). System dep: `pandoc` (documented as optional — fallback handles its absence). New env var: `PAPERHUB_SEMANTIC_SCHOLAR_API_KEY` (optional, see `.env.example` — unauthenticated tier works at low volume). Everything else (FastAPI, LangGraph, LiteLLM, aiosqlite) is unchanged from Plan A.
 
 ---
 
@@ -14,27 +16,31 @@
 
 | SRS reference | Addressed by |
 | --- | --- |
-| §III-5.1 Paper Pipeline (all 8 stages) | Tasks 2 – 8, 10 |
-| §III-5.2 paper_qa retrieval (top-k vector + cross-encoder rerank) | Tasks 11, 13 |
+| §III-5.1 Paper Pipeline (all 8 stages) | Tasks 2 – 8, Task 10 (orchestrator) |
+| §III-5.2 paper_qa retrieval (top-k vector + cross-encoder rerank) | Tasks 9, 11 |
 | §III-5.4 Chroma vector store keyed by `paper_content_id` | Task 9 |
 | §III-7 `paper_content` + `chunks` writes | Task 10 (already migrated in Plan A) |
 | FR-03 Citation Canvas (`paper_content.html_path` populated) | Task 8 |
-| FR-07 / FR-08 Reference Sources scope + retrieval intersect | Tasks 13, 14 |
-| UC-1 paper_search returns metadata only | Task 12 |
-| UC-2 Add-as-reference → ingest | Tasks 10, 14 |
+| **FR-07 v2.3 Research Agent tool-calling loop** (`search_library` + `search_arxiv` + `add_paper_to_session`; library-first canonical flow; N=3 arXiv-call cap; default-add top 1-2) | Task 11 |
+| **FR-08 v2.3 Reference set construction + adjustment** (agent extends via `add_paper_to_session` with `enabled=true`; user adjusts via PATCH/DELETE/POST endpoints) | Tasks 11, 12 |
+| UC-1 v2.3 paper_search as library-aware curating loop | Task 11 |
+| UC-2 v2.3 Add-as-reference (from search) + Add-from-library (manual) | Tasks 10, 12 |
 | UC-3 Multi-paper Q&A with chunk-cited answers | Task 13 |
 | I-8 #2 cache reuse (re-ingest is instant) | Tasks 10, 15 |
-| I-8 #3 multi-paper Q&A returns ≥ 2 distinct `paper_content.id` | Task 13 + 15 |
+| I-8 #3 multi-paper Q&A returns ≥ 2 distinct `paper_content.id` | Tasks 13 + 15 |
+| **I-8 #8 (new) clarify vs search decision** — vague prompt produces a clarifying question + zero `search_arxiv` calls | Task 15 (smoke) |
+| **I-8 #9 (new) library-first preference** — when an indexed paper matches intent, `add_paper_to_session` is called with `cache_hit=true` before any `search_arxiv` invocation | Task 15 (smoke) |
 
 **Out of scope for Plan C** (explicit Plan D / E / F / G handoffs):
-- Reference Sources UI panel (Plan D — UI surface for the FR-08 toggle state that the backend now maintains)
+- Reference Sources UI panel (Plan D — UI surface for the FR-08 toggle state and the new manual-attach affordances that the backend now exposes)
 - Citation Canvas component (Plan D — consumes `html_path` and `chunks.char_start/char_end` written by Plan C)
-- SearchResultList UI + "Add as reference" buttons (Plan D — calls the `POST /papers` endpoint from Plan C)
+- SearchResultList UI + "Add as reference" buttons + agent-added-paper toast (Plan D — calls `POST /papers` from Plan C; renders auto-added papers from the agent's final message)
+- Library Browser UI (Plan D — calls `GET /papers/library` + `POST /papers/from-library`)
 - SQL Agent + sqlite MCP (Plan E)
 - Slide Pipeline (Plan F)
 - Compare view (Plan G)
 
-Plan C is verifiable end-to-end via CLI (`scripts/ingest_paper.ps1` + `scripts/query_papers.ps1`); the user-facing surface lands in Plan D.
+Plan C is verifiable end-to-end via CLI (`scripts/ingest_paper.ps1` + `scripts/query_papers.ps1` + `scripts/research_turn.ps1`); the user-facing surface lands in Plan D.
 
 ---
 
@@ -42,18 +48,21 @@ Plan C is verifiable end-to-end via CLI (`scripts/ingest_paper.ps1` + `scripts/q
 
 ```
 backend/
-├── pyproject.toml                              # +5 deps
+├── pyproject.toml                              # +6 deps (arxiv, pymupdf, chromadb, sentence-transformers, pylatexenc, tiktoken)
+├── .env.example                                # +PAPERHUB_SEMANTIC_SCHOLAR_API_KEY (optional)
 ├── scripts/
-│   ├── ingest_paper.ps1                        # NEW — CLI smoke for ingest
-│   └── query_papers.ps1                        # NEW — CLI smoke for paper_qa
+│   ├── ingest_paper.ps1                        # NEW — CLI smoke for POST /papers ingest
+│   ├── query_papers.ps1                        # NEW — CLI smoke for paper_qa with [chunk:N] assertion
+│   └── research_turn.ps1                       # NEW — CLI smoke for paper_search agent (clarify / library-first / arxiv-fallback / default-add)
 ├── src/paperhub/
 │   ├── pipelines/                              # NEW package
 │   │   ├── __init__.py
-│   │   ├── arxiv_client.py                     # search + download
+│   │   ├── arxiv_client.py                     # arXiv search + download (sync; agent wraps in asyncio.to_thread)
 │   │   ├── extract.py                          # LaTeX + PDF text extraction
 │   │   ├── chunker.py                          # token-windowed, section-aware
 │   │   ├── embedder.py                         # bge-small lazy singleton
 │   │   ├── renderer.py                         # pandoc + pylatexenc fallback
+│   │   ├── semantic_scholar.py                 # NEW (v2.3) — find_related_papers via SS REST API
 │   │   └── paper_pipeline.py                   # cache-aware orchestrator
 │   ├── rag/                                    # NEW package
 │   │   ├── __init__.py
@@ -61,16 +70,17 @@ backend/
 │   │   ├── retriever.py                        # vector search scoped to enabled papers
 │   │   └── reranker.py                         # ms-marco-MiniLM lazy singleton
 │   ├── agents/
-│   │   ├── research.py                         # NEW — paper_search + paper_qa nodes
+│   │   ├── research.py                         # NEW — paper_search tool-calling loop + paper_qa streaming node
+│   │   ├── research_tools.py                   # NEW (v2.3) — MCP-compatible tool defs (JSON-schema args + structured returns) and async dispatchers for search_library / search_arxiv / find_related_papers / add_paper_to_session. Plan E wraps this module as the `paperhub-papers` MCP server; in Plan C the agent invokes them as direct in-process Python calls. Contract is identical either way — only transport changes.
 │   │   ├── stubs.py                            # drop paper_search/paper_qa entries (keep slides + library_stats)
 │   │   └── graph.py                            # wire research nodes; stubs stay for the other 2
 │   ├── api/
-│   │   ├── papers.py                           # NEW — POST /papers, GET /papers/{id}/html
+│   │   ├── papers.py                           # NEW — POST /papers, GET /papers/{id}/html, GET /papers/library, POST /papers/from-library, PATCH /papers/{id}, DELETE /papers/{id}
 │   │   └── chat.py                             # add streaming for paper_qa, one-shot for paper_search
 │   ├── llm/prompts/
-│   │   ├── paper_search_v1.yaml                # NEW — extract arxiv search terms from user message
+│   │   ├── paper_search_v1.yaml                # NEW (v2.3) — tool-calling loop instructions: canonical library-first → clarify → arxiv → default-add flow
 │   │   └── paper_qa_v1.yaml                    # NEW — answer with [chunk:<id>] citation markers
-│   └── config.py                               # add CHROMA_DIR, EMBEDDING_MODEL, RERANKER_MODEL settings
+│   └── config.py                               # add CHROMA_DIR, EMBEDDING_MODEL, RERANKER_MODEL, SEMANTIC_SCHOLAR_API_KEY settings
 └── tests/
     ├── fixtures/
     │   ├── papers/
@@ -88,9 +98,11 @@ backend/
     ├── test_paper_pipeline.py
     ├── test_retriever.py
     ├── test_reranker.py
-    ├── test_research_paper_search.py
+    ├── test_semantic_scholar.py                # NEW (v2.3) — find_related_papers; HTTP mocked via respx
+    ├── test_research_tools.py                  # NEW (v2.3) — tool dispatchers (search_library SQL, add_paper_to_session calls pipeline)
+    ├── test_research_paper_search.py           # 5 cases: vague→clarify; clear→library-hit→add; clear→library-miss→arxiv→add; library-partial→arxiv-refine→add; arxiv-refine-cap (N=3)
     ├── test_research_paper_qa.py
-    └── test_papers_api.py
+    └── test_papers_api.py                      # POST /papers + GET /library + POST /from-library + PATCH /{id} + DELETE /{id}
 ```
 
 Every new module follows the Plan-A patterns: async where appropriate, Pydantic v2 for data shapes, `mypy --strict` clean.
@@ -1541,18 +1553,22 @@ git commit -m "feat(rag): retriever (vector + rerank) + cross-encoder reranker"
 
 ---
 
-## Task 10 — research agent (paper_search + paper_qa nodes)
+## Task 10 — Research Agent (v2.3 tool-calling loop + paper_qa streaming)
 
 **Files:**
 - Create: `backend/src/paperhub/agents/research.py`
+- Create: `backend/src/paperhub/agents/research_tools.py`
+- Create: `backend/src/paperhub/pipelines/semantic_scholar.py`
 - Create: `backend/src/paperhub/llm/prompts/paper_search_v1.yaml`
 - Create: `backend/src/paperhub/llm/prompts/paper_qa_v1.yaml`
+- Create: `backend/tests/test_semantic_scholar.py`
+- Create: `backend/tests/test_research_tools.py`
 - Create: `backend/tests/test_research_paper_search.py`
 - Create: `backend/tests/test_research_paper_qa.py`
 
-The `paper_search` node turns the user message into an arXiv search query (LLM-extracted), calls `search_arxiv`, formats results inline as a streamed assistant message with one "Add as reference" markdown block per result (the frontend Plan D will render these as cards).
+`paper_search` is now a **tool-calling loop** (SRS v2.3) — the agent reads `AgentState.history + user_message + current-references context block` and picks among four tools per turn. Canonical flow encoded in the prompt: **(1) query formable? → if no, ask clarifying question and stop; (2) call `search_library` first; (3) if hits cover intent → `add_paper_to_session` for top 1-2 → respond; (4) else `search_arxiv` (up to N=3 refined calls); (5) `add_paper_to_session` for top 1-2 → respond.** Three layers of deduplication (prompt context block, `search_library` excluding session, DB `UNIQUE` constraints) prevent duplicate work. Agent-added papers land with `enabled=true` so the next `paper_qa` turn sees them.
 
-The `paper_qa` node resolves `enabled_paper_content_ids` from the DB, runs the `Retriever`, formats retrieved chunks into the prompt context, and streams an answer with `[chunk:<id>]` markers tied to real `chunks.id` rows.
+`paper_qa` keeps the linear pipeline from the prior draft: resolve `enabled_paper_content_ids` → retrieve → rerank → stream LLM answer with `[chunk:<id>]` markers.
 
 - [ ] **Step 1: Write the YAML prompts.**
 
@@ -1560,11 +1576,82 @@ The `paper_qa` node resolves `enabled_paper_content_ids` from the DB, runs the `
 
 ```yaml
 system: |
-  You are PaperHub's paper_search agent. The user wants to discover papers.
-  Distill their request into 1–3 arXiv search terms. Return strict JSON:
-    { "query": "..." }
-  No prose, no markdown. Just JSON.
+  You are PaperHub's Research Agent. Your job is to **extend the user's session
+  reference set** with papers that actually help them. The user retains full
+  control via the UI — you decide what to suggest and default-add the top 1-2.
+
+  You see three contexts on every turn:
+    1. Conversation history (prior turns)
+    2. User's latest message
+    3. CURRENT REFERENCES: every paper already enabled in this session
+       (title, arxiv_id, year, short abstract). Do NOT propose any paper
+       already in this list — search for genuine extensions or follow-ups.
+
+  You have FOUR tools (call any combination; do not respond with prose until
+  you've decided you're done):
+
+    - search_library(query, max_results)
+        Search the user's already-indexed library (deduplicated across all
+        prior sessions, excluding papers already in this session). CHEAP —
+        prefer this when the user might already have a matching paper indexed.
+
+    - search_arxiv(query, max_results)
+        External arXiv full-text search. Use when library doesn't cover the
+        intent. You may call this up to 3 times per turn with refined queries
+        if the first result set is weak. Hard cap: 3 calls per turn.
+
+    - find_related_papers(arxiv_id, mode, max_results)
+        Semantic Scholar citation-graph navigation. `mode` is one of:
+          - "cites": papers cited by the target (its references)
+          - "cited_by": papers that cite the target (forward citations,
+            i.e. follow-up work) — USE THIS for "find me follow-up work to X"
+          - "similar": Semantic Scholar's recommendation API
+        Prefer this over search_arxiv when the user is asking for follow-up
+        or related work to a SPECIFIC paper that already exists (in library
+        or in arxiv).
+
+    - add_paper_to_session(paper_id, reason)
+        Attach a paper to the current session. Cache-aware: if the paper is
+        already in the library (you saw it via search_library) it's a fast
+        INSERT; if from arxiv it triggers the full Paper Pipeline.
+        `paper_id` accepts either an `arxiv:<id>` string or a
+        `library:<paper_content_id>` string. `reason` is a short string
+        explaining WHY this paper matches — surfaced in the trace.
+        The paper lands with `enabled=true`, immediately in scope for paper_qa.
+
+  CANONICAL DECISION FLOW (follow this order unless you have a strong reason
+  to deviate):
+
+    1. Can you form a meaningful query from the message + context?
+         NO  → respond with one short clarifying question. STOP. No tool call.
+         YES → continue.
+
+    2. Call search_library(query). Wait for results.
+
+    3. Do library results cover the user's intent?
+         YES → call add_paper_to_session for the best 1-2 library hits.
+               Then respond with a short summary naming what you added.
+               STOP.
+         NO or PARTIAL → continue.
+
+    4. Call search_arxiv(query). If the result set is weak, refine the query
+       and call search_arxiv again (max 3 total search_arxiv calls per turn).
+
+    5. Call add_paper_to_session for the best 1-2 arxiv results. Then respond
+       with a short summary naming what you auto-added AND listing the
+       remaining arxiv hits so the user can click "Add as reference" if they
+       want more.
+
+  Rules:
+    - Never propose a paper already in CURRENT REFERENCES.
+    - Never call add_paper_to_session for the same paper_id twice in one turn.
+    - Prefer library hits over arxiv hits when both fit the user's intent.
+    - Be terse. The user does not need an essay — just say what you did.
 user: |
+  CURRENT REFERENCES ({n_refs} papers in this session):
+  {references_block}
+
+  USER MESSAGE:
   {user_message}
 ```
 
@@ -1587,71 +1674,525 @@ user: |
   {user_message}
 ```
 
-- [ ] **Step 2: Implement the research agent.**
+- [ ] **Step 2a: Semantic Scholar HTTP helper.**
+
+`backend/src/paperhub/pipelines/semantic_scholar.py`:
+
+```python
+"""Semantic Scholar REST client for citation-graph navigation (SRS v2.3).
+
+Public REST API, free tier (rate-limited to ~100 req / 5 min unauthenticated,
+~1 req/s with PAPERHUB_SEMANTIC_SCHOLAR_API_KEY). No auth required for the
+demo. See https://api.semanticscholar.org/api-docs/.
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Literal
+
+import httpx
+
+API_BASE = "https://api.semanticscholar.org/graph/v1"
+_TIMEOUT = httpx.Timeout(10.0)
+_FIELDS = "title,abstract,year,authors.name,externalIds"
+
+Mode = Literal["cites", "cited_by", "similar"]
+
+
+@dataclass(frozen=True)
+class RelatedPaper:
+    """Semantic Scholar result coerced into PaperHub shape.
+
+    `arxiv_id` may be None if the related paper isn't on arXiv —
+    `add_paper_to_session` will need a non-arXiv ingestion path or
+    must skip it. For Plan C we surface but cannot ingest non-arxiv papers.
+    """
+    title: str
+    abstract: str
+    year: int | None
+    authors: list[str]
+    arxiv_id: str | None  # extracted from externalIds.ArXiv when present
+
+
+def _headers() -> dict[str, str]:
+    key = os.environ.get("PAPERHUB_SEMANTIC_SCHOLAR_API_KEY")
+    return {"x-api-key": key} if key else {}
+
+
+def _coerce(item: dict) -> RelatedPaper:
+    return RelatedPaper(
+        title=item.get("title") or "",
+        abstract=item.get("abstract") or "",
+        year=item.get("year"),
+        authors=[a["name"] for a in item.get("authors") or [] if a.get("name")],
+        arxiv_id=(item.get("externalIds") or {}).get("ArXiv"),
+    )
+
+
+async def find_related(
+    arxiv_id: str,
+    *,
+    mode: Mode,
+    max_results: int = 8,
+) -> list[RelatedPaper]:
+    """Return papers related to the given arXiv ID via Semantic Scholar.
+
+    Caller is expected to wrap in tracer.step() — this helper is transport-only.
+    """
+    paper_id = f"arXiv:{arxiv_id}"
+    if mode == "cites":
+        url = f"{API_BASE}/paper/{paper_id}/references"
+        items_key = "data"
+        sub_key = "citedPaper"
+    elif mode == "cited_by":
+        url = f"{API_BASE}/paper/{paper_id}/citations"
+        items_key = "data"
+        sub_key = "citingPaper"
+    else:  # similar
+        url = f"{API_BASE}/paper/{paper_id}/related"
+        items_key = "data"
+        sub_key = None  # similar endpoint returns paper objects directly
+
+    params = {"limit": str(max_results), "fields": _FIELDS}
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.get(url, params=params, headers=_headers())
+    resp.raise_for_status()
+    raw = resp.json().get(items_key) or []
+    items = [(r.get(sub_key) if sub_key else r) for r in raw]
+    return [_coerce(i) for i in items if i]
+```
+
+- [ ] **Step 2b: Research tools module (MCP-compatible contract).**
+
+`backend/src/paperhub/agents/research_tools.py`:
+
+```python
+"""Research Agent tool dispatchers (SRS v2.3, FR-07).
+
+Each function here is intended to be exposed as a tool to the LLM.
+Contracts (JSON-schema args, structured returns) are MCP-compatible —
+Plan E wraps this module as the `paperhub-papers` MCP server with
+zero call-shape changes.
+"""
+from __future__ import annotations
+
+import asyncio
+from dataclasses import asdict, dataclass
+from typing import Any
+
+import aiosqlite
+
+from paperhub.pipelines.arxiv_client import search_arxiv as _search_arxiv_sync
+from paperhub.pipelines.paper_pipeline import IngestRequest, PaperPipeline
+from paperhub.pipelines.semantic_scholar import Mode, find_related
+from paperhub.tracing.tracer import Tracer
+
+
+@dataclass(frozen=True)
+class LibraryHit:
+    paper_content_id: int
+    arxiv_id: str | None
+    title: str
+    abstract: str
+    year: int | None
+
+
+@dataclass(frozen=True)
+class ArxivHit:
+    arxiv_id: str
+    title: str
+    abstract: str
+    year: int | None
+    authors: list[str]
+
+
+@dataclass(frozen=True)
+class AddResult:
+    paper_content_id: int
+    papers_id: int
+    cache_hit: bool
+    title: str
+
+
+# The JSON-schemas LiteLLM (and later the MCP wrapper) hands to the LLM.
+# Keep field names + descriptions stable across Plan C/E — they become
+# part of the public MCP contract.
+TOOL_SCHEMAS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_library",
+            "description": (
+                "Search the user's already-indexed paper library (deduplicated "
+                "across all sessions). Excludes papers already attached to the "
+                "current session. Cheap. Prefer this before search_arxiv."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Free-text search terms."},
+                    "max_results": {"type": "integer", "default": 8, "minimum": 1, "maximum": 25},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_arxiv",
+            "description": (
+                "Search arXiv full-text. Use when search_library doesn't cover "
+                "the intent. May be called up to 3 times per turn with refined "
+                "queries — the loop enforces this cap."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "max_results": {"type": "integer", "default": 8, "minimum": 1, "maximum": 25},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_related_papers",
+            "description": (
+                "Citation-graph navigation via Semantic Scholar. Use when the "
+                "user wants follow-up work to a specific paper (mode=cited_by), "
+                "the references of a paper (mode=cites), or generally similar "
+                "work (mode=similar). Prefer over search_arxiv when the user "
+                "is asking 'what's next after paper X'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "arxiv_id": {"type": "string"},
+                    "mode": {"type": "string", "enum": ["cites", "cited_by", "similar"]},
+                    "max_results": {"type": "integer", "default": 8, "minimum": 1, "maximum": 25},
+                },
+                "required": ["arxiv_id", "mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_paper_to_session",
+            "description": (
+                "Attach a paper to the current session with enabled=true (so it "
+                "is immediately in scope for paper_qa). paper_id accepts "
+                "'arxiv:<id>' for arXiv ingestion or 'library:<paper_content_id>' "
+                "for an already-indexed library paper. `reason` is a short "
+                "human-readable string explaining WHY this paper matches the "
+                "user's intent — surfaced in the trace for FR-02."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "paper_id": {
+                        "type": "string",
+                        "description": "Either 'arxiv:<id>' or 'library:<paper_content_id>'.",
+                    },
+                    "reason": {"type": "string"},
+                },
+                "required": ["paper_id", "reason"],
+            },
+        },
+    },
+]
+
+
+async def search_library_dispatch(
+    *, query: str, max_results: int = 8,
+    conn: aiosqlite.Connection, session_id: int,
+) -> list[LibraryHit]:
+    """Full-text search across paper_content, excluding rows already in
+    this session. SQLite has no FTS in the schema yet — use LIKE on
+    title + abstract for Plan C; FTS5 is a Plan F follow-up.
+    """
+    # Match terms on title OR abstract; exclude already-attached.
+    like = f"%{query.strip().replace('%', '\\%')}%"
+    sql = (
+        "SELECT pc.id, pc.arxiv_id, pc.title, pc.abstract, pc.year "
+        "FROM paper_content pc "
+        "WHERE (pc.title LIKE ? OR pc.abstract LIKE ?) "
+        "  AND pc.id NOT IN ("
+        "    SELECT paper_content_id FROM papers WHERE session_id = ?"
+        "  ) "
+        "ORDER BY pc.year DESC NULLS LAST "
+        "LIMIT ?"
+    )
+    async with conn.execute(sql, (like, like, session_id, max_results)) as cur:
+        rows = await cur.fetchall()
+    return [
+        LibraryHit(
+            paper_content_id=int(r[0]),
+            arxiv_id=r[1],
+            title=r[2] or "",
+            abstract=r[3] or "",
+            year=int(r[4]) if r[4] is not None else None,
+        )
+        for r in rows
+    ]
+
+
+async def search_arxiv_dispatch(
+    *, query: str, max_results: int = 8,
+) -> list[ArxivHit]:
+    """arxiv.Search.results() is sync + network-bound — wrap in to_thread
+    to avoid blocking the event loop (review C4 fix)."""
+    results = await asyncio.to_thread(_search_arxiv_sync, query, max_results)
+    return [
+        ArxivHit(
+            arxiv_id=r.arxiv_id,
+            title=r.title,
+            abstract=r.abstract,
+            year=r.year,
+            authors=list(r.authors),
+        )
+        for r in results
+    ]
+
+
+async def find_related_papers_dispatch(
+    *, arxiv_id: str, mode: Mode, max_results: int = 8,
+) -> list[dict[str, Any]]:
+    related = await find_related(arxiv_id, mode=mode, max_results=max_results)
+    return [asdict(r) for r in related]
+
+
+async def add_paper_to_session_dispatch(
+    *, paper_id: str, reason: str,
+    pipeline: PaperPipeline, conn: aiosqlite.Connection, session_id: int,
+) -> AddResult:
+    """`paper_id` discriminator: 'arxiv:<id>' triggers ingest; 'library:<int>'
+    skips ingest and just inserts a papers row referencing the existing
+    paper_content. Either path lands enabled=true (schema default)."""
+    if paper_id.startswith("library:"):
+        pcid = int(paper_id.removeprefix("library:"))
+        # Idempotent: ON CONFLICT (UNIQUE session_id+paper_content_id) → no-op,
+        # then SELECT the existing papers row.
+        await conn.execute(
+            "INSERT OR IGNORE INTO papers (session_id, paper_content_id) VALUES (?, ?)",
+            (session_id, pcid),
+        )
+        await conn.commit()
+        async with conn.execute(
+            "SELECT p.id, pc.title FROM papers p JOIN paper_content pc ON pc.id = p.paper_content_id "
+            "WHERE p.session_id = ? AND p.paper_content_id = ?",
+            (session_id, pcid),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None, "library paper not found"
+        return AddResult(paper_content_id=pcid, papers_id=int(row[0]),
+                         cache_hit=True, title=row[1] or "")
+
+    if paper_id.startswith("arxiv:"):
+        arxiv_id = paper_id.removeprefix("arxiv:")
+        result = await pipeline.ingest(IngestRequest(session_id=session_id, arxiv_id=arxiv_id))
+        return AddResult(
+            paper_content_id=result.paper_content_id,
+            papers_id=result.papers_id,
+            cache_hit=result.cache_hit,
+            title=result.title,
+        )
+
+    raise ValueError(f"add_paper_to_session: unrecognised paper_id prefix in {paper_id!r}")
+```
+
+- [ ] **Step 2c: Implement the Research Agent loop + paper_qa stream.**
 
 `backend/src/paperhub/agents/research.py`:
 
 ```python
-"""paper_search + paper_qa agent nodes (SRS §III-3, FR-07)."""
+"""Research Agent: paper_search tool-calling loop (SRS v2.3) + paper_qa stream."""
 from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from dataclasses import asdict
 from typing import Any
 
 import aiosqlite
-from pydantic import BaseModel
+import litellm
 
+from paperhub.agents.research_tools import (
+    TOOL_SCHEMAS,
+    add_paper_to_session_dispatch,
+    find_related_papers_dispatch,
+    search_arxiv_dispatch,
+    search_library_dispatch,
+)
 from paperhub.agents.state import AgentState
 from paperhub.llm.adapter import LlmAdapter
-from paperhub.pipelines.arxiv_client import search_arxiv
+from paperhub.llm.prompts.registry import PromptRegistry
+from paperhub.pipelines.paper_pipeline import PaperPipeline
 from paperhub.rag.retriever import Retriever
 from paperhub.tracing.tracer import Tracer
 
+MAX_ARXIV_CALLS_PER_TURN = 3
+MAX_TOOL_ITERATIONS = 8  # hard ceiling: ~ search_library + 3 × search_arxiv + 2 × add + slack
 
-class _SearchQuery(BaseModel):
-    query: str
+
+async def _references_block(conn: aiosqlite.Connection, session_id: int) -> tuple[int, str]:
+    async with conn.execute(
+        "SELECT pc.arxiv_id, pc.title, pc.year, pc.abstract "
+        "FROM papers p JOIN paper_content pc ON pc.id = p.paper_content_id "
+        "WHERE p.session_id = ? AND p.enabled = 1 "
+        "ORDER BY p.added_at",
+        (session_id,),
+    ) as cur:
+        rows = await cur.fetchall()
+    if not rows:
+        return 0, "(none — this session has no references yet)"
+    lines = []
+    for r in rows:
+        aid, title, year, abstract = r
+        head = f"- [arxiv:{aid}] {title} ({year or 'n.d.'})" if aid else f"- {title} ({year or 'n.d.'})"
+        snippet = (abstract or "")[:200].replace("\n", " ")
+        lines.append(f"{head}\n  abstract: {snippet}{'…' if abstract and len(abstract) > 200 else ''}")
+    return len(rows), "\n".join(lines)
 
 
 async def paper_search(
     state: AgentState,
     *,
+    adapter: LlmAdapter,  # kept for interface parity; agent uses litellm directly for tools
+    tracer: Tracer,
+    model: str,
+    conn: aiosqlite.Connection,
+    pipeline: PaperPipeline,
+    registry: PromptRegistry | None = None,
+    **litellm_kwargs: Any,
+) -> str:
+    """Tool-calling loop. Returns the final assistant message body (markdown).
+
+    The chat endpoint surfaces this as a one-shot `final` SSE event — there
+    is no token streaming inside paper_search (the trace panel + the
+    automatic add_paper_to_session side-effects are what the user watches).
+    """
+    user_message = state["user_message"]
+    session_id = state["session_id"]
+    history = state.get("history") or []
+
+    n_refs, refs_block = await _references_block(conn, session_id)
+    reg = registry or PromptRegistry()
+    prompt = reg.get("paper_search/v1")
+    system = prompt.system
+    user = prompt.user_template.format(
+        n_refs=n_refs, references_block=refs_block, user_message=user_message,
+    )
+
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user})
+
+    arxiv_calls = 0
+    for _iteration in range(MAX_TOOL_ITERATIONS):
+        async with tracer.step(
+            agent="research", tool="paper_search:plan", model=model,
+        ) as step:
+            step.record_args({"iteration": _iteration, "messages_len": len(messages)})
+            response = await litellm.acompletion(
+                model=model, messages=messages, tools=TOOL_SCHEMAS,
+                tool_choice="auto", **litellm_kwargs,
+            )
+            msg = response["choices"][0]["message"]
+            step.record_result({
+                "had_tool_calls": bool(msg.get("tool_calls")),
+                "content_len": len(msg.get("content") or ""),
+            })
+
+        tool_calls = msg.get("tool_calls") or []
+        if not tool_calls:
+            # Final response — clarification question OR summary of additions.
+            return msg.get("content") or "(no response)"
+
+        # Append the assistant turn that requested the tools, then dispatch each.
+        messages.append({"role": "assistant", "content": msg.get("content"),
+                         "tool_calls": tool_calls})
+
+        for call in tool_calls:
+            name = call["function"]["name"]
+            args = json.loads(call["function"]["arguments"] or "{}")
+            result: Any
+            async with tracer.step(
+                agent="research", tool=f"paper_search:{name}", model=None,
+            ) as step:
+                step.record_args({**args, "reason": args.get("reason")})
+                try:
+                    if name == "search_library":
+                        result = [asdict(h) for h in await search_library_dispatch(
+                            conn=conn, session_id=session_id, **args)]
+                    elif name == "search_arxiv":
+                        if arxiv_calls >= MAX_ARXIV_CALLS_PER_TURN:
+                            result = {"error": "arxiv_call_cap_reached",
+                                      "cap": MAX_ARXIV_CALLS_PER_TURN}
+                        else:
+                            arxiv_calls += 1
+                            result = [asdict(h) for h in await search_arxiv_dispatch(**args)]
+                    elif name == "find_related_papers":
+                        result = await find_related_papers_dispatch(**args)
+                    elif name == "add_paper_to_session":
+                        result = asdict(await add_paper_to_session_dispatch(
+                            pipeline=pipeline, conn=conn, session_id=session_id, **args))
+                    else:
+                        result = {"error": f"unknown_tool:{name}"}
+                    step.record_result({"summary": result if isinstance(result, dict)
+                                        else {"count": len(result)}})
+                except Exception as exc:  # noqa: BLE001
+                    result = {"error": str(exc), "tool": name}
+                    step.record_result({"error": str(exc)})
+
+            messages.append({
+                "role": "tool", "tool_call_id": call["id"],
+                "name": name, "content": json.dumps(result, default=str),
+            })
+
+    return ("I've reached the tool-call limit for this turn. "
+            "Try asking again with a more specific question.")
+
+
+async def paper_qa_stream(
+    state: AgentState,
+    *,
     adapter: LlmAdapter,
     tracer: Tracer,
     model: str,
+    retriever: Retriever,
+    conn: aiosqlite.Connection,
     **adapter_kwargs: Any,
-) -> str:
-    """One-shot. Returns the assistant message body (markdown) listing
-    arxiv hits with "Add as reference" affordances."""
+) -> AsyncIterator[str]:
+    """Stream paper_qa tokens.
+
+    Workflow: resolve enabled_paper_content_ids → retrieve → rerank → format
+    chunk context → stream LLM answer with [chunk:<id>] markers.
+    """
     user_message = state["user_message"]
-    async with tracer.step(agent="research", tool="paper_search:plan", model=model) as step:
-        step.record_args({"user_message": user_message})
-        q = await adapter.structured(
-            slot="paper_search/v1",
-            variables={"user_message": user_message},
-            response_model=_SearchQuery,
-            model=model,
-            history=state.get("history"),
-            **adapter_kwargs,
+    session_id = state["session_id"]
+
+    async with tracer.step(agent="research", tool="paper_qa:resolve", model=None) as step:
+        step.record_args({"session_id": session_id})
+        async with conn.execute(
+            "SELECT paper_content_id FROM papers "
+            "WHERE session_id = ? AND enabled = 1",
+            (session_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        enabled_ids = [int(r[0]) for r in rows]
+        step.record_result({"enabled_paper_content_ids": enabled_ids})
+
+    if not enabled_ids:
+        yield (
+            "No references are enabled for this session. Add a paper to the "
+            "Reference Sources panel first, then ask again."
         )
-        step.record_result({"query": q.query})
-
-    async with tracer.step(agent="research", tool="paper_search:arxiv", model=None) as step:
-        step.record_args({"query": q.query})
-        results = search_arxiv(q.query, max_results=8)
-        step.record_result({"hits": len(results)})
-
-    # Format as markdown — Plan D's frontend will parse the special
-    # "Add as reference" anchors and render them as cards.
-    lines = [f"Searched arXiv for **{q.query}** — {len(results)} results.\n"]
-    for r in results:
-        authors = ", ".join(r.authors[:3]) + ("…" if len(r.authors) > 3 else "")
-        year = f" ({r.year})" if r.year else ""
-        lines.append(f"### {r.title}{year}")
-        lines.append(f"_{authors}_  ·  arXiv:{r.arxiv_id}\n")
-        lines.append(f"> {r.abstract[:300]}…\n")
-        lines.append(f"[Add as reference](paperhub://add?arxiv_id={r.arxiv_id})\n")
-    return "\n".join(lines)
+        return
 
 
 async def paper_qa_stream(
@@ -1732,61 +2273,599 @@ async def paper_qa_stream(
         step.record_result({"length": sum(len(c) for c in collected)})
 ```
 
-- [ ] **Step 3: Tests + commit.**
+- [ ] **Step 3: Tests.**
+
+The Research Agent loop must be deterministic in tests despite using a real LiteLLM call shape. Two strategies, both used:
+
+1. **`mock_response` / `mock_completion`** — `litellm.acompletion(..., mock_response=...)` returns a pre-canned response. For tool-calling tests, use `mock_response={"choices": [{"message": {"tool_calls": [...]}}]}` to drive the loop through a scripted sequence.
+2. **Stubbed dispatchers** — monkey-patch the four `*_dispatch` functions in `research_tools` to return deterministic results without hitting arXiv / Semantic Scholar / Chroma.
+
+`backend/tests/test_research_paper_search.py` covers five cases — each exercises a different branch of the canonical decision flow:
+
+```python
+"""Research Agent paper_search loop tests (SRS v2.3, FR-07)."""
+from __future__ import annotations
+
+from dataclasses import asdict
+import json
+
+import pytest
+from unittest.mock import patch
+
+from paperhub.agents.research import paper_search
+from paperhub.agents.research_tools import ArxivHit, LibraryHit, AddResult
+
+pytestmark = pytest.mark.asyncio
+
+
+def _msg(content=None, tool_calls=None):
+    """Build a fake LiteLLM response message."""
+    m = {"role": "assistant", "content": content}
+    if tool_calls:
+        m["tool_calls"] = tool_calls
+    return {"choices": [{"message": m}]}
+
+
+def _tool_call(call_id, name, args):
+    return {"id": call_id, "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)}}
+
+
+# ---------- Case 1: vague prompt → clarifying question, zero tool calls ----------
+async def test_vague_prompt_emits_clarifying_question(
+    migrated_db, fake_tracer, fake_pipeline,
+):
+    state = {"run_id": 1, "branch": "", "session_id": 1,
+             "user_message": "find me good ML papers"}
+    seq = [_msg(content="What problem are you trying to solve — routing, "
+                       "training stability, or something else?")]
+    with patch("paperhub.agents.research.litellm.acompletion",
+               side_effect=seq) as comp:
+        out = await paper_search(state, adapter=None, tracer=fake_tracer,
+                                 model="gemini/gemini-2.5-flash",
+                                 conn=migrated_db, pipeline=fake_pipeline)
+    assert "?" in out
+    assert comp.call_count == 1
+    # No tool dispatched
+    assert "search_arxiv" not in out
+
+
+# ---------- Case 2: clear prompt → library hit → add → respond (no arxiv) ----------
+async def test_library_hit_skips_arxiv(
+    migrated_db, fake_tracer, fake_pipeline, seed_library,
+):
+    """seed_library inserts 2 paper_content rows the agent can hit."""
+    state = {"run_id": 2, "branch": "", "session_id": 1,
+             "user_message": "I want the original transformer paper"}
+    lib_hits = [LibraryHit(paper_content_id=42, arxiv_id="1706.03762",
+                           title="Attention Is All You Need",
+                           abstract="...", year=2017)]
+    seq = [
+        _msg(tool_calls=[_tool_call("c1", "search_library",
+                                    {"query": "transformer", "max_results": 8})]),
+        _msg(tool_calls=[_tool_call("c2", "add_paper_to_session",
+                                    {"paper_id": "library:42",
+                                     "reason": "the original transformer paper"})]),
+        _msg(content="Added 'Attention Is All You Need' from your library."),
+    ]
+    with patch("paperhub.agents.research.litellm.acompletion", side_effect=seq), \
+         patch("paperhub.agents.research.search_library_dispatch",
+               return_value=lib_hits), \
+         patch("paperhub.agents.research.add_paper_to_session_dispatch",
+               return_value=AddResult(42, 99, cache_hit=True,
+                                      title="Attention Is All You Need")) as add:
+        out = await paper_search(state, adapter=None, tracer=fake_tracer,
+                                 model="m", conn=migrated_db, pipeline=fake_pipeline)
+    assert "Attention Is All You Need" in out
+    add.assert_called_once()
+    # I-8 #9: library-first preference — no search_arxiv ever called
+    assert "search_arxiv" not in [c.args for c in add.mock_calls]
+
+
+# ---------- Case 3: library miss → arxiv → add → respond ----------
+async def test_library_miss_falls_through_to_arxiv(
+    migrated_db, fake_tracer, fake_pipeline,
+):
+    state = {"run_id": 3, "branch": "", "session_id": 1,
+             "user_message": "find me mixture-of-experts routing papers"}
+    arx_hits = [ArxivHit(arxiv_id="2403.00001", title="MoE Routing X",
+                         abstract="...", year=2024, authors=["A"])]
+    seq = [
+        _msg(tool_calls=[_tool_call("c1", "search_library",
+                                    {"query": "mixture of experts routing"})]),
+        _msg(tool_calls=[_tool_call("c2", "search_arxiv",
+                                    {"query": "mixture of experts routing"})]),
+        _msg(tool_calls=[_tool_call("c3", "add_paper_to_session",
+                                    {"paper_id": "arxiv:2403.00001",
+                                     "reason": "top MoE routing hit"})]),
+        _msg(content="Added MoE Routing X from arXiv."),
+    ]
+    with patch("paperhub.agents.research.litellm.acompletion", side_effect=seq), \
+         patch("paperhub.agents.research.search_library_dispatch", return_value=[]), \
+         patch("paperhub.agents.research.search_arxiv_dispatch", return_value=arx_hits), \
+         patch("paperhub.agents.research.add_paper_to_session_dispatch",
+               return_value=AddResult(7, 12, cache_hit=False, title="MoE Routing X")):
+        out = await paper_search(state, adapter=None, tracer=fake_tracer,
+                                 model="m", conn=migrated_db, pipeline=fake_pipeline)
+    assert "MoE Routing X" in out
+
+
+# ---------- Case 4: arxiv refinement loop (N=2 calls, both succeed) ----------
+async def test_arxiv_refinement_within_cap(
+    migrated_db, fake_tracer, fake_pipeline,
+):
+    state = {"run_id": 4, "branch": "", "session_id": 1,
+             "user_message": "find recent paper_qa work"}
+    seq = [
+        _msg(tool_calls=[_tool_call("c1", "search_library", {"query": "paper qa"})]),
+        _msg(tool_calls=[_tool_call("c2", "search_arxiv", {"query": "paper QA"})]),
+        # First arxiv call weak — refine
+        _msg(tool_calls=[_tool_call("c3", "search_arxiv",
+                                    {"query": "scientific paper question answering 2024"})]),
+        _msg(tool_calls=[_tool_call("c4", "add_paper_to_session",
+                                    {"paper_id": "arxiv:2404.00002", "reason": "best refined hit"})]),
+        _msg(content="Added one paper after refining the query."),
+    ]
+    with patch("paperhub.agents.research.litellm.acompletion", side_effect=seq), \
+         patch("paperhub.agents.research.search_library_dispatch", return_value=[]), \
+         patch("paperhub.agents.research.search_arxiv_dispatch",
+               side_effect=[[], [ArxivHit("2404.00002", "Paper QA", "...", 2024, [])]]), \
+         patch("paperhub.agents.research.add_paper_to_session_dispatch",
+               return_value=AddResult(8, 13, False, "Paper QA")):
+        out = await paper_search(state, adapter=None, tracer=fake_tracer,
+                                 model="m", conn=migrated_db, pipeline=fake_pipeline)
+    assert "refining" in out.lower() or "Paper QA" in out
+
+
+# ---------- Case 5: arxiv cap (N=3) enforced — 4th call returns cap error ----------
+async def test_arxiv_cap_enforced_at_three(
+    migrated_db, fake_tracer, fake_pipeline,
+):
+    """4th search_arxiv must NOT actually invoke the dispatcher;
+    tool result returns {error: arxiv_call_cap_reached}."""
+    state = {"run_id": 5, "branch": "", "session_id": 1,
+             "user_message": "keep refining"}
+    call4 = _tool_call("c4", "search_arxiv", {"query": "v4"})
+    seq = [
+        _msg(tool_calls=[_tool_call("c1", "search_arxiv", {"query": "v1"})]),
+        _msg(tool_calls=[_tool_call("c2", "search_arxiv", {"query": "v2"})]),
+        _msg(tool_calls=[_tool_call("c3", "search_arxiv", {"query": "v3"})]),
+        _msg(tool_calls=[call4]),  # 4th — must be capped
+        _msg(content="I've reached the search cap."),
+    ]
+    arx_dispatcher_calls = 0
+    async def fake_arxiv(**_):
+        nonlocal arx_dispatcher_calls
+        arx_dispatcher_calls += 1
+        return []
+    with patch("paperhub.agents.research.litellm.acompletion", side_effect=seq), \
+         patch("paperhub.agents.research.search_arxiv_dispatch", side_effect=fake_arxiv):
+        await paper_search(state, adapter=None, tracer=fake_tracer,
+                           model="m", conn=migrated_db, pipeline=fake_pipeline)
+    assert arx_dispatcher_calls == 3  # dispatcher never invoked on the 4th
+```
+
+`backend/tests/test_research_paper_qa.py` reuses Plan A's pattern (mock `Retriever.retrieve` to return canned chunks; assert tokens stream + `[chunk:N]` appears in concatenated output). Plus one extra assertion for I-8 #3: with two seeded papers, the concatenated content cites at least two distinct `chunk_id`s whose `paper_content_id`s differ.
+
+`backend/tests/test_research_tools.py` covers the dispatchers in isolation:
+- `search_library_dispatch` excludes rows already in the session (insert a row in `papers`, confirm the matching `paper_content` is filtered).
+- `add_paper_to_session_dispatch` with `library:<id>` is idempotent on the UNIQUE constraint (call twice, only one papers row).
+- `add_paper_to_session_dispatch` with `arxiv:<id>` calls `PaperPipeline.ingest` with the right shape (use a fake pipeline that records calls).
+
+`backend/tests/test_semantic_scholar.py` mocks `httpx.AsyncClient.get` via `respx` to return canned JSON for each of the three `mode` values; asserts `arxiv_id` is correctly extracted from `externalIds.ArXiv` (and is `None` when absent).
+
+- [ ] **Step 4: Commit.**
 
 ```powershell
-uv run pytest tests/test_research_paper_search.py tests/test_research_paper_qa.py -v
-git add backend/src/paperhub/agents/research.py backend/src/paperhub/llm/prompts backend/tests/test_research_*.py
-git commit -m "feat(agents): research agent — paper_search + paper_qa with RAG citations"
+uv run pytest tests/test_semantic_scholar.py tests/test_research_tools.py `
+              tests/test_research_paper_search.py tests/test_research_paper_qa.py -v
+git add backend/src/paperhub/agents/research.py `
+        backend/src/paperhub/agents/research_tools.py `
+        backend/src/paperhub/pipelines/semantic_scholar.py `
+        backend/src/paperhub/llm/prompts `
+        backend/tests/test_semantic_scholar.py `
+        backend/tests/test_research_tools.py `
+        backend/tests/test_research_paper_*.py
+git commit -m "feat(agents): v2.3 Research Agent — 4-tool loop (library/arxiv/semantic-scholar/add)"
 ```
 
 ---
 
-## Task 11 — Wire research nodes into LangGraph + chat endpoint
+## Task 11 — Wire research nodes into LangGraph + /chat SSE
 
 **Files:**
 - Modify: `backend/src/paperhub/agents/graph.py`
 - Modify: `backend/src/paperhub/agents/stubs.py` (remove paper_search + paper_qa entries; keep slides + library_stats)
-- Modify: `backend/src/paperhub/api/chat.py` (handle research paths)
+- Modify: `backend/src/paperhub/app.py` (construct singleton `ChromaStore` and `PaperPipeline` on `app.state`)
+- Modify: `backend/src/paperhub/api/chat.py` (branch on `intent` for paper_search / paper_qa)
+- Modify: `backend/tests/test_chat_sse.py` (add paper_search one-shot test + paper_qa streaming test)
 
-`graph.py` swaps `_stub_paper_search` and `_stub_paper_qa` for the real research nodes. `chat.py` treats:
-- `paper_search` as a one-shot (no streaming) — emit the formatted markdown as a single final event
-- `paper_qa` as a streaming intent — same SSE pattern as chitchat
+Two dependency-lifecycle decisions matter:
 
-Be careful with dependency injection: the chat endpoint constructs a `Retriever(chroma)` and passes it to `paper_qa_stream`. The graph's `GraphDeps` dataclass gets new fields: `retriever`, `paper_qa_model`.
+1. **ChromaStore is a singleton on `app.state`.** Constructing it per-request would re-load the embedding model (~200 MB) and walk the persistent dir on every chat turn. Build it once in the FastAPI lifespan; reuse across requests.
+2. **PaperPipeline is also `app.state`-scoped.** It holds the ChromaStore + a tracer factory; per-request construction is cheap since the heavyweight singletons live inside it.
 
-- [ ] Implement the wiring; existing chitchat tests must still pass.
-- [ ] Update the route map: `paper_search` → research.paper_search; `paper_qa` → research.paper_qa_stream.
-- [ ] Commit: `feat(api): wire research agent into LangGraph + /chat SSE`
+- [ ] **Step 1: Add `app.state` singletons in `app.py`.**
+
+```python
+# backend/src/paperhub/app.py — additions inside lifespan
+from paperhub.rag.chroma import ChromaStore
+from paperhub.pipelines.paper_pipeline import PaperPipeline
+from paperhub.pipelines.embedder import get_embedder
+from paperhub.pipelines.renderer import get_renderer
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ... existing schema migration ...
+    app.state.chroma = ChromaStore(settings.chroma_dir)
+    app.state.pipeline = PaperPipeline(
+        chroma=app.state.chroma,
+        embedder=get_embedder(),  # lazy singleton
+        renderer=get_renderer(),
+        cache_root=settings.papers_cache_dir,
+    )
+    try:
+        yield
+    finally:
+        await app.state.chroma.aclose()
+```
+
+- [ ] **Step 2: Branch `chat.py` on intent.**
+
+Plan A's `chat.py` has `if intent == "chitchat": ...`. Replace the body of `_run_chat` with an intent-driven dispatch. paper_search is **one-shot** (no token events — the trace panel does the visualisation); paper_qa **streams** like chitchat.
+
+```python
+# backend/src/paperhub/api/chat.py — sketch of the new branching block
+# (the surrounding tracer / SSE-formatter / message-persistence machinery
+# from Plan A is unchanged — only the `intent` dispatch is new)
+from paperhub.agents.research import paper_search, paper_qa_stream
+from paperhub.rag.retriever import Retriever
+
+intent = decision.intent
+if intent == "chitchat":
+    async for tok in chitchat_stream(state, adapter=adapter, tracer=tracer,
+                                     model=settings.chitchat_model,
+                                     mock_response=os.environ.get("PAPERHUB_CHITCHAT_MOCK")):
+        collected.append(tok)
+        yield SseFormatter.token(run_id, tok)
+    final_content = "".join(collected)
+
+elif intent == "paper_search":
+    # One-shot: agent runs its tool-calling loop internally; we emit a single final.
+    final_content = await paper_search(
+        state, adapter=adapter, tracer=tracer,
+        model=settings.research_model,
+        conn=conn, pipeline=request.app.state.pipeline,
+    )
+
+elif intent == "paper_qa":
+    retriever = Retriever(chroma=request.app.state.chroma)
+    async for tok in paper_qa_stream(
+        state, adapter=adapter, tracer=tracer,
+        model=settings.research_model,
+        retriever=retriever, conn=conn,
+    ):
+        collected.append(tok)
+        yield SseFormatter.token(run_id, tok)
+    final_content = "".join(collected)
+
+else:
+    # slides + library_stats still stubbed in Plan C — Plans E + F replace.
+    final_content = await stub_for_intent(intent)
+
+# Persist + emit final + close run (unchanged from Plan A) ...
+```
+
+- [ ] **Step 3: Drop `paper_search` + `paper_qa` from `stubs.py`** — keep `slides` + `library_stats` stubs (Plans F + E replace those).
+
+- [ ] **Step 4: Tests.** Add to `test_chat_sse.py`:
+  - `test_chat_sse_paper_search_one_shot` — set `PAPERHUB_ROUTER_MOCK` so intent=paper_search, monkey-patch `paper_search` to return a canned string, assert SSE has `routing_decision` then `final` (no `token` events between).
+  - `test_chat_sse_paper_qa_streams` — set router mock for `paper_qa`, seed a session with one paper_content + chunks, monkey-patch `Retriever.retrieve` to return canned chunks, monkey-patch `litellm.acompletion(stream=True)` to yield 2 tokens — assert SSE has `routing_decision` + 2 `token` events + `final`.
+  - The existing chitchat test must continue to pass unchanged.
+
+- [ ] **Step 5: Commit.**
+
+```powershell
+git add backend/src/paperhub/agents/graph.py `
+        backend/src/paperhub/agents/stubs.py `
+        backend/src/paperhub/app.py `
+        backend/src/paperhub/api/chat.py `
+        backend/tests/test_chat_sse.py
+git commit -m "feat(chat): wire v2.3 research agent (paper_search one-shot + paper_qa stream)"
+```
 
 ---
 
-## Task 12 — POST /papers endpoint (ingest)
+## Task 12 — Papers REST surface (ingest + curation + library)
 
 **Files:**
 - Create: `backend/src/paperhub/api/papers.py`
 - Modify: `backend/src/paperhub/app.py` (register the papers router)
 - Create: `backend/tests/test_papers_api.py`
 
-The endpoint accepts `{ "session_id": int, "arxiv_id": "..." }` or a multipart upload, runs `PaperPipeline.ingest`, returns `{ paper_content_id, papers_id, cache_hit, title }`. Frontend Plan D's "Add as reference" button calls this.
+Six endpoints land here. Per SRS v2.3, the Research Agent invokes ingest indirectly via `add_paper_to_session_dispatch` — the REST endpoints are for the deterministic UI: manually attaching a search result, browsing the library, toggling `enabled`, removing a paper, and serving the rendered HTML for the Citation Canvas.
 
-- [ ] **Step 1: Test — POST with arxiv_id → 200, paper_content row exists, second call returns cache_hit=true.**
-- [ ] **Step 2: Implement.**
-- [ ] **Step 3: Commit.** `feat(api): POST /papers ingest endpoint (cache-aware via PaperPipeline)`
+| Method | Path | Purpose | Caller |
+|---|---|---|---|
+| POST | `/papers` | Ingest from `arxiv_id` (or upload — Plan F adds multipart). Cache-aware. | Plan D "Add as reference" button on a search result |
+| GET | `/papers/library?session_id=&q=&limit=&offset=` | List indexed `paper_content` rows excluding those in `session_id`. Optional `q` filter on title/abstract. | Plan D Library Browser |
+| POST | `/papers/from-library` | Attach an existing `paper_content_id` to a session. Idempotent via UNIQUE. | Plan D Library Browser |
+| PATCH | `/papers/{papers_id}` | Toggle `enabled`. Body: `{"enabled": bool}`. | Plan D Reference Sources panel toggle |
+| DELETE | `/papers/{papers_id}` | Remove from session (does NOT touch `paper_content`). | Plan D Reference Sources panel remove |
+| GET | `/papers/content/{paper_content_id}/html` | Serve the pre-rendered HTML from `paper_content.html_path`. | Plan D Citation Canvas |
+
+- [ ] **Step 1: Implement.**
+
+```python
+# backend/src/paperhub/api/papers.py
+"""Papers REST surface (SRS v2.3, FR-08). Backs the deterministic UI
+gestures; the Research Agent uses research_tools dispatchers instead."""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import aiosqlite
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+from paperhub.db.connection import get_conn
+from paperhub.pipelines.paper_pipeline import IngestRequest
+
+router = APIRouter(prefix="/papers", tags=["papers"])
+
+
+class IngestBody(BaseModel):
+    session_id: int
+    arxiv_id: str
+
+
+class IngestResponse(BaseModel):
+    paper_content_id: int
+    papers_id: int
+    cache_hit: bool
+    title: str
+
+
+class FromLibraryBody(BaseModel):
+    session_id: int
+    paper_content_id: int
+
+
+class PatchBody(BaseModel):
+    enabled: bool
+
+
+class LibraryItem(BaseModel):
+    paper_content_id: int
+    arxiv_id: str | None
+    title: str
+    abstract: str | None
+    year: int | None
+
+
+@router.post("", response_model=IngestResponse)
+async def ingest_paper(body: IngestBody, request: Request) -> IngestResponse:
+    pipeline = request.app.state.pipeline
+    result = await pipeline.ingest(IngestRequest(
+        session_id=body.session_id, arxiv_id=body.arxiv_id,
+    ))
+    return IngestResponse(
+        paper_content_id=result.paper_content_id,
+        papers_id=result.papers_id,
+        cache_hit=result.cache_hit,
+        title=result.title,
+    )
+
+
+@router.get("/library", response_model=list[LibraryItem])
+async def list_library(
+    session_id: int = Query(...),
+    q: str | None = Query(None, max_length=200),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> list[LibraryItem]:
+    """Indexed paper_content rows NOT already in `session_id`."""
+    where = ["pc.id NOT IN (SELECT paper_content_id FROM papers WHERE session_id = ?)"]
+    args: list[Any] = [session_id]
+    if q:
+        where.append("(pc.title LIKE ? OR pc.abstract LIKE ?)")
+        like = f"%{q.replace('%', '\\%')}%"
+        args.extend([like, like])
+    sql = (
+        "SELECT pc.id, pc.arxiv_id, pc.title, pc.abstract, pc.year "
+        f"FROM paper_content pc WHERE {' AND '.join(where)} "
+        "ORDER BY pc.year DESC NULLS LAST, pc.id DESC "
+        "LIMIT ? OFFSET ?"
+    )
+    args.extend([limit, offset])
+    async with get_conn() as conn:
+        async with conn.execute(sql, args) as cur:
+            rows = await cur.fetchall()
+    return [LibraryItem(
+        paper_content_id=int(r[0]), arxiv_id=r[1],
+        title=r[2] or "", abstract=r[3], year=int(r[4]) if r[4] is not None else None,
+    ) for r in rows]
+
+
+@router.post("/from-library", response_model=IngestResponse)
+async def attach_from_library(body: FromLibraryBody) -> IngestResponse:
+    """Idempotent on UNIQUE(session_id, paper_content_id). Re-attach returns
+    the existing `papers` row instead of erroring."""
+    async with get_conn() as conn:
+        # Confirm paper_content exists.
+        async with conn.execute(
+            "SELECT title FROM paper_content WHERE id = ?", (body.paper_content_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, f"paper_content {body.paper_content_id} not found")
+        title = row[0] or ""
+        await conn.execute(
+            "INSERT OR IGNORE INTO papers (session_id, paper_content_id) VALUES (?, ?)",
+            (body.session_id, body.paper_content_id),
+        )
+        await conn.commit()
+        async with conn.execute(
+            "SELECT id FROM papers WHERE session_id = ? AND paper_content_id = ?",
+            (body.session_id, body.paper_content_id),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+    return IngestResponse(
+        paper_content_id=body.paper_content_id, papers_id=int(row[0]),
+        cache_hit=True, title=title,
+    )
+
+
+@router.patch("/{papers_id}", response_model=dict[str, bool])
+async def toggle_enabled(papers_id: int, body: PatchBody) -> dict[str, bool]:
+    async with get_conn() as conn:
+        cur = await conn.execute(
+            "UPDATE papers SET enabled = ? WHERE id = ?",
+            (1 if body.enabled else 0, papers_id),
+        )
+        await conn.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(404, f"papers row {papers_id} not found")
+    return {"enabled": body.enabled}
+
+
+@router.delete("/{papers_id}", status_code=204)
+async def remove_from_session(papers_id: int) -> None:
+    """Removes the membership row only — `paper_content` (and its chunks +
+    Chroma vectors + cached on-disk artefacts) are untouched, so re-attaching
+    later is a cache hit."""
+    async with get_conn() as conn:
+        cur = await conn.execute("DELETE FROM papers WHERE id = ?", (papers_id,))
+        await conn.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(404, f"papers row {papers_id} not found")
+
+
+@router.get("/content/{paper_content_id}/html")
+async def serve_html(paper_content_id: int) -> FileResponse:
+    """Served as a file to keep the Citation Canvas in Plan D simple
+    (just point an iframe / fetch at this URL)."""
+    async with get_conn() as conn:
+        async with conn.execute(
+            "SELECT html_path FROM paper_content WHERE id = ?", (paper_content_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row or not row[0]:
+        raise HTTPException(404, f"no html for paper_content {paper_content_id}")
+    path = Path(row[0])
+    if not path.is_file():
+        raise HTTPException(410, f"html_path on disk missing: {path}")
+    return FileResponse(path, media_type="text/html")
+```
+
+- [ ] **Step 2: Register router in `app.py`.**
+
+```python
+# backend/src/paperhub/app.py
+from paperhub.api import papers as papers_api
+app.include_router(papers_api.router)
+```
+
+- [ ] **Step 3: Tests.** `backend/tests/test_papers_api.py` covers:
+  - **`test_post_papers_ingests_then_cache_hits`**: POST `/papers` with an arxiv_id (use a fake `app.state.pipeline` that records calls and returns `cache_hit=False` first time, `True` second). Two POSTs → second response has `cache_hit=True`.
+  - **`test_get_library_excludes_session_rows`**: seed two `paper_content` rows, attach one to session 1, GET `/papers/library?session_id=1` → returns only the unattached row.
+  - **`test_get_library_filters_by_q`**: seed rows with distinct titles, GET with `q=transformer` → only matching rows.
+  - **`test_post_from_library_idempotent`**: POST `/papers/from-library` twice with same `(session_id, paper_content_id)` → both 200, same `papers_id`, only one row in DB.
+  - **`test_patch_toggles_enabled`**: insert papers row with enabled=1, PATCH `{"enabled": false}` → DB row updated.
+  - **`test_delete_removes_papers_row_only`**: insert papers row, DELETE → 204; assert `paper_content` row still exists, chunks untouched.
+  - **`test_get_html_serves_file`**: write a tmp HTML file, set `paper_content.html_path`, GET → 200 with `text/html`.
+  - **`test_get_html_404_when_missing`**: nonexistent paper_content_id → 404.
+
+- [ ] **Step 4: Commit.**
+
+```powershell
+uv run pytest tests/test_papers_api.py -v
+git add backend/src/paperhub/api/papers.py backend/src/paperhub/app.py backend/tests/test_papers_api.py
+git commit -m "feat(api): papers REST (ingest + library + from-library + toggle + remove + html)"
+```
 
 ---
 
-## Task 13 — CLI smoke scripts (ingest + paper_qa)
+## Task 13 — CLI smoke scripts (ingest + paper_qa + research_turn)
 
 **Files:**
 - Create: `backend/scripts/ingest_paper.ps1`
 - Create: `backend/scripts/query_papers.ps1`
+- Create: `backend/scripts/research_turn.ps1`
 
-`ingest_paper.ps1`: takes an arxiv_id (or path to a PDF), POSTs to `/papers`, asserts 200, prints `cache_hit`. Run twice — second time must report `cache_hit: true`.
+Each script follows the same harness pattern as `smoke_chat_real.ps1`: load `.env`, pre-flight port-free check, boot uvicorn on a dedicated port (8767 / 8768 / 8769), wait for `/health`, run assertions, kill the whole process tree on exit. Provided as full bodies — no placeholders.
 
-`query_papers.ps1`: starts a session, POSTs a chat with intent=paper_qa, asserts SSE contains a `final` event with content matching `\[chunk:\d+\]` regex.
+`ingest_paper.ps1` (excerpt — full body matches `smoke_chat_real.ps1` structure):
 
-- [ ] Commit: `test(pipelines): CLI smoke scripts for ingest + paper_qa round-trip`
+```powershell
+# After uvicorn is up on :8767 ...
+$arxivId = if ($args.Count -gt 0) { $args[0] } else { "1706.03762" }  # default: Vaswani transformer
+
+$first  = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8767/papers" `
+    -ContentType "application/json" -Body (@{ session_id = 1; arxiv_id = $arxivId } | ConvertTo-Json -Compress)
+if ($first.cache_hit) { throw "ASSERTION: first ingest must be cache_miss, got cache_hit=true" }
+Write-Host "first ingest OK — paper_content_id=$($first.paper_content_id), title=$($first.title)"
+
+$second = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8767/papers" `
+    -ContentType "application/json" -Body (@{ session_id = 2; arxiv_id = $arxivId } | ConvertTo-Json -Compress)
+if (-not $second.cache_hit) { throw "ASSERTION: second ingest must be cache_hit=true" }
+if ($second.paper_content_id -ne $first.paper_content_id) { throw "ASSERTION: same paper_content_id expected" }
+Write-Host "second ingest OK — cache_hit=true, ~$([int]($sw.Elapsed.TotalMilliseconds))ms total"
+```
+
+Acceptance — I-8 #2: second invocation reports `cache_hit: true` and the wall-clock for the second POST is under 500 ms.
+
+`query_papers.ps1`: pre-seeds two papers (`1706.03762` + one other; both attached to session 3), POSTs a chat with a comparative question, captures SSE, asserts:
+- `routing_decision` event present with `intent: "paper_qa"`
+- `[chunk:\d+]` appears at least **twice** in `final.content`
+- The cited `chunk_id`s, joined back to `chunks.paper_content_id`, span **≥ 2 distinct values** (I-8 #3 — the prior plan only checked for ONE chunk marker, which a single-paper answer satisfies trivially).
+
+```powershell
+# After SSE captured into $sseRaw and final content extracted into $final ...
+$chunkIds = [regex]::Matches($final, '\[chunk:(\d+)\]') | ForEach-Object { [int]$_.Groups[1].Value }
+if ($chunkIds.Count -lt 2) { throw "ASSERTION: expected >= 2 [chunk:N] markers, got $($chunkIds.Count)" }
+$inList = ($chunkIds | ForEach-Object { $_ }) -join ","
+$db = "$env:PAPERHUB_WORKSPACE/paperhub.db"
+$paperIds = & sqlite3 $db "SELECT DISTINCT paper_content_id FROM chunks WHERE id IN ($inList);" | Sort-Object -Unique
+if ($paperIds.Count -lt 2) { throw "ASSERTION I-8 #3: citations span < 2 distinct paper_content rows ($paperIds)" }
+Write-Host "paper_qa OK — $($chunkIds.Count) chunk citations across $($paperIds.Count) papers"
+```
+
+`research_turn.ps1` is **new for v2.3** — exercises the Research Agent tool-calling loop end-to-end against the real LLM. Three sub-tests, each in its own session:
+
+```powershell
+# Sub-test 1 (I-8 #8): vague prompt → clarifying question, zero search_arxiv tool_calls
+$resp = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8769/chat" `
+    -ContentType "application/json" `
+    -Body (@{ user_message = "find me good ML papers" } | ConvertTo-Json -Compress)
+# Parse SSE → assert at least one tool_step row exists with tool="paper_search:plan"
+# AND zero tool_step rows with tool starting "paper_search:search_arxiv".
+# AND final.content contains "?" (clarifying question heuristic).
+
+# Sub-test 2 (I-8 #9): clear prompt + library hit → library-first preference
+# Pre-attach 1706.03762 to a different session so it's in the dedup'd library.
+# POST /chat with "I want the original transformer paper"
+# Assert: tool_step "paper_search:search_library" appears before any "paper_search:search_arxiv"
+# AND "paper_search:add_paper_to_session" was called with paper_id starting "library:"
+# AND final.content names the attached paper.
+
+# Sub-test 3 (basic happy path): clear prompt, no library hit
+# POST /chat with "find recent papers about retrieval augmented generation"
+# Assert: at least one "paper_search:add_paper_to_session" tool_step,
+# and the corresponding papers row exists in DB with enabled=1.
+```
+
+- [ ] **Step 1**: write all three scripts following the harness pattern.
+- [ ] **Step 2**: run each; capture wall-clock and any failures.
+- [ ] **Step 3**: commit.
+
+```powershell
+git add backend/scripts/ingest_paper.ps1 backend/scripts/query_papers.ps1 backend/scripts/research_turn.ps1
+git commit -m "test(pipelines): CLI smokes — ingest cache-hit, paper_qa ≥2-paper citations, research-turn tool-loop"
+```
 
 ---
 
@@ -1806,18 +2885,24 @@ After Tasks 1–13:
 
 After Task 14:
 
-- `uv run pytest -v` — all tests pass (~55+ backend tests, ~50 frontend tests unchanged).
+- `uv run pytest -v` — all tests pass (~70 backend tests after v2.3: existing ~35 + ~5 each for pipelines/extract/chunker/embedder/renderer/chroma/retriever/reranker/paper_pipeline + 4 semantic_scholar + 4 research_tools + 5 research_paper_search + 3 research_paper_qa + 8 papers_api + 2 chat_sse for paper_search/paper_qa). Frontend `npm test` still passes the Plan B count unchanged.
 - `uv run ruff check src tests` + `uv run mypy src` — clean.
-- `cd backend; .\scripts\ingest_paper.ps1 2403.01234` — first run downloads + processes, second run reports `cache_hit: true` in < 500ms.
-- `cd backend; .\scripts\query_papers.ps1 "Compare the methods of these two papers"` — assistant streams an answer containing `[chunk:<id>]` markers, where each id resolves to a real row in `chunks`.
-- Frontend `npm test` still passes 49 tests; Plan D will add the UI for paper_search/paper_qa.
-- The router's stubs are gone for `paper_search` and `paper_qa` (slides + library_stats still stubbed, replaced in Plans F + E).
+- `cd backend; .\scripts\ingest_paper.ps1 1706.03762` — first run downloads + processes; second run reports `cache_hit: true` in < 500ms (I-8 #2).
+- `cd backend; .\scripts\query_papers.ps1 "Compare the methods of these two papers"` — assistant streams an answer containing `[chunk:<id>]` markers; at least 2 markers, citing chunks from **≥ 2 distinct `paper_content.id`** (I-8 #3 — strict).
+- `cd backend; .\scripts\research_turn.ps1` — all three sub-tests pass:
+  - **I-8 #8 (new)**: a vague prompt produces a clarifying question and zero `search_arxiv` tool calls.
+  - **I-8 #9 (new)**: a clear prompt with a matching library paper triggers `search_library` BEFORE any `search_arxiv`, and `add_paper_to_session` is invoked with `paper_id="library:<id>"`.
+  - **Happy path**: a clear prompt with no library match triggers at least one `add_paper_to_session` with `paper_id="arxiv:<id>"`, and the resulting `papers` row exists with `enabled=1`.
+- The router's stubs are gone for `paper_search` and `paper_qa` (slides + library_stats still stubbed; Plans F + E replace).
+- New `.env.example` entry `PAPERHUB_SEMANTIC_SCHOLAR_API_KEY` documented as optional.
 
-I-8 acceptance lit:
+I-8 acceptance lit by Plan C:
 - #1 router accuracy (unchanged from Plan A)
 - #2 cache reuse — verifiable
-- #3 multi-paper Q&A with citations — verifiable
-- #4 trace replay (unchanged)
+- #3 multi-paper Q&A with citations — verifiable, **tightened** to require ≥ 2 distinct `paper_content.id` cited
+- #4 trace replay (unchanged from Plan A — every loop iteration writes a `tool_calls` row)
+- #8 clarify-vs-search behavior (new, smoke-verifiable)
+- #9 library-first preference (new, smoke-verifiable)
 
 Remaining I-8 criteria (#5 Compare, #6 no-silent-failure UI, #7 freshness) hand off to Plans G + D + E as before.
 
@@ -1825,10 +2910,12 @@ Remaining I-8 criteria (#5 Compare, #6 no-silent-failure UI, #7 freshness) hand 
 
 ## Plan self-review
 
-- **Spec coverage** — every §III-5 stage maps to a task; FR-03 / FR-07 / FR-08 / UC-1 / UC-2 / UC-3 all addressed; I-8 #2 + #3 acceptance criteria covered.
-- **Placeholder scan** — every step contains real code or commands; the few `pass  # see implementation` stubs in test bodies are deliberate (the implementer fills them in once the fixtures land in Task 1).
-- **Type consistency** — `Chunk`, `ChunkSearchResult`, `RetrievedChunk`, `ArxivResult`, `IngestRequest`, `IngestResult` shapes are used consistently across files.
-- **No scope creep** — no Reference Sources UI, no Citation Canvas component, no slide pipeline, no Compare. All explicitly deferred.
+- **Spec coverage** — every §III-5 stage maps to a task; FR-03 / FR-07 v2.3 / FR-08 v2.3 / UC-1 v2.3 / UC-2 v2.3 / UC-3 all addressed; I-8 #2 + #3 + #8 + #9 acceptance criteria covered. The Research Agent's three-tool palette + library-first canonical flow + default-add + UI-side curation endpoints match SRS §III-3 row exactly.
+- **Placeholder scan** — every step contains real code or commands. Test bodies for the 5 paper_search cases are full Python; the other test files have explicit test-case lists (titles + asserts described) for the executor to fill in following the shown templates.
+- **Type consistency** — `Chunk`, `ChunkSearchResult`, `RetrievedChunk`, `ArxivResult`, `LibraryHit`, `ArxivHit`, `RelatedPaper`, `AddResult`, `IngestRequest`, `IngestResult` shapes are used consistently across files. Tool-schema JSON in `research_tools.TOOL_SCHEMAS` is the public contract that Plan E's MCP wrapper will preserve verbatim.
+- **No scope creep** — no Reference Sources UI, no Citation Canvas component, no slide pipeline, no Compare view, no MCP server wrapping. All explicitly deferred.
+- **MCP-forward design** — tool dispatchers are pure async functions with typed args + structured returns; the MCP wrapper in Plan E only adds the JSON-RPC transport, no business-logic refactor needed.
+- **Demo headline** — the per-turn trace panel for `paper_search` shows `search_library → search_arxiv (×1-3) → add_paper_to_session (×1-2)` with the LLM's `reason` field on each step. This is the headline "how the Agent picks tools" demonstration the project brief asks for.
 
 ---
 
