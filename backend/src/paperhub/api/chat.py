@@ -331,6 +331,13 @@ async def paper_qa_stream(
             if evt == "token":
                 streamed_any = True
                 yield payload["text"]
+            elif evt == "tool_step":
+                # Mirror paper_search: forward each agent-step record as it
+                # arrives so the outer chat.py loop emits tool_step SSE
+                # events progressively (matches FR-02 trace-panel intent).
+                # Without this branch the events fall through to the
+                # post-stream drain and all surface at once at end-of-turn.
+                yield ToolStepYield(record=payload["record"])
         elif mode == "values" and isinstance(payload, dict):
             if "final_response" in payload:
                 final_text = payload["final_response"]
@@ -477,7 +484,20 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> EventSourceRespon
                         model=settings.paper_qa_model, retriever=retriever,
                         conn=conn,
                     ):
-                        if isinstance(item, FinalOnlyMessage):
+                        if isinstance(item, ToolStepYield):
+                            # Per-step trace event from the paper_qa subgraph
+                            # (resolve / map / synthesize). Forward immediately
+                            # so the trace panel surfaces progress in real time
+                            # instead of waiting for end-of-turn drain.
+                            yield {
+                                "event": "tool_step",
+                                "data": json.dumps(
+                                    {"record": item.record},
+                                    separators=(',', ':'),
+                                ),
+                            }
+                            last_emitted_step = item.record["step_index"]
+                        elif isinstance(item, FinalOnlyMessage):
                             # Sentinel path: empty refs / empty corpus.
                             final_content = item.content
                             final_only_seen = True
