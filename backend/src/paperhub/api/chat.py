@@ -9,13 +9,18 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from paperhub.agents.chitchat import chitchat_stream
-from paperhub.agents.research import FinalOnlyMessage, paper_qa_stream, paper_search
+from paperhub.agents.research import (
+    FinalOnlyMessage,
+    paper_qa_stream,
+    paper_search,
+)
 from paperhub.agents.router import router_node
 from paperhub.agents.state import AgentState
 from paperhub.agents.stubs import stub_response
 from paperhub.api.deps import get_chroma
 from paperhub.config import load_settings
 from paperhub.db.connection import open_db
+from paperhub.db.tool_calls import drain_tool_calls_since
 from paperhub.llm.litellm_adapter import LiteLlmAdapter
 from paperhub.models.events import (
     ErrorEvent,
@@ -100,29 +105,6 @@ async def _record_user_message(
     await conn.commit()
 
 
-async def _drain_tool_calls_since(
-    conn: aiosqlite.Connection, run_id: int, after_step: int,
-) -> list[dict[str, Any]]:
-    async with conn.execute(
-        "SELECT run_id, branch, step_index, parent_step, agent, tool, model, "
-        "args_redacted_json, result_summary_json, latency_ms, token_in, token_out, status, error "
-        "FROM tool_calls WHERE run_id = ? AND step_index > ? ORDER BY step_index",
-        (run_id, after_step),
-    ) as cur:
-        rows = await cur.fetchall()
-    cols = ("run_id", "branch", "step_index", "parent_step", "agent", "tool", "model",
-            "args_redacted_json", "result_summary_json", "latency_ms",
-            "token_in", "token_out", "status", "error")
-    out: list[dict[str, Any]] = []
-    for r in rows:
-        d: dict[str, Any] = dict(zip(cols, r, strict=True))
-        for key in ("args_redacted_json", "result_summary_json"):
-            if d[key]:
-                d[key] = json.loads(d[key])
-        out.append(d)
-    return out
-
-
 @router.post("/chat")
 async def chat_endpoint(req: ChatRequest, request: Request) -> EventSourceResponse:
     settings = load_settings()
@@ -153,7 +135,7 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> EventSourceRespon
                     state, adapter=adapter, tracer=tracer,
                     model=settings.router_model, **router_kwargs,
                 )
-                for rec in await _drain_tool_calls_since(conn, run_id, last_emitted_step):
+                for rec in await drain_tool_calls_since(conn, run_id, last_emitted_step):
                     yield {"event": "tool_step",
                            "data": json.dumps({"record": rec}, separators=(',', ':'))}
                     last_emitted_step = rec["step_index"]
@@ -183,19 +165,29 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> EventSourceRespon
                         papers_cache_dir=settings.papers_cache_dir,
                         chroma=get_chroma(request, settings),
                     )
-                    final_content = await paper_search(
+                    final_content = ""
+                    async for ps_item in paper_search(
                         state,
                         adapter=adapter,
                         tracer=tracer,
                         model=settings.paper_qa_model,
                         conn=conn,
                         pipeline=pipeline,
-                    )
+                    ):
+                        if isinstance(ps_item, FinalOnlyMessage):
+                            final_content = ps_item.content
+                        else:  # ToolStepYield
+                            yield {"event": "tool_step",
+                                   "data": json.dumps(
+                                       {"record": ps_item.record},
+                                       separators=(',', ':'),
+                                   )}
+                            last_emitted_step = ps_item.record["step_index"]
                 elif intent == "paper_qa":
                     retriever = Retriever(chroma=get_chroma(request, settings))
                     qa_chunks: list[str] = []
                     final_content = ""
-                    async for item in paper_qa_stream(
+                    async for qa_item in paper_qa_stream(
                         state,
                         adapter=adapter,
                         tracer=tracer,
@@ -203,11 +195,11 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> EventSourceRespon
                         retriever=retriever,
                         conn=conn,
                     ):
-                        if isinstance(item, FinalOnlyMessage):
-                            final_content = item.content
+                        if isinstance(qa_item, FinalOnlyMessage):
+                            final_content = qa_item.content
                         else:
-                            qa_chunks.append(item)
-                            token_evt = TokenEvent(run_id=run_id, branch="", text=item)
+                            qa_chunks.append(qa_item)
+                            token_evt = TokenEvent(run_id=run_id, branch="", text=qa_item)
                             yield {"event": "token",
                                    "data": token_evt.model_dump_json(exclude={"type"})}
                     if not final_content:
@@ -215,7 +207,7 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> EventSourceRespon
                 else:
                     final_content = await stub_response(state, intent=intent)
 
-                for rec in await _drain_tool_calls_since(conn, run_id, last_emitted_step):
+                for rec in await drain_tool_calls_since(conn, run_id, last_emitted_step):
                     yield {"event": "tool_step",
                            "data": json.dumps({"record": rec}, separators=(',', ':'))}
                     last_emitted_step = rec["step_index"]

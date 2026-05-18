@@ -8,11 +8,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiosqlite
 import pytest
 
-from paperhub.agents.research import paper_search
+from paperhub.agents.research import FinalOnlyMessage, ToolStepYield, paper_search
 from paperhub.agents.research_tools import AddResult, ArxivHit, LibraryHit
 from paperhub.tracing.tracer import Tracer
 
 pytestmark = pytest.mark.asyncio
+
+
+async def _collect(gen: Any) -> tuple[str, list[Any]]:
+    """Consume the paper_search async generator; return (final_content, all_items)."""
+    items: list[Any] = []
+    async for item in gen:
+        items.append(item)
+    final_msg = next(i for i in items if isinstance(i, FinalOnlyMessage))
+    return final_msg.content, items
 
 
 def _msg(
@@ -58,13 +67,16 @@ async def test_vague_prompt_emits_clarifying_question(
     ]
     comp = _async_completion_mock(seq)
     with patch("paperhub.agents.research.litellm.acompletion", new=comp):
-        out = await paper_search(
+        out, items = await _collect(paper_search(
             state, adapter=None, tracer=fake_tracer,
             model="gemini/gemini-2.5-flash",
             conn=migrated_db, pipeline=fake_pipeline,
-        )
+        ))
     assert "?" in out
     assert comp.await_count == 1
+    # Streaming contract: at least the plan step is yielded as ToolStepYield.
+    tool_steps = [i for i in items if isinstance(i, ToolStepYield)]
+    assert len(tool_steps) >= 1
 
 
 # ---------- Case 2: clear prompt → library hit → add → respond (no arxiv) ----------
@@ -111,10 +123,10 @@ async def test_library_hit_skips_arxiv(
          patch("paperhub.agents.research.search_arxiv_dispatch", new=arxiv_mock), \
          patch("paperhub.agents.research.add_paper_to_session_dispatch",
                new=add_mock):
-        out = await paper_search(
+        out, _items = await _collect(paper_search(
             state, adapter=None, tracer=fake_tracer,
             model="m", conn=migrated_db, pipeline=fake_pipeline,
-        )
+        ))
     assert "Attention Is All You Need" in out
     add_mock.assert_awaited_once()
     # I-8 #9: library-first preference — no search_arxiv ever called
@@ -160,10 +172,10 @@ async def test_library_miss_falls_through_to_arxiv(
          patch("paperhub.agents.research.add_paper_to_session_dispatch",
                new=AsyncMock(return_value=AddResult(
                    7, 12, cache_hit=False, title="MoE Routing X"))):
-        out = await paper_search(
+        out, _items = await _collect(paper_search(
             state, adapter=None, tracer=fake_tracer,
             model="m", conn=migrated_db, pipeline=fake_pipeline,
-        )
+        ))
     assert "MoE Routing X" in out
 
 
@@ -209,10 +221,10 @@ async def test_arxiv_refinement_within_cap(
          patch("paperhub.agents.research.add_paper_to_session_dispatch",
                new=AsyncMock(return_value=AddResult(
                    8, 13, False, "Paper QA"))):
-        out = await paper_search(
+        out, _items = await _collect(paper_search(
             state, adapter=None, tracer=fake_tracer,
             model="m", conn=migrated_db, pipeline=fake_pipeline,
-        )
+        ))
     assert "refining" in out.lower() or "Paper QA" in out
 
 
@@ -247,9 +259,9 @@ async def test_arxiv_cap_enforced_at_three(
     with patch("paperhub.agents.research.litellm.acompletion", new=comp), \
          patch("paperhub.agents.research.search_arxiv_dispatch",
                side_effect=fake_arxiv):
-        await paper_search(
+        await _collect(paper_search(
             state, adapter=None, tracer=fake_tracer,
             model="m", conn=migrated_db, pipeline=fake_pipeline,
-        )
+        ))
     # Dispatcher invoked only 3 times — 4th was capped before dispatch.
     assert arx_dispatcher_calls == 3

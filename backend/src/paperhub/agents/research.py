@@ -17,6 +17,7 @@ from paperhub.agents.research_tools import (
     search_library_dispatch,
 )
 from paperhub.agents.state import AgentState
+from paperhub.db.tool_calls import drain_tool_calls_since
 from paperhub.llm.adapter import LlmAdapter
 from paperhub.llm.prompts.registry import PromptRegistry
 from paperhub.pipelines.paper_pipeline import PaperPipeline
@@ -31,6 +32,14 @@ class FinalOnlyMessage:
     empty-references and empty-retrieved cases."""
 
     content: str
+
+
+@dataclass(frozen=True)
+class ToolStepYield:
+    """Yielded by paper_search after each tracer.step closes so the chat
+    endpoint can forward as a tool_step SSE event in real time."""
+
+    record: dict[str, Any]  # the just-persisted tool_calls row
 
 
 MAX_ARXIV_CALLS_PER_TURN = 3
@@ -75,12 +84,13 @@ async def paper_search(
     pipeline: PaperPipeline,
     registry: PromptRegistry | None = None,
     **litellm_kwargs: Any,
-) -> str:
-    """Tool-calling loop. Returns the final assistant message body (markdown).
+) -> AsyncIterator[ToolStepYield | FinalOnlyMessage]:
+    """Tool-calling loop yielding ToolStepYield after each tracer.step and a
+    final FinalOnlyMessage when the loop ends.
 
-    The chat endpoint surfaces this as a one-shot `final` SSE event — there
-    is no token streaming inside paper_search (the trace panel + the
-    automatic add_paper_to_session side-effects are what the user watches).
+    Each ToolStepYield carries the just-persisted tool_calls row so the chat
+    endpoint can forward it as a tool_step SSE event in real time, making the
+    trace panel update incrementally rather than all-at-once after ~60-90 s.
     """
     del adapter  # interface parity only
     user_message = state["user_message"]
@@ -99,6 +109,8 @@ async def paper_search(
     messages.extend(history)
     messages.append({"role": "user", "content": user})
 
+    run_id: int = state["run_id"]
+    last_yielded_step = -1
     arxiv_calls = 0
     for iteration in range(MAX_TOOL_ITERATIONS):
         async with tracer.step(
@@ -122,10 +134,16 @@ async def paper_search(
                 },
             )
 
+        # Yield the plan step that just closed.
+        for rec in await drain_tool_calls_since(conn, run_id, last_yielded_step):
+            yield ToolStepYield(record=rec)
+            last_yielded_step = rec["step_index"]
+
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:
             # Final response — clarification question OR summary of additions.
-            return str(msg.get("content") or "(no response)")
+            yield FinalOnlyMessage(str(msg.get("content") or "(no response)"))
+            return
 
         # Append the assistant turn that requested the tools, then dispatch each.
         messages.append(
@@ -189,6 +207,11 @@ async def paper_search(
                     step.record_result({"error": str(exc)})
                     step.mark_error(str(exc))
 
+            # Yield the tool-dispatch step that just closed.
+            for rec in await drain_tool_calls_since(conn, run_id, last_yielded_step):
+                yield ToolStepYield(record=rec)
+                last_yielded_step = rec["step_index"]
+
             messages.append(
                 {
                     "role": "tool",
@@ -198,7 +221,7 @@ async def paper_search(
                 },
             )
 
-    return (
+    yield FinalOnlyMessage(
         "I've reached the tool-call limit for this turn. "
         "Try asking again with a more specific question."
     )

@@ -5,7 +5,7 @@ from typing import Any
 import aiosqlite
 from httpx import ASGITransport, AsyncClient
 
-from paperhub.agents.research import FinalOnlyMessage
+from paperhub.agents.research import FinalOnlyMessage, ToolStepYield
 from paperhub.app import create_app
 from paperhub.config import load_settings
 from paperhub.db.migrate import apply_schema
@@ -91,8 +91,8 @@ async def test_chat_sse_paper_search_one_shot(tmp_path, monkeypatch) -> None:
         conn: Any,
         pipeline: Any,
         **kwargs: Any,
-    ) -> str:
-        return _canned
+    ) -> AsyncIterator[FinalOnlyMessage]:
+        yield FinalOnlyMessage(_canned)
 
     import paperhub.api.chat as chat_module
 
@@ -480,3 +480,97 @@ async def test_chat_sse_cancellation_finalises_run(
     # Either 'cancelled' or 'error' is acceptable when the client disconnects.
     assert row is not None
     assert row[0] in ("cancelled", "error", "running", "ok"), f"Unexpected status: {row[0]}"
+
+
+# ---------------------------------------------------------------------------
+# v2.4-2: paper_search streams tool_step events incrementally
+# ---------------------------------------------------------------------------
+async def test_paper_search_streams_tool_step_events_incrementally(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The paper_search branch must emit tool_step events as the agent
+    executes each tool call, not all-at-once after the loop completes.
+    Events are verified to arrive BEFORE the final event (ordering contract)."""
+    monkeypatch.setenv("PAPERHUB_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv(
+        "PAPERHUB_ROUTER_MOCK",
+        '{"intent":"paper_search","model_tier":"flagship",'
+        '"confidence":0.95,"reasoning":"find papers"}',
+    )
+    await _bootstrap_schema(tmp_path)
+
+    # Build a fake paper_search generator that yields 3 ToolStepYield items
+    # (simulating plan + search_library + add_paper_to_session) followed by
+    # a FinalOnlyMessage — demonstrating the streaming contract.
+    _canned_record_base: dict[str, Any] = {
+        "run_id": 1,
+        "branch": "",
+        "parent_step": None,
+        "agent": "research",
+        "tool": "paper_search:plan",
+        "model": "gemini/gemini-2.5-flash",
+        "args_redacted_json": None,
+        "result_summary_json": None,
+        "latency_ms": 10,
+        "token_in": None,
+        "token_out": None,
+        "status": "ok",
+        "error": None,
+    }
+    _step_records = [
+        {**_canned_record_base, "step_index": 0, "tool": "paper_search:plan"},
+        {**_canned_record_base, "step_index": 1, "tool": "paper_search:search_library",
+         "model": None},
+        {**_canned_record_base, "step_index": 2, "tool": "paper_search:add_paper_to_session",
+         "model": None},
+    ]
+    _final_text = "Added 'Attention Is All You Need' from your library."
+
+    async def _fake_paper_search(
+        state: Any,
+        *,
+        adapter: Any,
+        tracer: Any,
+        model: Any,
+        conn: Any,
+        pipeline: Any,
+        **kwargs: Any,
+    ) -> AsyncIterator[ToolStepYield | FinalOnlyMessage]:
+        for rec in _step_records:
+            yield ToolStepYield(record=rec)
+        yield FinalOnlyMessage(_final_text)
+
+    import paperhub.api.chat as chat_module
+
+    monkeypatch.setattr(chat_module, "paper_search", _fake_paper_search)
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:  # noqa: SIM117
+        async with client.stream(
+            "POST", "/chat",
+            json={"session_id": None, "user_message": "find me transformer papers"},
+        ) as response:
+            assert response.status_code == 200
+            events = await _consume_sse(response.aiter_bytes())
+
+    types = [t for t, _ in events]
+    # At least 3 tool_step events from the fake generator.
+    tool_step_events = [(t, d) for t, d in events if t == "tool_step"]
+    assert len(tool_step_events) >= 3, (
+        f"Expected >= 3 tool_step events, got {len(tool_step_events)}: {types}"
+    )
+
+    # Ordering: every tool_step must come BEFORE the final event.
+    final_idx = next(i for i, e in enumerate(events) if e[0] == "final")
+    tool_step_indexes = [i for i, e in enumerate(events) if e[0] == "tool_step"]
+    assert all(idx < final_idx for idx in tool_step_indexes), (
+        "All tool_step events must precede the final event"
+    )
+
+    # No token events — paper_search is non-streaming text.
+    assert "token" not in types
+
+    # Final content matches.
+    final_payload = next(d for t, d in events if t == "final")
+    assert final_payload["content"] == _final_text
