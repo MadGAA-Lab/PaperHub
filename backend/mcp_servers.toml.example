@@ -1,0 +1,62 @@
+# PaperHub MCP server registry (SRS v2.5, §III-6.1).
+#
+# Copy to `mcp_servers.toml` (gitignored) and edit. The real file is loaded
+# by `MCPRegistry` at FastAPI startup; unreachable servers log WARN and are
+# skipped, so leaving a daemon down is non-fatal — its tools simply don't
+# enter the agent palette.
+#
+# Each [[server]] block produces one `MCPServerConfig` (see
+# `paperhub.mcp.config`). Fields:
+#
+#   name              namespace prefix on aggregated tool names ("web.search")
+#   transport         "streamable_http" or "stdio"
+#                     (stdio dispatch ships in Plan E; the schema is accepted)
+#   url               streamable_http only — server endpoint
+#   command, args     stdio only — process launch
+#   expose            allowlist of upstream tool names; anything not listed
+#                     is hidden from the LiteLLM tool palette
+#   aliases           optional rename map (upstream → exposed) applied after
+#                     the allowlist filter (e.g. fetchWebContent → fetch)
+#   timeout_seconds   per-call timeout enforced by MCPClient.call_tool
+#                     (a timeout raises MCPUnavailableError, so the agent
+#                     treats it like any transport failure)
+#
+# ─── open-webSearch (Plan C v2.5) ────────────────────────────────────────
+# Optional external dependency. To enable:
+#   npm install -g open-websearch
+#   open-websearch serve        # long-lived local daemon on :3000
+# When the daemon is reachable, paper_search loads the v2 prompt and the
+# Research Agent gains a no-key multi-engine discovery step before
+# Semantic Scholar lookup. When the daemon is down, paper_search/v1 loads
+# and behaviour reverts to v2.4 exactly.
+
+[[server]]
+name = "web"
+transport = "streamable_http"
+url = "http://localhost:3000/mcp"
+expose = ["search", "fetchWebContent"]
+aliases = { "fetchWebContent" = "fetch" }
+timeout_seconds = 8.0
+
+# ─── future blocks ───────────────────────────────────────────────────────
+# Plan E will add a sqlite block:
+#   [[server]]
+#   name = "sql"
+#   transport = "stdio"
+#   command = "uv"
+#   args = ["run", "paperhub-sqlite-mcp"]
+#   expose = ["query"]
+#
+# Plan G will add filesystem + paperhub.*:
+#   [[server]]
+#   name = "fs"
+#   transport = "stdio"
+#   command = "npx"
+#   args = ["-y", "@modelcontextprotocol/server-filesystem", "./workspace"]
+#   expose = ["read_file", "list_directory"]
+#
+#   [[server]]
+#   name = "paperhub"
+#   transport = "streamable_http"
+#   url = "http://localhost:8001/mcp"
+#   expose = ["get_paper", "search_library", "list_runs", "get_trace"]

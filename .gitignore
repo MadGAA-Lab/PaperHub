@@ -76,5 +76,10 @@ workspace*/
 # local configuration files
 *.local.json
 
+# MCP server registry — operator-edited, may reference local-only daemons.
+# Checked-in template lives at backend/mcp_servers.toml.example (SRS v2.5,
+# §III-6.1).
+/backend/mcp_servers.toml
+
 # temporary files
 tmp*/
