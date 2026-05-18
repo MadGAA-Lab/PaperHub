@@ -71,6 +71,10 @@ desktop.ini
 
 # workspace files
 .*workspace
+workspace*/
 
 # local configuration files
 *.local.json
+
+# temporary files
+tmp*/

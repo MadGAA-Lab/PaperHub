@@ -2951,3 +2951,269 @@ Plan complete and saved to `docs/superpowers/plans/2026-05-18-paperhub-C-paper-p
 2. **Inline Execution** — batch with checkpoints in this session.
 
 Which approach?
+
+---
+
+## Plan C v2.4 Follow-up Tasks (post-merge revision)
+
+> **Status:** Plan C as originally scoped shipped and merged. Real-API verification (4 review rounds) + manual browser testing surfaced four operational gaps **and two design re-prioritisations** — the second design call (browser-test follow-up) reverts the v2.3 "default-add top 1-2" behavior to **suggest-only**: the agent never downloads, the user is the sole ingestion trigger. These five tasks are the **v2.4 patch round** — they ship to the same branch / PR cadence Plan C used. SRS v2.4 entry captures the design intent; this section is the executor-facing decomposition.
+>
+> **Full feedback brief** for the dispatching code agent: [docs/superpowers/feedback/2026-05-18-plan-c-v2.4-feedback.md](../feedback/2026-05-18-plan-c-v2.4-feedback.md).
+>
+> **v2.4 design summary** (the agent — read-only loop): the agent has three read tools (`search_library`, `search_semantic_scholar`, `find_related_papers`) and **no write tool**. It shortlists 3-5 candidates per turn with one-line reasons. The chat endpoint emits a new `search_results` SSE event before `final` carrying the structured candidate list. The frontend renders these as a `SearchResultList` with per-row Add buttons. Clicking Add calls `POST /papers` with a prefix-discriminated `paper_id` (`arxiv:<id>` / `ss:<paperId>` / `library:<paper_content_id>`) — that's the only path that triggers ingestion. Reference Sources panel manages already-attached papers.
+
+### Task v2.4-1 — Frontend session_id roundtrip (CRITICAL)
+
+**Symptom:** demo broke during phase-B testing — user clicked Add on a candidate card → paper attached to backend session N → next `paper_qa` turn returns *"No references are enabled for this session"* because that turn opened backend session N+1. (In the v2.3 timeline the symptom showed via the agent's auto-add; in v2.4 the symptom shows via the user's manual Add click — same root cause.)
+
+**Root cause:** [`frontend/src/hooks/useChatStream.ts:42`](../../../frontend/src/hooks/useChatStream.ts#L42) hardcodes `session_id: null` on every POST `/chat`. The backend `_ensure_session` creates a fresh `chat_sessions` row each time. Papers attached (by user click or library browser) belong to backend session N; subsequent turn queries backend session N+1.
+
+**Also impacts** `POST /papers` and `POST /papers/from-library` from the frontend Add-button flows — they need to send the user's *current backend* `session_id`, which means the frontend must learn and persist it on the first SSE event.
+
+**Files:**
+- Modify: `backend/src/paperhub/models/events.py` — extend `RoutingDecisionEvent` (or add a new `SessionEvent`) to carry `session_id: int` so the frontend learns the backend session ID on the first turn.
+- Modify: `backend/src/paperhub/api/chat.py` — emit the `session_id` on the first event of every run.
+- Modify: `frontend/src/types/domain.ts` — `ChatSession` gains `backend_session_id: number | null`.
+- Modify: `frontend/src/store/chat.ts` — add `patchSessionBackendId(sessionId, backendId)` action.
+- Modify: `frontend/src/hooks/useChatStream.ts` — read `backend_session_id` from the active frontend session before posting; thread it through `session_id` in the POST body.
+
+**Test:** new `tests/test_chat_sse.py::test_chat_emits_session_id_on_first_event` asserts the SSE stream emits `session_id` in the first event. Frontend `tests/hooks/useChatStream.test.ts` adds a multi-turn assertion: send turn 1 → store the `backend_session_id` → send turn 2 → MSW handler must receive the same `session_id` in the second POST body.
+
+### Task v2.4-2 — Stream `tool_step` events during `paper_search` (CRITICAL)
+
+**Symptom:** trace panel sits empty for 60-90s during a paper_search turn (during arXiv download + extract + chunk + embed), then all 6-10 rows appear at once at the end.
+
+**Root cause:** [`backend/src/paperhub/api/chat.py:182-189`](../../../backend/src/paperhub/api/chat.py#L182-L189) awaits `paper_search()` (returns `str`) before draining `tool_calls`. The agent's whole tool-calling loop runs synchronously before chat.py gets a chance to emit any `tool_step` events.
+
+**Files:**
+- Modify: `backend/src/paperhub/agents/research.py` — convert `paper_search` from `async def -> str` to `async def -> AsyncIterator[ToolStepRecord | FinalOnlyMessage]`. After each `tracer.step()` context closes, the agent yields the just-written tool_calls row(s); after the loop concludes, yield a `FinalOnlyMessage(content=...)`.
+- Modify: `backend/src/paperhub/api/chat.py` — switch the `paper_search` branch to iterate the async generator, forwarding `ToolStepRecord` as `tool_step` SSE events in real time (matches the `paper_qa_stream` pattern).
+- Optional: a small helper `_emit_steps_since(tracer, after_step)` to dedupe the drain-tool_calls logic that lives in both branches now.
+
+**Test:** `tests/test_chat_sse.py::test_paper_search_streams_tool_step_events_incrementally` — set `PAPERHUB_ROUTER_MOCK` to force paper_search, monkey-patch `litellm.acompletion` with a side_effect sequence that yields canned tool_calls, and time-track the SSE events: each `tool_step` must arrive *before* the next `paper_search:plan` step finishes (i.e., consume events as they arrive, not buffer to end).
+
+### Task v2.4-3 — TraceInline expand-on-click with args/result/reason (CRITICAL)
+
+**Symptom:** trace panel shows only `[main#5] research · paper_search:search_arxiv (-) 2577ms ok` per row — no `query`, no `reason`, no `result_summary`. The "tool selection logic" demo is reduced to opaque latency numbers.
+
+**Root cause:** [`frontend/src/components/chat/TraceInline.tsx:35-37`](../../../frontend/src/components/chat/TraceInline.tsx#L35-L37) renders only the headline. The `ToolCallRecord` payload includes `args_redacted_json` and `result_summary_json` but the component discards them. SRS §III-2 FR-02 specifies *"Click a row to expand `args_redacted` + `result_summary`"* — never implemented.
+
+**Files:**
+- Modify: `frontend/src/components/chat/TraceInline.tsx` — each `<li>` becomes its own collapsible. On expand, render two `<dl>` blocks (Args / Result) with structured rendering for the known keys: `reason` rendered prominently in italics (it's the LLM's *why*); `query` / `paper_id` / `arxiv_id` / `mode` shown as labelled rows; `count` / `title` / `cache_hit` / `papers_id` shown in the result; everything else falls through to a pretty-printed JSON block. Keep the outer "Trace · N steps" toggle for the collapsed default.
+- Add: `frontend/tests/components/TraceInline.test.tsx` — three new cases: expand reveals reason; expand reveals query+count for a search_library call; error status renders error field in red.
+
+**Test:** `npm test -- TraceInline` — all existing assertions plus the three new ones.
+
+### Task v2.4-4 — Reference Sources panel + Library Browser + **SearchResultList** (IMPORTANT)
+
+**Symptom:** three missing UI surfaces:
+1. User can't see what's attached to the current session, can't toggle, can't remove.
+2. User can't browse + attach already-indexed papers from prior sessions.
+3. **User can't add papers from a paper_search result** — the agent shortlists candidates (v2.4 suggest-only), but the frontend has nowhere to render them as actionable cards. Without SearchResultList, the agent's shortlist is just text in the assistant message and the user has no path to ingest anything.
+
+**Scope:** originally a Plan D surface; SearchResultList in particular is now Plan-C-critical because v2.4's suggest-only flow makes the cards the only attach surface in a paper_search turn. Citation Canvas + Compare view stay deferred to Plan D / G.
+
+**Files (three components, two API endpoints, one store slice):**
+
+**Backend:**
+- Modify: `backend/src/paperhub/api/papers.py` —
+  - Add `GET /papers?session_id=N` (list this session's references joined to `paper_content`).
+  - Extend `POST /papers` to accept `paper_id: str` (prefix-discriminated) in addition to the legacy `arxiv_id: str` (for backwards compat with existing scripts). Body now `{session_id: int, paper_id?: str, arxiv_id?: str}` — at least one of `paper_id` or `arxiv_id` required. If `paper_id` is given, dispatches via the new `add_paper_to_session_dispatch` paper_id router (see Task v2.4-5). If `arxiv_id` is given, internally constructs `paper_id=f"arxiv:{arxiv_id}"` so the dispatch path is unified.
+
+**Frontend — three new components:**
+- Create: `frontend/src/components/references/ReferenceSourcesDrawer.tsx` — **collapsible right-edge drawer** (NOT a fixed sidebar panel; user-requested in v2.4 design notes). Uses shadcn `Sheet` primitive. Trigger button stays fixed in the viewport with a count badge. Drawer body lists `GET /papers?session_id={current_backend_session_id}` results. Each row: title, year, arxiv_id linked, enable/disable Switch (→ PATCH), trash icon (→ DELETE). Auto-refreshes on `search_results` (when `auto_added` candidates land) and on user-initiated Add success. On `auto_added` arrival, flash the trigger button's count badge — do not auto-open the drawer (disrupts reading flow).
+- Create: `frontend/src/components/references/LibraryBrowserModal.tsx` — opened by an "Add from library" button at the top of the drawer. Searches `GET /papers/library?session_id={current}&q=...` (300ms debounce); each row has an Attach button → `POST /papers/from-library`.
+- Create: `frontend/src/components/chat/SearchResultList.tsx` — **renders inline below an assistant message** whose corresponding run produced a `search_results` event. Each candidate card shows title, authors (truncated), year, abstract (clamped to 3 lines), source-badge (`arXiv` / `Semantic Scholar` / `Already in library`), the agent's `reason` in muted italics, and a state-dependent action area (see Task v2.4-5 architecture diagram for the full matrix):
+  - `auto_added=true` → "Added by agent ✓" badge, no Add button (paper is already in the session via finalize auto-attach).
+  - `error="no_ingestible_source"` → "Source unavailable" badge, greyed action.
+  - Otherwise → "Add as reference" button → `POST /papers` with `{session_id, paper_id}`. On 200, button transitions to "Added ✓"; drawer auto-refreshes; the `paper_id` enters a frontend `addedPaperIds` set so re-renders show the added state.
+
+**Frontend — wiring:**
+- Modify: `frontend/src/types/domain.ts` — add `SearchResultCandidate` shape (mirrors backend `SearchResultsEvent` payload). Add a new field on `ChatMessage`: `search_results?: SearchResultCandidate[]` populated from the `search_results` SSE event.
+- Modify: `frontend/src/hooks/useChatStream.ts` — handle the new `search_results` event: parse + call store `setSearchResults(sessionId, runId, candidates)`.
+- Modify: `frontend/src/store/chat.ts` — new state slices: (a) `referencesBySession: Record<number, ReferenceItem[]>` with `setReferences`, `patchReferenceEnabled`, `removeReferenceLocal`; (b) `setSearchResults(sessionId, runId, candidates)` that finds the assistant message with matching `run_id` and patches its `search_results` field. Also add a frontend-only `addedPaperIds: Set<string>` updated whenever a POST /papers returns 200, so SearchResultList can render the per-card "already added" state across re-renders.
+- Modify: `frontend/src/lib/api.ts` — typed wrappers: `listSessionReferences(sessionId)`, `toggleReference(papersId, enabled)`, `removeReference(papersId)`, `listLibrary(sessionId, q, limit, offset)`, `attachFromLibrary(sessionId, paperContentId)`, `ingestPaper(sessionId, paperId)` (new — POST /papers with prefix-discriminated paper_id).
+- Modify: `frontend/src/components/chat/MessageBubble.tsx` (or `ChatPage.tsx` if the layout is owned there) — render `<SearchResultList candidates={message.search_results} />` directly below the assistant message bubble whenever `message.search_results` is populated.
+- Modify: `frontend/src/components/layout/Sidebar.tsx` — mount `<ReferenceSourcesPanel />` below the existing sessions section. Show only when the active frontend session has a `backend_session_id`.
+
+**Tests:**
+- Backend `tests/test_papers_api.py`:
+  - `test_list_session_references_returns_joined_paper_content_fields`
+  - `test_post_papers_accepts_paper_id_arxiv_prefix`
+  - `test_post_papers_accepts_paper_id_ss_prefix_with_arxiv_externalId` (mocks SS metadata fetch)
+  - `test_post_papers_accepts_paper_id_library_prefix_is_idempotent`
+  - `test_post_papers_legacy_arxiv_id_field_still_works`
+- Frontend `tests/components/SearchResultList.test.tsx`:
+  - `test_renders_candidates_with_title_authors_year_abstract`
+  - `test_add_button_calls_post_papers_with_prefix_discriminated_paper_id`
+  - `test_add_button_disabled_for_library_candidate_already_in_session`
+  - `test_no_ingestible_source_badge_disables_add_button`
+  - `test_after_add_success_button_shows_added_state`
+- Frontend `tests/components/ReferenceSourcesPanel.test.tsx` — load / toggle / remove (MSW catches PATCH / DELETE).
+- Frontend `tests/components/LibraryBrowserModal.test.tsx` — search debounce + attach.
+
+### Task v2.4-5 — Shortlist-with-finalize agent + SS-primary palette + PDF ingestion fallback (DESIGN CHANGE)
+
+**Symptom drives three coupled shifts:**
+1. **Browser test:** "the download source not use at all… the agent picks up a lot of references, but make just pick up some related" — research naturally surfaces many candidates; auto-downloading them all wastes resources for papers the user didn't choose. **Tames v2.3 "default-add top 1-2" into "shortlist 3-5 with optional `finalize: true` marker on 1-2 most-confident picks".**
+2. **Three attach sources defined**: agent-finalize (auto-attach with server cap 2), user clicks Add on SearchResultList card, user attaches from Library Browser. Suggested-only candidates are never downloaded.
+3. **Plan C v2.4 design:** Semantic Scholar broader coverage (~200M vs arXiv subset) + better metadata; arXiv reserved for raw-source downloading.
+
+**Design:** see SRS v2.4 entry + FR-07 + FR-08 + §III-3 Research Agent row + UC-1 + UC-2 paragraph 3.
+
+**Architectural shape (read this first):**
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  paper_search turn                                                   │
+│                                                                      │
+│  Agent (read-only loop, no write tool):                              │
+│    tool palette = {search_library, search_semantic_scholar,          │
+│                    find_related_papers}                              │
+│    Final assistant message ends with ```json:candidates``` block:    │
+│      [{paper_id, reason, finalize?:bool}, ...]                       │
+│    Yields ToolStepYield per step + SearchResultsYield(candidates)    │
+│           + FinalOnlyMessage(prose_text)                             │
+│                                                                      │
+│  chat.py (paper_search branch):                                      │
+│    forwards ToolStepYield → SSE tool_step                            │
+│    on SearchResultsYield:                                            │
+│       1. Cap finalize-flagged candidates to MAX=2 (truncate rest     │
+│          to suggested-only).                                         │
+│       2. For each finalize-flagged candidate, call                   │
+│          add_paper_to_session_dispatch(paper_id) → records           │
+│          papers_id on the candidate. On NoIngestibleSourceError,     │
+│          set candidate.error="no_ingestible_source", auto_added=false│
+│       3. Emit SSE search_results with the enriched candidate list    │
+│          (finalize, auto_added, papers_id, error all populated).     │
+│    forwards FinalOnlyMessage → SSE final                             │
+│                                                                      │
+│  Three attach paths (all → add_paper_to_session_dispatch):           │
+│    A. Agent-finalized: chat.py auto-calls during paper_search turn   │
+│    B. POST /papers {session_id, paper_id}: user clicks Add card      │
+│    C. POST /papers/from-library: user attaches from Library Browser  │
+│                                                                      │
+│  Frontend (Task v2.4-4):                                             │
+│    handles search_results event → stores candidates on the           │
+│    assistant message → SearchResultList renders cards:               │
+│      finalize-flagged + auto_added=true → "Added by agent ✓"         │
+│      finalize=false → Add button (calls POST /papers)                │
+│      error="no_ingestible_source" → greyed-out "Source unavailable"  │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Suggested-only candidates are never downloaded** — they exist as metadata in the `search_results` SSE payload only. Cache semantics for the three attach paths are identical because they all go through the same dispatcher: same paper picked via finalize / Add card / Library Browser resolves to the same `paper_content` row.
+
+**Files:**
+
+**Semantic Scholar layer:**
+- Modify: `backend/src/paperhub/pipelines/semantic_scholar.py`
+  - Add `search_papers(query, max_results) -> list[SemanticScholarHit]` (free-text search via `/graph/v1/paper/search?fields=title,abstract,year,authors,externalIds,openAccessPdf`).
+  - Add `fetch_paper_metadata(paper_id) -> SemanticScholarMetadata` (single-paper fetch, same field set).
+  - Both helpers send `x-api-key` header from `PAPERHUB_SEMANTIC_SCHOLAR_API_KEY` env when present. Module-level `httpx.AsyncClient` singleton, 10s timeout, User-Agent matching `arxiv_client.py`. Raise typed exceptions on 429.
+
+**Pipeline PDF ingestion:**
+- Modify: `backend/src/paperhub/pipelines/paper_pipeline.py`
+  - Add `_ingest_pdf_from_url(req, pdf_url, *, title, abstract, authors, year)` — download via httpx → compute `sha256:<hex>` from bytes → cache lookup (short-circuit if hit) → write `cache_root/<sha256>/source.pdf` → run `_render_pdf` → chunk → embed → persist `paper_content(kind='pdf_upload')` + chunks in single transaction → insert papers row → return `IngestResult`.
+  - `ingest()` dispatch: dispatch on `req.paper_id` prefix (`arxiv:` / `ss:` / `library:`). Cache lookup at the top must handle both `arxiv:<id>` and `sha256:<hex>` content keys.
+
+**Research tools — read-only palette:**
+- Modify: `backend/src/paperhub/agents/research_tools.py`
+  - **Remove `search_arxiv` from `TOOL_SCHEMAS`.** Keep dispatcher as internal Python helper (Plan F may reuse it via direct call). Ensure no LLM-callable schema references it.
+  - **Remove `add_paper_to_session` from `TOOL_SCHEMAS`.** Keep dispatcher as `add_paper_to_session_dispatch` — but it is now invoked **only by the `POST /papers` endpoint**, never by the agent loop. Update its signature to take `paper_id` (prefix-discriminated). Existing `library:` / `arxiv:` branches stay; add the `ss:` branch (SS metadata fetch → branch on `externalIds.ArXiv` → recurse into `arxiv:<id>` path; else `openAccessPdf.url` → `_ingest_pdf_from_url`; else raise typed `NoIngestibleSourceError` → HTTP 422 in the API layer).
+  - Add `search_semantic_scholar(query, max_results)` schema + dispatcher.
+  - Update `find_related_papers(paper_id, mode, max_results)` dispatcher — `paper_id` accepts `arxiv:<id>` or `ss:<paperId>`. Internal logic unchanged.
+
+**Agent loop (read-only + emit candidates):**
+- Modify: `backend/src/paperhub/agents/research.py`
+  - Drop `add_paper_to_session` from the prompt + tool dispatch.
+  - After the LLM's final no-tool-calls response, **build the shortlist** from the most recent `search_library` / `search_semantic_scholar` / `find_related_papers` tool results that the agent surfaced in its message. Cleanest implementation: have the agent emit a structured JSON block in its final message (e.g., a fenced ```json:candidates``` block listing `[{paper_id, reason}, ...]` for the picks), then the agent function parses that out, looks up the full metadata from the prior tool-call results cache, and yields a `SearchResultsYield(candidates=...)` event. Strip the JSON block from the assistant message before yielding the `FinalOnlyMessage`.
+  - Update prompt to require the agent to end with a `json:candidates` block (described below).
+  - Rename `MAX_ARXIV_CALLS_PER_TURN` → `MAX_EXTERNAL_SEARCH_CALLS_PER_TURN`, apply to `search_semantic_scholar`. `find_related_papers` is uncapped.
+  - Yield types updated: `paper_search` now `-> AsyncIterator[ToolStepYield | SearchResultsYield | FinalOnlyMessage]` (Task v2.4-2 introduced the first two).
+
+**Prompt update:**
+- Modify: `backend/src/paperhub/llm/prompts/paper_search_v1.yaml`
+  - Drop all mentions of `search_arxiv` and `add_paper_to_session`.
+  - Describe the read-only palette + the shortlist-via-json-block contract:
+
+    ```
+    After you've gathered enough information, compose your final assistant
+    message in two parts:
+      1. A short human-readable summary of the picks (3-5 papers max) with
+         a one-line reason per pick.
+      2. A fenced code block tagged ```json:candidates``` containing a JSON
+         array of {paper_id, reason} objects, one per pick. Use the exact
+         paper_id from the tool result (library:<id>, arxiv:<id>, or
+         ss:<paperId>). Reason should be the same one-line text shown in
+         the prose summary.
+
+    The system parses the json:candidates block to render Add buttons; the
+    prose summary is what the user reads. DO NOT include other tool calls
+    in the final turn — pick your shortlist and stop.
+    ```
+
+**New SSE event:**
+- Modify: `backend/src/paperhub/models/events.py`
+  - Add `SearchResultsEvent(type="search_results", run_id, candidates: list[SearchCandidate])` where `SearchCandidate` has `paper_id: str`, `title: str`, `authors: list[str]`, `year: int | None`, `abstract: str | None`, `arxiv_id: str | None`, `has_open_pdf: bool`, `reason: str`, `already_in_session: bool`. Frontend uses `has_open_pdf` + `arxiv_id` to decide button-enabled state pre-emptively (no need to ping the backend).
+
+**Chat endpoint:**
+- Modify: `backend/src/paperhub/api/chat.py`
+  - The `paper_search` branch (after Task v2.4-2's async-generator refactor) now also handles `SearchResultsYield` items, emitting them as `search_results` SSE events before the `final` event.
+
+**API endpoint (extends Task v2.4-4's POST /papers change):**
+- Modify: `backend/src/paperhub/api/papers.py`
+  - The `POST /papers` body accepts `paper_id` (or legacy `arxiv_id`). For `paper_id="ss:<id>"`, the dispatcher's `NoIngestibleSourceError` translates to **HTTP 422** with body `{"detail": "no_ingestible_source", "title": "...", "paper_id": "..."}` so the frontend can grey out the button rather than crash.
+
+**Env:**
+- Modify: `backend/.env.example` — confirm `PAPERHUB_SEMANTIC_SCHOLAR_API_KEY` line is present.
+
+**Tests:**
+- `tests/test_semantic_scholar.py` — `test_search_papers_extracts_externalIds_and_pdf_url` (respx-mocked). `test_fetch_paper_metadata_handles_429`.
+- `tests/test_research_tools.py`:
+  - `test_search_arxiv_not_in_tool_schemas`
+  - `test_add_paper_to_session_not_in_tool_schemas`
+  - `test_search_semantic_scholar_in_tool_schemas`
+  - `test_add_paper_to_session_dispatch_ss_prefers_arxiv` (still tested as a Python function — endpoint calls it)
+  - `test_add_paper_to_session_dispatch_ss_falls_back_to_pdf`
+  - `test_add_paper_to_session_dispatch_ss_raises_no_ingestible_source_when_neither_available`
+- `tests/test_research_paper_search.py` — update the 5 existing test cases:
+  - Drop the `add_paper_to_session` tool-call assertions.
+  - Add `test_paper_search_emits_search_results_yield_with_top_3to5_candidates` — mock LLM to emit a final message with a `json:candidates` block; assert the function yields a `SearchResultsYield` with parsed candidates.
+  - Add `test_paper_search_search_results_includes_metadata_for_rendering` — verify the yield carries title / abstract / has_open_pdf so the frontend doesn't need to re-fetch.
+- `tests/test_chat_sse.py` — `test_paper_search_emits_search_results_event_before_final`.
+- `tests/test_paper_pipeline.py` — `test_ingest_pdf_from_url_persists_pdf_upload_kind` with the existing PDF fixture.
+- Update `scripts/research_turn.ps1` — sub-test 3 now asserts (a) `paper_search:search_semantic_scholar` tool_step appears, (b) a `search_results` SSE event arrives with ≥ 1 candidate, (c) **no `papers` row is created during the turn** (zero auto-add). Sub-test 4 (new): POST `/papers` with one of the surfaced `paper_id`s → assert the paper attaches and `paper_content.kind` matches the discovery source.
+
+**Cross-check with Task v2.4-4:** the `SearchResultList` component consumes the `search_results` SSE event's payload directly; the structural contract is defined here in Task 5 and consumed there in Task 4. Same `SearchCandidate` shape on both sides — keep them in sync via `frontend/src/types/domain.ts`.
+
+### Quality gates after the v2.4 round
+
+From `backend/`:
+
+```powershell
+uv run pytest -v          # +5-8 new tests across 4 files
+uv run ruff check src tests
+uv run mypy src
+.\scripts\smoke_chat_real.ps1     # regression
+.\scripts\ingest_paper.ps1 1706.03762   # I-8 #2
+.\scripts\query_papers.ps1        # I-8 #3
+.\scripts\research_turn.ps1       # I-8 #8 + #9 + SS primary
+```
+
+From `frontend/`:
+
+```powershell
+npm test          # +3-5 new tests across ReferenceSourcesPanel, LibraryBrowserModal, TraceInline
+npm run typecheck
+npm run lint
+npm run build
+```
+
+Browser verification (manual):
+- Turn 1: paper_search → trace events arrive incrementally as the loop runs; expand a row → reason + query visible; final message names what was added.
+- Turn 2 in same session: paper_qa → cites both newly-added paper AND any existing references; **no "No references enabled" regression**.
+- Sidebar: Reference Sources panel populates; toggle a paper off → paper_qa no longer cites it.
+- Library Browser: open, search, attach an existing paper → appears in Reference Sources without re-download.
+
+---
