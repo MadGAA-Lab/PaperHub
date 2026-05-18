@@ -17,6 +17,7 @@ Coverage:
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +30,11 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 from paperhub.agents.research_tools import TOOL_SCHEMAS
-from paperhub.mcp.server import build_paperhub_papers_server, mount_paperhub_papers_on
+from paperhub.mcp.server import (
+    PaperhubPapersRequestContextMiddleware,
+    build_paperhub_papers_server,
+    mount_paperhub_papers_on,
+)
 from paperhub.mcp.server_context import (
     PaperhubPapersRequestContext,
     current_request_context,
@@ -448,3 +453,219 @@ async def test_inmemory_clientsession_calls_search_library(
     assert structured is not None and "result" in structured
     hits = structured["result"]
     assert any(int(h["paper_content_id"]) == pcid for h in hits)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end ASGI: middleware -> contextvar -> tool handler -> tracer row
+# ---------------------------------------------------------------------------
+#
+# The in-memory ClientSession tests above bypass ASGI middleware entirely.
+# This block exercises the production code path that matters most for an
+# external Claude Desktop / Cursor call:
+#
+#   real HTTP POST
+#     -> PaperhubPapersRequestContextMiddleware.dispatch
+#         -> opens aiosqlite.Connection
+#         -> creates Tracer + PaperhubPapersRequestContext
+#         -> sets the ContextVar
+#         -> FastMCP routes to the tool handler
+#         -> handler reads ContextVar via current_request_context()
+#         -> handler writes a tool_calls row via the tracer
+#
+# `BaseHTTPMiddleware` historically has contextvar-propagation pitfalls
+# (different task scope for `call_next`); the assertion that a `tool_calls`
+# row was written under the same `run_id` the middleware created proves
+# the contextvar threaded through correctly.
+#
+# We use FastMCP's `json_response=True, stateless_http=True` mode here so
+# the wire protocol is a single POST -> single JSON response (no SSE, no
+# session-id round-tripping). The middleware under test is identical
+# either way — what we're validating is its contextvar plumbing.
+# ---------------------------------------------------------------------------
+
+
+async def test_real_http_middleware_threads_context_into_tool_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: a real HTTP POST to ``/mcp`` flows through the middleware,
+    the contextvar reaches the tool handler, the handler returns the seeded
+    paper, and a ``tool_calls`` row is written under the middleware-created
+    run id. Closes the gap left by the in-memory ClientSession tests above,
+    which never exercise ASGI middleware."""
+    from httpx import ASGITransport, AsyncClient
+
+    from paperhub.app import _lifespan
+    from paperhub.config import load_settings
+    from paperhub.db.migrate import apply_schema
+
+    # Stand up a workspace + DB the lifespan can target.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("PAPERHUB_WORKSPACE", str(workspace))
+    monkeypatch.setenv("PAPERHUB_PREWARM_MODELS", "0")
+    monkeypatch.setenv("PAPERHUB_MCP_CONFIG", str(tmp_path / "missing.toml"))
+    settings = load_settings()
+
+    # Seed schema + a paper_content row + a chat session before the app
+    # starts. apply_schema is idempotent, so the lifespan re-applying is fine.
+    async with aiosqlite.connect(settings.db_path) as setup_conn:
+        await setup_conn.execute("PRAGMA foreign_keys = ON")
+        await apply_schema(setup_conn)
+        await setup_conn.execute("INSERT INTO chat_sessions DEFAULT VALUES")
+        await setup_conn.commit()
+        async with setup_conn.execute("SELECT last_insert_rowid()") as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        session_id = int(row[0])
+        await setup_conn.execute(
+            "INSERT INTO paper_content "
+            "(content_key, kind, arxiv_id, title, authors_json, year, abstract, "
+            "source_path, source_dir_path, html_path) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "arxiv:2401.99988", "arxiv", "2401.99988",
+                "Middleware Integration Test",
+                "[]", 2024, "verifying contextvar plumbing through ASGI",
+                "/tmp/x.tex", "/tmp", "/tmp/x.html",
+            ),
+        )
+        await setup_conn.commit()
+        async with setup_conn.execute("SELECT last_insert_rowid()") as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        seeded_pcid = int(row[0])
+
+    # Build a FastAPI app with a FastMCP server in stateless+json mode so
+    # the wire protocol is a single POST -> JSON response. The middleware
+    # under test is the same class used in production.
+    server = build_paperhub_papers_server()
+    server.settings.json_response = True
+    server.settings.stateless_http = True
+
+    app = FastAPI(lifespan=_lifespan)
+    mount_paperhub_papers_on(app, server, path="/mcp")
+
+    # Sanity-check that the production-style middleware is what's attached.
+    sub_app = next(r.app for r in app.routes if getattr(r, "path", None) == "/mcp")
+    middleware_classes = [m.cls for m in sub_app.user_middleware]
+    assert PaperhubPapersRequestContextMiddleware in middleware_classes, (
+        f"production middleware missing from mounted sub-app: {middleware_classes}"
+    )
+
+    # NB:
+    #   * FastMCP enables DNS-rebinding protection by default; the Host header
+    #     must match `127.0.0.1:*` / `localhost:*` / `[::1]:*` — hence the
+    #     explicit port in base_url. Bare `127.0.0.1` (no port) is rejected.
+    #   * ASGITransport doesn't run the FastAPI lifespan automatically;
+    #     enter it manually so the FastMCP StreamableHTTPSessionManager
+    #     task group is alive when we POST.
+    async with (
+        AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://127.0.0.1:8000",
+        ) as client,
+        app.router.lifespan_context(app),
+    ):
+        # Send `initialize` first (required even in stateless mode for
+        # the wire-protocol handshake). Accept both JSON and SSE per
+        # the streamable-HTTP transport spec.
+        init_resp = await client.post(
+            "/mcp/",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+                "X-Paperhub-Session-Id": str(session_id),
+            },
+            content=json.dumps({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "0"},
+                },
+            }),
+        )
+        assert init_resp.status_code == 200, (
+            f"initialize failed: {init_resp.status_code} {init_resp.text!r}"
+        )
+
+        # tools/call — the test's actual point.
+        call_resp = await client.post(
+            "/mcp/",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+                "X-Paperhub-Session-Id": str(session_id),
+                "MCP-Protocol-Version": "2025-06-18",
+            },
+            content=json.dumps({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_library",
+                    "arguments": {
+                        "query": "middleware integration",
+                        "max_results": 5,
+                    },
+                },
+            }),
+        )
+        assert call_resp.status_code == 200, (
+            f"tools/call failed: {call_resp.status_code} {call_resp.text!r}"
+        )
+        payload = call_resp.json()
+
+    # (a) The seeded paper must round-trip back through the FastMCP wire
+    #     protocol, proving the tool handler ran with a live context.
+    assert "result" in payload, payload
+    structured = payload["result"].get("structuredContent")
+    assert structured is not None, (
+        f"missing structuredContent in tools/call result: {payload['result']!r}"
+    )
+    hits = structured["result"]
+    assert any(int(h["paper_content_id"]) == seeded_pcid for h in hits), hits
+
+    # (b) The middleware auto-created a runs row and the tracer wrote a
+    #     tool_calls row under it — proves the contextvar threaded through
+    #     BaseHTTPMiddleware -> FastMCP handler correctly, and Fix 3's
+    #     status finalisation flipped the row from `running` -> `ok`.
+    async with aiosqlite.connect(settings.db_path) as conn:
+        async with conn.execute(
+            "SELECT id, status FROM runs WHERE session_id = ?",
+            (session_id,),
+        ) as cur:
+            run_rows = await cur.fetchall()
+        assert run_rows, "middleware should have auto-created a runs row"
+        # The mounted middleware creates exactly one run per HTTP request;
+        # initialize is a notification-style request that does not enter
+        # the contextvar branch (no session header parsing failure), so we
+        # may see 1 or 2 runs depending on protocol flow. The tool_calls
+        # row's run_id will pin which one we care about.
+        run_ids = {int(r[0]) for r in run_rows}
+        statuses = {int(r[0]): r[1] for r in run_rows}
+
+        async with conn.execute(
+            "SELECT run_id, agent, tool, status FROM tool_calls "
+            "WHERE tool = 'paper_search:papers.search_library'",
+        ) as cur:
+            tc_rows = await cur.fetchall()
+        assert tc_rows, (
+            "expected a tool_calls row tagged paper_search:papers.search_library"
+        )
+        tc_run_ids = {int(r[0]) for r in tc_rows}
+        assert tc_run_ids <= run_ids, (
+            f"tool_calls run_id {tc_run_ids!r} not in middleware-created "
+            f"runs {run_ids!r} — contextvar plumbing leaked"
+        )
+        # Fix 3: the auto-created run should be flipped to 'ok' on the way
+        # out, not left at 'running'.
+        for rid in tc_run_ids:
+            assert statuses[rid] == "ok", (
+                f"middleware-auto-created run {rid} ended at {statuses[rid]!r}, "
+                f"expected 'ok' — Fix 3 regressed"
+            )
+        for _, _, _, status in tc_rows:
+            assert status == "ok", tc_rows

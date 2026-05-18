@@ -50,7 +50,6 @@ from mcp.server.fastmcp import FastMCP
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
-from starlette.types import ASGIApp
 
 from paperhub.agents.research_tools import (
     TOOL_SCHEMAS,
@@ -58,7 +57,7 @@ from paperhub.agents.research_tools import (
     search_library_dispatch,
     search_semantic_scholar_dispatch,
 )
-from paperhub.config import load_settings
+from paperhub.config import Settings, load_settings
 from paperhub.db.connection import open_db
 from paperhub.mcp.server_context import (
     PaperhubPapersRequestContext,
@@ -259,10 +258,12 @@ class PaperhubPapersRequestContextMiddleware(BaseHTTPMiddleware):
     request (the chat endpoint owns its own connection on the parent
     request scope and we deliberately don't reach for it — keeps the
     loopback path identical to the external-client path).
-    """
 
-    def __init__(self, app: ASGIApp) -> None:
-        super().__init__(app)
+    Settings are read once from ``request.app.state.settings`` (populated
+    during FastAPI lifespan startup) rather than re-loaded per request —
+    re-running :func:`load_settings` on every MCP call would re-read ~10
+    env vars and run a filesystem ``mkdir`` syscall on the hot path.
+    """
 
     async def dispatch(
         self,
@@ -282,20 +283,37 @@ class PaperhubPapersRequestContextMiddleware(BaseHTTPMiddleware):
             return Response(
                 content=f"X-Paperhub-Session-Id must be int, got {session_header!r}",
                 status_code=400,
+                media_type="text/plain",
             )
 
         run_header = request.headers.get("x-paperhub-run-id")
-        settings = load_settings()
+        # Settings are populated on the parent FastAPI app in the lifespan
+        # (`paperhub.app._lifespan`) and copied onto the mounted sub-app's
+        # state by the chained lifespan in `mount_paperhub_papers_on` —
+        # `request.app` here is the sub-app (Starlette overwrites
+        # `scope["app"]` on mount dispatch), so the copy is the only way
+        # to surface the parent's resolved Settings without re-running
+        # `load_settings()` on the hot path. If settings is None we want
+        # a hard failure — it indicates a programming error.
+        settings = getattr(request.app.state, "settings", None)
+        if settings is None:  # pragma: no cover — defensive
+            raise RuntimeError(
+                "PaperhubPapersRequestContextMiddleware requires "
+                "app.state.settings to be populated during lifespan startup"
+            )
+        assert isinstance(settings, Settings)
         async with open_db(settings.db_path) as conn:
-            if run_header is not None:
+            caller_supplied_run = run_header is not None
+            if caller_supplied_run:
                 try:
-                    run_id = int(run_header)
+                    run_id = int(run_header)  # type: ignore[arg-type]
                 except ValueError:
                     return Response(
                         content=(
                             f"X-Paperhub-Run-Id must be int, got {run_header!r}"
                         ),
                         status_code=400,
+                        media_type="text/plain",
                     )
             else:
                 run_id = await _create_mcp_run(conn, session_id)
@@ -306,9 +324,22 @@ class PaperhubPapersRequestContextMiddleware(BaseHTTPMiddleware):
             )
             token = set_request_context(ctx)
             try:
-                return await call_next(request)
+                response = await call_next(request)
+            except BaseException:
+                # Auto-created runs: mark error on exception so the row
+                # doesn't sit at `running` forever. Caller-supplied runs
+                # keep their lifecycle owned by the parent context.
+                if not caller_supplied_run:
+                    await _finalise_mcp_run(conn, run_id, status="error")
+                raise
             finally:
                 reset_request_context(token)
+            # Auto-created runs: mark ok on successful exit. Without this,
+            # every external Claude Desktop / Cursor call would leave a
+            # permanent `running` row.
+            if not caller_supplied_run:
+                await _finalise_mcp_run(conn, run_id, status="ok")
+            return response
 
 
 async def _create_mcp_run(conn: aiosqlite.Connection, session_id: int) -> int:
@@ -327,6 +358,24 @@ async def _create_mcp_run(conn: aiosqlite.Connection, session_id: int) -> int:
         row = await cur.fetchone()
     assert row is not None
     return int(row[0])
+
+
+async def _finalise_mcp_run(
+    conn: aiosqlite.Connection, run_id: int, *, status: str,
+) -> None:
+    """Mark an auto-created MCP runs row as finished.
+
+    Mirrors the ``UPDATE runs SET finished_at = datetime('now'), status = ?``
+    shape used by :func:`paperhub.api.chat._finalise` so a replay walking the
+    runs table sees a consistent shape regardless of which surface ran the
+    request. Only invoked when the middleware itself auto-created the run;
+    caller-supplied run ids keep their lifecycle owned by the parent.
+    """
+    await conn.execute(
+        "UPDATE runs SET finished_at = datetime('now'), status = ? WHERE id = ?",
+        (status, run_id),
+    )
+    await conn.commit()
 
 
 def mount_paperhub_papers_on(
@@ -350,12 +399,19 @@ def mount_paperhub_papers_on(
     sub_app.add_middleware(PaperhubPapersRequestContextMiddleware)
     app.mount(path, sub_app)
 
-    # Chain the sub-app's lifespan into the parent's.
+    # Chain the sub-app's lifespan into the parent's. We also copy the
+    # parent's `state.settings` onto the sub-app *after* the parent's
+    # lifespan has populated it — the middleware reads
+    # `request.app.state.settings` and `request.app` here is the sub-app
+    # (Starlette overwrites `scope["app"]` on mount dispatch), so this is
+    # the only way to surface the parent's resolved Settings without
+    # re-running `load_settings()` per request.
     parent_lifespan = app.router.lifespan_context
 
     @asynccontextmanager
     async def _chained(target_app: FastAPI) -> AsyncIterator[None]:
         async with parent_lifespan(target_app), sub_app.router.lifespan_context(sub_app):
+            sub_app.state.settings = target_app.state.settings
             yield
 
     app.router.lifespan_context = _chained
