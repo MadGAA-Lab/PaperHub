@@ -54,6 +54,7 @@ def _render_latex_pandoc(tex_path: Path, out_path: Path) -> None:
         check=True,
         capture_output=True,
         text=True,
+        cwd=tex_path.parent,
     )
 
 
