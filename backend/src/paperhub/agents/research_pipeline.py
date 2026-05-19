@@ -216,10 +216,25 @@ async def discover_canonical(
 
     For ``kind in {"arxiv_id", "doi", "quoted_title"}`` this short-
     circuits without calling web.search — the hint is already the
-    canonical identifier. Returns ``None`` only when discovery
-    genuinely fails (web.search returned nothing across all angles).
+    canonical identifier.
+
+    When ``web.search`` is NOT in the registry palette (operator hasn't
+    installed open-webSearch, or its daemon is down), this falls back
+    to a low-confidence CanonicalIdentity built from the raw hint —
+    the Resolver will still get a chance to land the paper directly
+    via Semantic Scholar. A tracer step is always opened so operators
+    can see *why* the discovery stage produced what it did.
+
+    Returns ``None`` only when web.search IS available but the multi-
+    angle exploration could not produce a canonical identity.
     """
     if request.kind in {"arxiv_id", "doi", "quoted_title"}:
+        # Always open a trace row so the stage is visible in the panel.
+        async with tracer.step(
+            agent="research", tool="paper_search:discover_shortcircuit", model=None,
+        ) as step:
+            step.record_args({"hint": request.hint, "kind": request.kind})
+            step.record_result({"shortcircuit": "user-supplied id/title"})
         return CanonicalIdentity(
             title=request.hint,
             author_surname=None,
@@ -229,11 +244,33 @@ async def discover_canonical(
         )
 
     if not await mcp_registry.has_tool("web.search"):
+        # Web search is unavailable. Don't silently bail — open a
+        # tracer step so the operator sees the fallback, and return a
+        # low-confidence identity built from the raw hint so the
+        # Resolver still gets to try SS with it.
         _LOG.warning(
-            "paper_search.discover: web.search not in registry; cannot run "
-            "discover stage for hint=%r", request.hint,
+            "paper_search.discover: web.search not in registry; falling "
+            "back to direct-SS path for hint=%r", request.hint,
         )
-        return None
+        async with tracer.step(
+            agent="research", tool="paper_search:discover_fallback", model=None,
+        ) as step:
+            step.record_args({"hint": request.hint})
+            step.record_result(
+                {
+                    "fallback": "web.search not available — passing raw hint "
+                                "to Resolver as a quoted_title-equivalent. "
+                                "Operator: start open-webSearch daemon for "
+                                "better recall on vague queries.",
+                },
+            )
+        return CanonicalIdentity(
+            title=request.hint,
+            author_surname=None,
+            year=None,
+            confidence="low",
+            rationale="web.search unavailable; trying raw hint via SS",
+        )
 
     reg = registry or PromptRegistry()
     prompt = reg.get("paper_search_discover/v1")
