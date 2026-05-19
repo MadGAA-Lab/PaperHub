@@ -148,7 +148,49 @@ conn.close()
     Write-Host "`n--- Final content (first 500 chars) ---"
     Write-Host $final.Substring(0, [Math]::Min(500, $final.Length))
 
-    # ── 10. Assert >= 2 [chunk:N] markers spanning >= 2 distinct papers ───────
+    # ── 10. Assert v2.10 paper_qa trace shape ─────────────────────────────────
+    # The agentic hierarchical pipeline (Plan C v2.10) emits these tool_step
+    # events: paper_qa:resolve (always), paper_qa:subagent (one per enabled
+    # paper, in parallel), paper_qa:finalize (always). The old map-reduce
+    # path emitted paper_qa:map + paper_qa:synthesize — those names should
+    # NEVER appear in a v2.10 trace.
+    $traceToolNames = @()
+    $currentEvent = $null
+    foreach ($line in ($sseRaw -split "`n")) {
+        $line = $line.TrimEnd("`r")
+        if ($line.StartsWith("event:")) {
+            $currentEvent = $line.Substring(6).Trim()
+        } elseif ($line.StartsWith("data:") -and $currentEvent -eq "tool_step") {
+            try {
+                $obj = $line.Substring(5).Trim() | ConvertFrom-Json
+                if ($obj.record -and $obj.record.tool) {
+                    $traceToolNames += $obj.record.tool
+                }
+            } catch {
+                # Not a parseable tool_step payload; skip.
+            }
+        } elseif ($line -eq "") {
+            $currentEvent = $null
+        }
+    }
+
+    foreach ($expected in @("paper_qa:resolve", "paper_qa:subagent", "paper_qa:finalize")) {
+        if ($traceToolNames -notcontains $expected) {
+            throw "ASSERTION (v2.10): expected tool_step '$expected' missing from trace. Saw: $($traceToolNames -join ', ')"
+        }
+    }
+    $subagentCount = ($traceToolNames | Where-Object { $_ -eq "paper_qa:subagent" }).Count
+    if ($subagentCount -lt 2) {
+        throw "ASSERTION (v2.10): expected >= 2 'paper_qa:subagent' steps (one per enabled paper), got $subagentCount"
+    }
+    foreach ($legacy in @("paper_qa:map", "paper_qa:synthesize", "paper_qa:single")) {
+        if ($traceToolNames -contains $legacy) {
+            throw "ASSERTION (v2.10): legacy map-reduce tool_step '$legacy' present in trace — v2.10 should NOT emit this"
+        }
+    }
+    Write-Host "v2.10 trace OK — resolve + $subagentCount subagent + finalize, no legacy map-reduce steps"
+
+    # ── 11. Assert >= 2 [chunk:N] markers spanning >= 2 distinct papers ───────
     $chunkIds = [regex]::Matches($final, '\[chunk:(\d+)\]') | ForEach-Object { [int]$_.Groups[1].Value }
     if ($chunkIds.Count -lt 2) {
         throw "ASSERTION: expected >= 2 [chunk:N] markers, got $($chunkIds.Count). Final content:`n$final"
