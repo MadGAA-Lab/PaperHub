@@ -107,10 +107,14 @@ async def parse_user_message(
     direct = _scan_structured_ids(user_message)
     if direct and len(direct) >= 1:
         # If the user pasted ONLY IDs (no extra natural-language paper
-        # references), short-circuit and skip the LLM call.
+        # references), short-circuit and skip the LLM call. Strip the
+        # IDs themselves AND the common identifier prefixes (``arxiv``,
+        # ``doi``) before checking for prose — otherwise "arxiv:1706.03762"
+        # leaves "arxiv:" which trips the [A-Za-z]{3,} filter.
         stripped = user_message
         for r in direct:
             stripped = stripped.replace(r.hint, "")
+        stripped = re.sub(r"\b(?:arxiv|doi)\b", "", stripped, flags=re.IGNORECASE)
         if not re.search(r"[A-Za-z]{3,}", stripped):
             _LOG.info("paper_search.parse short-circuit: only structured IDs")
             return direct
