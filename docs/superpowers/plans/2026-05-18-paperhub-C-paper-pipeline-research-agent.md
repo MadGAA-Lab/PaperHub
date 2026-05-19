@@ -4430,3 +4430,1444 @@ Browser checks: see Task v2.9-3 Step 7.
 - Modify: [`CLAUDE.md`](../../../CLAUDE.md), [`docs/superpowers/specs/2026-05-17-paperhub-srs.md`](../../../docs/superpowers/specs/2026-05-17-paperhub-srs.md) — version bump + follow-up closure.
 
 ---
+
+## Plan C v2.10 — Agentic hierarchical `paper_qa` (chunk-by-section + per-paper subagents + finalizer)
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use [superpowers:subagent-driven-development](../../../C:/Users/eddie/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/subagent-driven-development) (recommended) or [superpowers:executing-plans](../../../C:/Users/eddie/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/executing-plans). Steps use `- [ ]` for tracking.
+
+**Goal:** Replace the v2.7 dense-RAG `paper_qa` map-reduce (retriever top-k → per-paper analyst LLM writes prose → synthesizer reads prose) with an **agentic hierarchical RAG** pipeline (dispatcher → per-paper subagent that browses the paper's section TOC and picks chunks → finalizer that reads the picked chunks directly and writes the user-facing answer).
+
+**Why now.** Live MolmoACT2 + X-VLA testing produced an "empty papers" answer despite both papers having `enabled=true` references. DB inspection found the analyst LLM had been fed five chunks whose entire `text` was a single literal `.` / `R` / `e` character. Two coupled root causes:
+
+1. **Chunker arithmetic bug** ([`chunker.py:60-68`](../../../backend/src/paperhub/pipelines/chunker.py#L60-L68)): on dense LaTeX, the shrink-loop heuristic `tentative_end -= max(1, (tok_len - hard) * 4)` overshoots by tens of thousands of characters in a single iteration, clamps to `cursor + 1`, emits a 1-char chunk, advances the cursor by 1, and walks the rest of the section character-by-character. Paper 15 (MolmoAct2) has **29,804 chunks ≤ 5 chars** out of 29,891 total. Paper 16 has **1,792 ≤ 5 chars** out of 1,839. Chroma embedded all of them; the reranker dutifully top-5'd whichever scored best for the query vector; the analyst LLM correctly reported "no relevant content" in 187 chars; the synthesizer correctly reported both papers as empty. The pipeline did its job — the chunker fed it `[chunk:71333]\n.`.
+2. **Map-reduce architectural ceiling** (NOTES.md v9 lesson). Even with a sane chunker, the synthesizer never sees raw chunk text — it only sees the per-paper analyst's 3-6 sentence prose. NOTES.md v5 → v9 → v10 showed that giving the answer LLM **chunks + context** beats giving it **summary-of-chunks** by ~+0.10-0.26 correctness on flagship models. Dense top-5 retrieval also wastes the structural prior academic papers offer: section names disambiguate "Methods" from "Related Work" from "Experiments" in a way the embedder flattens. For multi-hop comparative questions ("how do these two papers differ on expert collapse"), an agent that browses the section TOC and decides which section to read outperforms cosine-similarity top-k.
+
+**Architecture.** Replace `_paper_qa_map_one` / `_paper_qa_synthesize_stream` / `_paper_qa_map_reduce` with a four-node LangGraph subgraph mirroring v2.7's `paper_search` pattern:
+
+```
+pq_resolve     (existing: enumerate paper_content_ids WHERE enabled=TRUE)
+   ↓
+pq_dispatch    (fan-out one PerPaperSubagentState per paper)
+   ↓ asyncio.gather
+   ┌──────────────────────────────────────────────────────────────┐
+   │ per_paper_subagent (bounded loop, max_iter=5):               │
+   │   tool palette (paper-scoped, read-only):                    │
+   │     - list_sections()                                        │
+   │         → cached sections_json (name, level, token_count)    │
+   │     - read_section(name)                                     │
+   │         → all chunks in that section, with [chunk:id] heads  │
+   │           and full text (paragraph-bounded post-v2.10-1)     │
+   │   exit:                                                      │
+   │     - LLM emits no tool_calls → final summary message →      │
+   │       done; Python extracts [chunk:N] markers from summary   │
+   │       and treats those as the subagent's picks               │
+   │     - max_iter reached → force-stop; treat ALL chunks the    │
+   │       subagent ever read as picks (best-effort fallback)     │
+   │   yield: PerPaperPicks(paper_content_id, title,              │
+   │                        picked_chunks=[...], rationale=str)   │
+   └──────────────────────────────────────────────────────────────┘
+   ↓ (all per-paper subagents resolved)
+pq_finalize    (single flagship-model LLM call):
+                 input: user_message + list[PerPaperPicks]
+                 expected output: streaming user-facing prose with
+                 [chunk:N] markers preserved (real chunks.id rows)
+   ↓ tokens stream to /chat SSE
+```
+
+**Design decisions (settled with user 2026-05-20):**
+
+| # | Decision | Rationale |
+| --- | --- | --- |
+| 1 | `MAX_SECTION_READS = 5` per subagent | Most papers have ≤ 10 sections; 5 reads is enough for a comparative question. Matches v2.7's `MAX_REFINEMENT_LOOPS=1` minimal-constant style. |
+| 2 | **No section synopses** at ingest | The subagent self-infers what "Methods" / "Experiments" / "Related Work" mean from the section name alone. Avoids per-section LLM calls at ingest (~30 calls/paper). |
+| 3 | Subagent **can re-read** the same section | A read is a tool call against `MAX_SECTION_READS`; the LLM may legitimately re-read after gathering context elsewhere. No special dedup. |
+| 4 | **No cross-paper visibility** inside subagents | Subagent for paper A doesn't see paper B's picks. Finalizer is the only cross-paper synthesis surface. Preserves map-reduce purity + parallelism. |
+| 5 | **Replace entirely** — no feature flag, no A/B | Clean break (matches v2.7 paper_search decomposition). Old paths confuse readers and double the test surface. |
+| 6 | Subagent uses **small-tier model** (gemini-flash-lite by default); finalizer stays **flagship** | Subagent's job is tool-routing + chunk-citing — cheap, structural. Finalizer composes user-visible prose — pay flagship. Production may swap subagent to a local LLM via `PAPERHUB_PAPER_QA_SUBAGENT_MODEL`. |
+| 7 | **Strip LaTeX `%`-comments** in the chunker (new requirement) | The IDE-opened `source.flattened.tex` for arxiv:2510.10274 (X-VLA) shows `pylatexenc`-output comments that survive into chunks; the LLM treats them as content and gets distracted. Strip at chunk-input time so existing renderer output stays untouched (Citation Canvas still resolves char offsets against the un-stripped source). |
+
+**No SRS contract change** at the LLM-visible / SSE / DB-schema layer. **One schema addition**: `paper_content.sections_json TEXT` (nullable; ingested at chunk time, populated on re-ingest of existing papers). Tracing per-stage `tool_step` SSE events preserved end-to-end.
+
+**Pairs with concurrent v2.9 work** (frontend Composer attach menu) — zero file overlap; v2.9 touches `frontend/src/components/chat/Composer.tsx` + `backend/src/paperhub/api/papers.py` (multipart endpoint), v2.10 touches `backend/src/paperhub/agents/*` + `backend/src/paperhub/pipelines/chunker.py` + `backend/src/paperhub/pipelines/paper_pipeline.py`. v2.10 lands after re-ingest so any v2.9-uploaded PDFs get the new chunker + section TOC for free.
+
+**SRS update** (separate task — not gated on this plan landing): bump SRS to v2.8 → v2.10 with a Revision History entry describing the architectural shift, update §III-3 Research Agent row's `paper_qa` paragraph, update §III-5.2 RAG retrieval to describe the agentic loop instead of dense top-k → analyst → synthesizer. Will be done at PR time alongside the implementation.
+
+---
+
+### Task v2.10-1 — Chunker hardening: shrink-loop fix + LaTeX comment strip + paragraph-aware boundaries
+
+**Files:**
+- Modify: [`backend/src/paperhub/pipelines/chunker.py`](../../../backend/src/paperhub/pipelines/chunker.py)
+- Modify: [`backend/tests/test_chunker.py`](../../../backend/tests/test_chunker.py)
+
+**Symptom + fix:**
+
+- [ ] **Step 1: Add a failing test for the 1-char-chunk pathology**
+
+```python
+# backend/tests/test_chunker.py — append to existing module
+def test_chunker_never_emits_chunks_below_min_meaningful_length():
+    """Regression: dense LaTeX previously walked the cursor 1 char at a time
+    through ~1800 iterations, emitting single-period chunks. The shrink loop
+    must always make forward progress at section/paragraph scale."""
+    # Synthetic dense LaTeX-ish section: lots of math-mode noise.
+    section = "\\section{Experiments}\n"
+    # ~6000 chars of dense markup that previously triggered the overshoot.
+    dense = ("$\\sum_{i=0}^{n} \\alpha_i \\beta_i + \\gamma$. " * 200)
+    chunks = chunk_text(section + dense)
+    # No chunk shorter than 50 chars (modulo possible trailing slivers).
+    tiny = [c for c in chunks if len(c.text) < 50]
+    assert len(tiny) <= 1, (
+        f"Expected at most 1 trailing sliver, got {len(tiny)} tiny chunks: "
+        f"{[c.text[:20] for c in tiny[:5]]}"
+    )
+    # And no 1-char chunks at all.
+    one_char = [c for c in chunks if len(c.text) == 1]
+    assert one_char == [], f"1-char chunks regressed: {one_char[:5]}"
+```
+
+- [ ] **Step 2: Add a failing test for LaTeX-comment stripping**
+
+```python
+def test_chunker_strips_latex_line_comments():
+    """LaTeX % line-comments (single-% to end of line, unless escaped \\%) must
+    be removed before chunking so they don't end up as 'content' in chunks
+    served to the analyst LLM."""
+    text = (
+        "\\section{Method}\n"
+        "We use attention. % FIXME: cite original paper here\n"
+        "The key insight is X. 50\\% of the data is held out.\n"
+        "% TODO: rewrite this paragraph\n"
+        "Therefore Y holds.\n"
+    )
+    chunks = chunk_text(text)
+    joined = "\n".join(c.text for c in chunks)
+    assert "FIXME" not in joined
+    assert "TODO" not in joined
+    assert "rewrite this paragraph" not in joined
+    # Escaped % survives (it's literal "50%").
+    assert "50\\%" in joined or "50%" in joined
+    # Real content is preserved.
+    assert "attention" in joined
+    assert "Therefore Y holds" in joined
+```
+
+- [ ] **Step 3: Add a failing test for paragraph-aware boundaries**
+
+```python
+def test_chunker_closes_at_paragraph_boundary_not_mid_sentence():
+    """When target token count is hit, prefer closing at a paragraph break
+    over a mid-sentence break. Paragraph integrity drives synthesizer
+    correctness per NOTES.md v5 / v6 lessons."""
+    para1 = ("This is paragraph one. " * 50).strip()  # ~250 tokens
+    para2 = ("This is paragraph two. " * 50).strip()
+    para3 = ("This is paragraph three. " * 50).strip()
+    text = f"\\section{{Body}}\n{para1}\n\n{para2}\n\n{para3}\n"
+    # Force target small so we close mid-text.
+    chunks = chunk_text(text, target=400, hard=600)
+    for c in chunks:
+        stripped = c.text.strip()
+        # No chunk ends mid-sentence (unless it's the trailing chunk).
+        if c is not chunks[-1]:
+            assert stripped.endswith(".") or stripped.endswith("\n"), (
+                f"Chunk closes mid-sentence: ...{stripped[-30:]!r}"
+            )
+```
+
+- [ ] **Step 4: Run the three tests to confirm they fail against current chunker**
+
+```powershell
+uv run pytest tests/test_chunker.py::test_chunker_never_emits_chunks_below_min_meaningful_length tests/test_chunker.py::test_chunker_strips_latex_line_comments tests/test_chunker.py::test_chunker_closes_at_paragraph_boundary_not_mid_sentence -v
+```
+Expected: 3 FAIL.
+
+- [ ] **Step 5: Implement comment stripping + safe shrink + paragraph boundary**
+
+Replace the body of `chunk_text` in [`backend/src/paperhub/pipelines/chunker.py`](../../../backend/src/paperhub/pipelines/chunker.py):
+
+```python
+import re
+from dataclasses import dataclass
+import tiktoken
+
+_SECTION_RE = re.compile(r"\\section\{([^}]+)\}")
+# Match single-% comments to end-of-line, NOT \% (escaped percent — literal).
+# Negative lookbehind: not preceded by a backslash.
+_COMMENT_RE = re.compile(r"(?<!\\)%[^\n]*")
+# Paragraph break is the strongest natural boundary; sentence-end is fallback.
+_PARA_BOUNDARY_RE = re.compile(r"\n\s*\n")
+_SENT_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+@dataclass(frozen=True)
+class Chunk:
+    section: str | None
+    char_start: int
+    char_end: int
+    text: str
+
+
+def _strip_latex_comments(text: str) -> str:
+    """Remove % line-comments while preserving \\% (literal percent)."""
+    return _COMMENT_RE.sub("", text)
+
+
+def _best_close(piece: str, *, prefer_paragraph: bool) -> int | None:
+    """Return the char offset of the latest natural boundary in *piece*, or
+    None. Paragraph break preferred over sentence-end when ``prefer_paragraph``
+    is True (it always is, at the call site)."""
+    if prefer_paragraph:
+        matches = list(_PARA_BOUNDARY_RE.finditer(piece))
+        if matches:
+            return matches[-1].end()
+    matches = list(_SENT_BOUNDARY_RE.finditer(piece))
+    if matches:
+        return matches[-1].end()
+    return None
+
+
+def chunk_text(text: str, *, target: int = 800, hard: int = 1000) -> list[Chunk]:
+    enc = tiktoken.get_encoding("cl100k_base")
+
+    # 1. Strip LaTeX line-comments BEFORE section detection. We work on the
+    #    stripped text throughout; chunk char_start/char_end indices are
+    #    relative to the stripped text. Renderer output (source.html) is NOT
+    #    re-rendered — the Citation Canvas resolves chunk offsets against the
+    #    pre-rendered HTML, which never contained the comments anyway.
+    text = _strip_latex_comments(text)
+
+    # 2. Split into section-spans.
+    spans: list[tuple[str | None, int, int]] = []
+    last_idx = 0
+    last_section: str | None = None
+    for m in _SECTION_RE.finditer(text):
+        if m.start() > last_idx:
+            spans.append((last_section, last_idx, m.start()))
+        last_section = m.group(1).strip()
+        last_idx = m.end()
+    if last_idx < len(text):
+        spans.append((last_section, last_idx, len(text)))
+
+    # 3. Greedy-fill each span up to hard cap, closing at paragraph (or
+    #    sentence as fallback) boundaries once target is hit.
+    out: list[Chunk] = []
+    for section, span_start, span_end in spans:
+        cursor = span_start
+        while cursor < span_end:
+            # Start with a generous window and shrink ONLY by halving until
+            # we're under hard. Old impl subtracted `(tok_len - hard) * 4`
+            # chars which overshot to cursor+1 in a single iteration on
+            # dense LaTeX — that was the v2.10-1 bug.
+            tentative_end = min(cursor + hard * 5, span_end)
+            piece = text[cursor:tentative_end]
+            tok_len = len(enc.encode(piece))
+            while tok_len > hard and tentative_end - cursor > 1:
+                # Halve the piece. Guaranteed to bottom out at cursor + 1 OR
+                # under hard, whichever comes first; no overshoot.
+                tentative_end = cursor + max(1, (tentative_end - cursor) // 2)
+                piece = text[cursor:tentative_end]
+                tok_len = len(enc.encode(piece))
+
+            # Target-aware early-close at paragraph (preferred) or sentence
+            # boundary, but only if we haven't shrunk down to a sliver.
+            if (
+                tok_len >= target
+                and tentative_end < span_end
+                and tentative_end - cursor > 100  # sanity floor
+            ):
+                boundary_off = _best_close(piece, prefer_paragraph=True)
+                if boundary_off is not None and boundary_off > 100:
+                    tentative_end = cursor + boundary_off
+                    piece = text[cursor:tentative_end]
+
+            raw_piece = text[cursor:tentative_end]
+            stripped = raw_piece.strip()
+            if not stripped:
+                cursor = tentative_end
+                continue
+            lead = len(raw_piece) - len(raw_piece.lstrip())
+            trail = len(raw_piece) - len(raw_piece.rstrip())
+            out.append(
+                Chunk(
+                    section=section,
+                    char_start=cursor + lead,
+                    char_end=tentative_end - trail,
+                    text=stripped,
+                ),
+            )
+            cursor = tentative_end
+    return out
+```
+
+- [ ] **Step 6: Run the three new tests + the existing chunker test suite**
+
+```powershell
+uv run pytest tests/test_chunker.py -v
+```
+Expected: all PASS, including the 3 new ones.
+
+- [ ] **Step 7: Commit**
+
+```powershell
+git add backend/src/paperhub/pipelines/chunker.py backend/tests/test_chunker.py
+git commit -m "fix(chunker): safe halving shrink + LaTeX comment strip + paragraph-bounded chunks (Plan C v2.10-1)"
+```
+
+---
+
+### Task v2.10-2 — Persist `paper_content.sections_json` at ingest time
+
+**Files:**
+- Modify: [`backend/src/paperhub/db/migrations/`](../../../backend/src/paperhub/db/migrations/) — new migration adding the column.
+- Modify: [`backend/src/paperhub/db/schema.sql`](../../../backend/src/paperhub/db/schema.sql) (or wherever the canonical CREATE TABLE lives — verify) — `sections_json TEXT` column on `paper_content`.
+- Modify: [`backend/src/paperhub/pipelines/paper_pipeline.py`](../../../backend/src/paperhub/pipelines/paper_pipeline.py) — populate after chunking.
+- Modify: [`backend/src/paperhub/models/domain.py`](../../../backend/src/paperhub/models/domain.py) — `PaperContent` dataclass + `SectionEntry` model.
+- Modify: [`backend/tests/test_paper_pipeline.py`](../../../backend/tests/test_paper_pipeline.py).
+
+**Schema shape** (TEXT column, JSON-encoded list of objects; never queried as JSON so a plain TEXT column suffices):
+
+```json
+[
+  {"name": "Introduction", "char_start": 0, "char_end": 4892, "token_count": 1183, "chunk_count": 2},
+  {"name": "Method", "char_start": 4892, "char_end": 18430, "token_count": 3320, "chunk_count": 4},
+  {"name": "Experiments", "char_start": 18430, "char_end": 47120, "token_count": 7041, "chunk_count": 9}
+]
+```
+
+No nesting (no subsection tree in v2.10 — `\subsection{...}` is treated as part of its parent section's flat text; can refine later if the subagent's section picks turn out to be too coarse).
+
+**Steps:**
+
+- [ ] **Step 1: Write a failing test that sections_json is populated on ingest**
+
+```python
+# backend/tests/test_paper_pipeline.py — append
+async def test_paper_pipeline_persists_sections_json_at_ingest(
+    tmp_path: Any, db_conn: aiosqlite.Connection,
+) -> None:
+    """After ingest, paper_content.sections_json must contain a list of
+    {name, char_start, char_end, token_count, chunk_count} entries, ordered
+    by appearance, covering every \\section{...} in the source."""
+    sample_tex = (
+        "\\section{Introduction}\nIntro body here. " * 30 + "\n\n"
+        "\\section{Method}\nMethod body here. " * 30 + "\n\n"
+        "\\section{Experiments}\nExperiment body here. " * 50 + "\n"
+    )
+    src = tmp_path / "src" / "main.tex"
+    src.parent.mkdir(parents=True)
+    src.write_text(sample_tex)
+
+    pipeline = PaperPipeline(db_conn, _stub_chroma(), _stub_embedder())
+    req = IngestRequest(
+        paper_id="arxiv:9999.99999",
+        arxiv_meta_override=ArxivMetadata(title="T", abstract="", authors=[], year=2024),
+        source_dir_path=str(tmp_path / "src"),
+    )
+    result = await pipeline.ingest(req)
+
+    async with db_conn.execute(
+        "SELECT sections_json FROM paper_content WHERE id = ?",
+        (result.paper_content_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    sections = json.loads(row[0])
+    assert [s["name"] for s in sections] == ["Introduction", "Method", "Experiments"]
+    for s in sections:
+        assert s["chunk_count"] > 0
+        assert s["token_count"] > 0
+        assert s["char_end"] > s["char_start"]
+```
+
+- [ ] **Step 2: Confirm it fails — the column doesn't exist yet**
+
+```powershell
+uv run pytest tests/test_paper_pipeline.py::test_paper_pipeline_persists_sections_json_at_ingest -v
+```
+Expected: FAIL with `OperationalError: no such column: sections_json` (or KeyError when reading row).
+
+- [ ] **Step 3: Add the schema migration**
+
+The repo's migration mechanism: verify whether it's Alembic, raw SQL files run by `paperhub.db.init`, or sqlite `PRAGMA user_version` step-files. Pattern in earlier migrations is the source of truth — match it.
+
+For a raw-SQL migration file (the most likely pattern given the small scope):
+
+```sql
+-- backend/src/paperhub/db/migrations/0006_paper_content_sections_json.sql
+ALTER TABLE paper_content ADD COLUMN sections_json TEXT;
+```
+
+Also update the canonical CREATE TABLE in `schema.sql` (or equivalent) so a fresh DB has the column directly.
+
+- [ ] **Step 4: Add the `SectionEntry` model + extend `PaperContent` shape**
+
+```python
+# backend/src/paperhub/models/domain.py — append
+class SectionEntry(BaseModel):
+    name: str
+    char_start: int
+    char_end: int
+    token_count: int
+    chunk_count: int
+```
+
+`PaperContent` (or whichever dataclass mirrors the row) gains `sections: list[SectionEntry] | None = None`.
+
+- [ ] **Step 5: Populate during ingest**
+
+In `paper_pipeline.py`'s ingest path, after chunking + before the `INSERT INTO paper_content`:
+
+```python
+import json
+import tiktoken
+from collections import defaultdict
+from paperhub.models.domain import SectionEntry
+
+# After: chunks = chunk_text(flattened_tex)
+enc = tiktoken.get_encoding("cl100k_base")
+per_section: dict[str | None, list[Chunk]] = defaultdict(list)
+for c in chunks:
+    per_section[c.section].append(c)
+sections: list[SectionEntry] = []
+for name, group in per_section.items():
+    if name is None:  # text before any \section (preamble, abstract, etc.)
+        continue
+    section_text = flattened_tex[group[0].char_start : group[-1].char_end]
+    sections.append(
+        SectionEntry(
+            name=name,
+            char_start=group[0].char_start,
+            char_end=group[-1].char_end,
+            token_count=len(enc.encode(section_text)),
+            chunk_count=len(group),
+        ),
+    )
+sections_json = json.dumps([s.model_dump() for s in sections])
+# Then include sections_json in the existing INSERT statement.
+```
+
+- [ ] **Step 6: Run the test from Step 1 + the full paper-pipeline suite**
+
+```powershell
+uv run pytest tests/test_paper_pipeline.py -v
+```
+Expected: all PASS.
+
+- [ ] **Step 7: Commit**
+
+```powershell
+git add backend/src/paperhub/db backend/src/paperhub/pipelines/paper_pipeline.py backend/src/paperhub/models/domain.py backend/tests/test_paper_pipeline.py
+git commit -m "feat(paper-pipeline): persist paper_content.sections_json at ingest (Plan C v2.10-2)"
+```
+
+---
+
+### Task v2.10-3 — Per-paper subagent module + tool palette + bounded loop
+
+**Files:**
+- New: [`backend/src/paperhub/agents/paper_qa_subagent.py`](../../../backend/src/paperhub/agents/paper_qa_subagent.py).
+- New: [`backend/src/paperhub/llm/prompts/paper_qa_subagent_v1.yaml`](../../../backend/src/paperhub/llm/prompts/paper_qa_subagent_v1.yaml).
+- Modify: [`backend/src/paperhub/config.py`](../../../backend/src/paperhub/config.py) — new settings.
+- Modify: [`backend/.env.example`](../../../backend/.env.example) — document new env vars.
+- New: [`backend/tests/test_paper_qa_subagent.py`](../../../backend/tests/test_paper_qa_subagent.py).
+
+**Module shape** (mirrors v2.7 `research_pipeline.py` structure — single-responsibility stage helpers, no class state):
+
+- [ ] **Step 1: Write the failing subagent-loop test**
+
+```python
+# backend/tests/test_paper_qa_subagent.py
+async def test_subagent_loop_lists_sections_reads_picks_chunks_and_stops():
+    """Happy path: subagent receives a question, lists sections, reads two
+    relevant ones, cites chunks via [chunk:N] markers in its final no-tool-
+    calls message; Python extracts the picks."""
+    # Seed: 2 sections, 4 chunks total in DB; LLM is stubbed.
+    paper = _seed_paper_with_sections(
+        sections=[
+            {"name": "Method", "chunks": [(101, "We use cross-attention.")]},
+            {"name": "Experiments", "chunks": [(102, "We achieve 92% accuracy.")]},
+        ],
+    )
+    stub_llm = _StubLlm([
+        # Turn 1: call list_sections
+        _tool_call("list_sections", {}),
+        # Turn 2: call read_section("Method")
+        _tool_call("read_section", {"name": "Method"}),
+        # Turn 3: call read_section("Experiments")
+        _tool_call("read_section", {"name": "Experiments"}),
+        # Turn 4: no tool calls → final summary with citations
+        _final("Paper covers cross-attention [chunk:101] and 92% acc [chunk:102]."),
+    ])
+
+    picks = await run_paper_qa_subagent(
+        paper_content_id=paper.id,
+        title=paper.title,
+        user_message="What method and what accuracy?",
+        adapter=stub_llm,
+        tracer=_FakeTracer(),
+        model="stub",
+        conn=db_conn,
+    )
+
+    assert picks.paper_content_id == paper.id
+    assert sorted(c.chunk_id for c in picks.picked_chunks) == [101, 102]
+    assert "cross-attention" in picks.picked_chunks[0].text
+    assert "92%" in picks.picked_chunks[1].text
+    assert picks.rationale  # non-empty 1-line summary
+```
+
+- [ ] **Step 2: Add max-iter-cap test**
+
+```python
+async def test_subagent_loop_stops_at_max_section_reads_and_returns_what_it_read():
+    """If the LLM keeps calling tools past MAX_SECTION_READS, the loop force-
+    stops and returns every chunk the subagent ever read (best-effort)."""
+    paper = _seed_paper_with_n_sections(n=10)
+    # LLM that always calls read_section, never emits a final.
+    stub_llm = _StubLlm(infinite=[_tool_call("read_section", {"name": "S0"})])
+
+    picks = await run_paper_qa_subagent(
+        paper_content_id=paper.id,
+        title=paper.title,
+        user_message="Tell me everything",
+        adapter=stub_llm,
+        tracer=_FakeTracer(),
+        model="stub",
+        conn=db_conn,
+    )
+
+    # MAX_SECTION_READS=5 → 5 read calls (plus the implicit list_sections is
+    # NOT auto-called; total tool_calls = 5).
+    assert stub_llm.calls == 5
+    # All chunks from the 5 reads end up in picks (force-stop fallback).
+    assert len(picks.picked_chunks) > 0
+```
+
+- [ ] **Step 3: Add unknown-section error-tolerance test**
+
+```python
+async def test_subagent_read_section_unknown_returns_error_to_llm_not_crash():
+    """If the LLM asks for a section that doesn't exist, return a clean error
+    message in the tool result so the LLM can recover (probably call
+    list_sections first)."""
+    paper = _seed_paper_with_sections(sections=[{"name": "Method", "chunks": [(101, "x")]}])
+    stub_llm = _StubLlm([
+        _tool_call("read_section", {"name": "Nonexistent"}),
+        _final("I checked but the requested section doesn't exist [no chunks cited]."),
+    ])
+
+    picks = await run_paper_qa_subagent(
+        paper_content_id=paper.id, title="P", user_message="q",
+        adapter=stub_llm, tracer=_FakeTracer(), model="stub", conn=db_conn,
+    )
+
+    # No crash. Empty picks is fine.
+    assert picks.picked_chunks == []
+    # The error message was relayed to the LLM (check stub_llm.last_tool_result).
+    assert "unknown section" in stub_llm.last_tool_result.lower() or \
+           "not found" in stub_llm.last_tool_result.lower()
+```
+
+- [ ] **Step 4: Run all three subagent tests — confirm fails**
+
+```powershell
+uv run pytest tests/test_paper_qa_subagent.py -v
+```
+Expected: 3 FAIL (module doesn't exist).
+
+- [ ] **Step 5: Write the subagent prompt**
+
+```yaml
+# backend/src/paperhub/llm/prompts/paper_qa_subagent_v1.yaml
+system: |
+  You are PaperHub's per-paper analyst. The user has a question about
+  multiple papers — your job is to scan ONE paper's structure and pick the
+  chunks that contain relevant evidence.
+
+  You have two tools and a hard budget:
+  - `list_sections()`: returns this paper's section table-of-contents
+    (name + token count per section). Call this FIRST if you don't know
+    the paper.
+  - `read_section(name)`: returns every chunk in that section, each with
+    its `[chunk:<id>]` header and full text.
+  - You may make at most {max_section_reads} `read_section` calls per
+    turn. `list_sections` doesn't count against this budget.
+
+  When you've read enough to answer the question for THIS paper, stop
+  calling tools and write a 2-3 sentence summary of what this paper says
+  on the user's question, citing the chunks you found relevant using
+  `[chunk:<id>]` markers. Multiple cites OK: `[chunk:101,102]`.
+
+  Rules:
+  - Cite every claim with `[chunk:<id>]`. The system extracts these IDs
+    from your summary and treats them as your picks — uncited chunks are
+    discarded.
+  - If the paper doesn't address the question, say so explicitly in your
+    summary. Do not fabricate.
+  - Do NOT compare to other papers — you only see one. A separate
+    finalizer handles cross-paper synthesis.
+  - Be willing to re-read a section if needed (re-reads count against
+    the budget; budget yourself).
+user: |
+  PAPER: "{title}"
+
+  USER QUESTION: {user_message}
+
+  Pick the chunks that contain evidence for the user's question.
+```
+
+- [ ] **Step 6: Wire settings**
+
+```python
+# backend/src/paperhub/config.py — append to Settings model
+paper_qa_subagent_model: str = "gemini/gemini-3.1-flash-lite"
+paper_qa_max_section_reads: int = 5
+```
+
+```bash
+# backend/.env.example — append
+PAPERHUB_PAPER_QA_SUBAGENT_MODEL=gemini/gemini-3.1-flash-lite
+PAPERHUB_PAPER_QA_MAX_SECTION_READS=5
+```
+
+- [ ] **Step 7: Implement the subagent module**
+
+```python
+# backend/src/paperhub/agents/paper_qa_subagent.py
+"""Per-paper agentic chunk picker (Plan C v2.10).
+
+Replaces the v2.7 dense-RAG + analyst-prose path with a bounded LLM loop
+that browses the paper's section table-of-contents and decides which
+sections to read. The LLM's final no-tool-calls message contains
+`[chunk:<id>]` markers that Python extracts and treats as the subagent's
+picks. The finalizer downstream reads the picks' raw text directly.
+
+Cross-paper visibility is intentionally zero: one subagent state per
+paper, fan-out via asyncio.gather upstream. The finalizer is the only
+cross-paper synthesis surface.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+from dataclasses import dataclass
+from typing import Any
+
+import aiosqlite
+import litellm
+
+from paperhub.llm.adapter import LlmAdapter
+from paperhub.llm.prompts.registry import PromptRegistry
+from paperhub.tracing.tracer import Tracer
+
+__all__ = [
+    "MAX_SECTION_READS",
+    "PickedChunk",
+    "PerPaperPicks",
+    "run_paper_qa_subagent",
+]
+
+_LOG = logging.getLogger(__name__)
+
+# Default; overridden per call by Settings.paper_qa_max_section_reads.
+MAX_SECTION_READS = 5
+
+# [chunk:101] OR [chunk:101,102,103]
+_CHUNK_MARKER_RE = re.compile(r"\[chunk:(\d+(?:,\d+)*)\]")
+
+
+@dataclass(frozen=True)
+class PickedChunk:
+    chunk_id: int
+    text: str
+    section: str | None
+
+
+@dataclass(frozen=True)
+class PerPaperPicks:
+    paper_content_id: int
+    title: str
+    picked_chunks: list[PickedChunk]
+    rationale: str  # the subagent's own 1-3 sentence summary
+
+
+_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_sections",
+            "description": (
+                "Return this paper's section table-of-contents (name + "
+                "token count + chunk count per section). Free; doesn't "
+                "count against the read budget."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_section",
+            "description": (
+                "Return every chunk in the named section, each with its "
+                "[chunk:<id>] header and full text. Counts against the "
+                "max-reads budget."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Exact section name from list_sections.",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+]
+
+
+async def _list_sections(
+    *, paper_content_id: int, conn: aiosqlite.Connection,
+) -> str:
+    async with conn.execute(
+        "SELECT sections_json FROM paper_content WHERE id = ?",
+        (paper_content_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    if row is None or row[0] is None:
+        return json.dumps({"error": "no section TOC available for this paper"})
+    sections = json.loads(row[0])
+    # Trim the payload to what the LLM needs.
+    return json.dumps(
+        [
+            {"name": s["name"], "tokens": s["token_count"], "chunks": s["chunk_count"]}
+            for s in sections
+        ],
+    )
+
+
+async def _read_section(
+    *, paper_content_id: int, name: str, conn: aiosqlite.Connection,
+) -> tuple[str, list[PickedChunk]]:
+    """Return the prompt-shaped text for the LLM AND a parallel list of
+    PickedChunk records so the caller can stash them for force-stop fallback."""
+    async with conn.execute(
+        "SELECT id, text, section FROM chunks "
+        "WHERE paper_content_id = ? AND section = ? "
+        "ORDER BY char_start",
+        (paper_content_id, name),
+    ) as cur:
+        rows = await cur.fetchall()
+    if not rows:
+        return (
+            json.dumps({"error": f"unknown section: {name!r}. Call list_sections() first."}),
+            [],
+        )
+    picks = [PickedChunk(chunk_id=r[0], text=r[1], section=r[2]) for r in rows]
+    body = "\n\n".join(f"[chunk:{p.chunk_id}]\n{p.text}" for p in picks)
+    return (body, picks)
+
+
+def _extract_cited_chunk_ids(summary: str) -> list[int]:
+    out: list[int] = []
+    for m in _CHUNK_MARKER_RE.finditer(summary):
+        out.extend(int(x) for x in m.group(1).split(","))
+    return out
+
+
+async def run_paper_qa_subagent(
+    *,
+    paper_content_id: int,
+    title: str,
+    user_message: str,
+    adapter: LlmAdapter,
+    tracer: Tracer,
+    model: str,
+    conn: aiosqlite.Connection,
+    max_section_reads: int = MAX_SECTION_READS,
+) -> PerPaperPicks:
+    """Run one per-paper subagent loop. Bounded by ``max_section_reads``
+    ``read_section`` calls. Returns the chunks the LLM cited in its final
+    no-tool-calls message; on force-stop returns every chunk read so far."""
+    prompt_registry = PromptRegistry()
+    sys_text, user_text = prompt_registry.render(
+        slot="paper_qa_subagent/v1",
+        variables={
+            "title": title,
+            "user_message": user_message,
+            "max_section_reads": max_section_reads,
+        },
+    )
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": sys_text},
+        {"role": "user", "content": user_text},
+    ]
+    seen_chunks: dict[int, PickedChunk] = {}  # chunk_id → PickedChunk
+    reads_used = 0
+    final_summary = ""
+
+    async with tracer.step(
+        agent="research", tool="paper_qa:subagent", model=model,
+    ) as step:
+        step.record_args(
+            {"paper_content_id": paper_content_id, "title": title},
+        )
+        while True:
+            response = await adapter.acompletion(
+                model=model, messages=messages, tools=_TOOL_SCHEMAS,
+            )
+            choice = response.choices[0]
+            tool_calls = getattr(choice.message, "tool_calls", None) or []
+            messages.append(choice.message.model_dump())
+
+            if not tool_calls:
+                final_summary = choice.message.content or ""
+                break
+
+            for tc in tool_calls:
+                name = tc.function.name
+                args = json.loads(tc.function.arguments or "{}")
+                if name == "list_sections":
+                    result = await _list_sections(
+                        paper_content_id=paper_content_id, conn=conn,
+                    )
+                elif name == "read_section":
+                    if reads_used >= max_section_reads:
+                        result = json.dumps({
+                            "error": (
+                                f"read_section budget exhausted "
+                                f"({max_section_reads}). Stop calling tools "
+                                "and write your final summary now."
+                            ),
+                        })
+                    else:
+                        reads_used += 1
+                        result, picks = await _read_section(
+                            paper_content_id=paper_content_id,
+                            name=args.get("name", ""),
+                            conn=conn,
+                        )
+                        for p in picks:
+                            seen_chunks.setdefault(p.chunk_id, p)
+                else:
+                    result = json.dumps({"error": f"unknown tool: {name}"})
+
+                messages.append({
+                    "role": "tool", "tool_call_id": tc.id,
+                    "name": name, "content": result,
+                })
+
+            # Force-stop guard: if the LLM never emits a no-tool-calls turn
+            # AND we've blown the budget, the next tool_call's budget-
+            # exhausted result usually convinces it. But if not, break after
+            # one more LLM call lands without a clean final.
+            if reads_used >= max_section_reads and not any(
+                tc.function.name == "read_section" for tc in tool_calls
+            ):
+                # No useful work being done. Force-stop.
+                break
+
+        cited_ids = _extract_cited_chunk_ids(final_summary)
+        if cited_ids:
+            picked = [seen_chunks[cid] for cid in cited_ids if cid in seen_chunks]
+        else:
+            # Force-stop or LLM forgot to cite — best-effort: hand every
+            # chunk we ever read to the finalizer.
+            picked = list(seen_chunks.values())
+
+        step.record_result({
+            "reads_used": reads_used,
+            "chunks_read": len(seen_chunks),
+            "chunks_cited": len(picked),
+            "summary_len": len(final_summary),
+        })
+
+    return PerPaperPicks(
+        paper_content_id=paper_content_id,
+        title=title,
+        picked_chunks=picked,
+        rationale=final_summary,
+    )
+```
+
+- [ ] **Step 8: Run the subagent tests — confirm all green**
+
+```powershell
+uv run pytest tests/test_paper_qa_subagent.py -v
+```
+Expected: 3 PASS.
+
+- [ ] **Step 9: Commit**
+
+```powershell
+git add backend/src/paperhub/agents/paper_qa_subagent.py backend/src/paperhub/llm/prompts/paper_qa_subagent_v1.yaml backend/src/paperhub/config.py backend/.env.example backend/tests/test_paper_qa_subagent.py
+git commit -m "feat(agents): per-paper paper_qa subagent w/ list_sections + read_section tools (Plan C v2.10-3)"
+```
+
+---
+
+### Task v2.10-4 — `paper_qa` LangGraph topology replacement (dispatch → fan-out subagents → finalize)
+
+**Files:**
+- Modify: [`backend/src/paperhub/agents/research_graph.py`](../../../backend/src/paperhub/agents/research_graph.py) — replace the existing `_paper_qa_map_one` / `_paper_qa_synthesize_stream` node wiring with the new four-node subgraph.
+- Modify: [`backend/src/paperhub/agents/research.py`](../../../backend/src/paperhub/agents/research.py) — delete `_paper_qa_map_one`, `_paper_qa_synthesize_stream`, `_paper_qa_map_reduce`, `_K_PER_PAPER`. Keep `paper_qa` entry-point function (signature unchanged) but reduce to a subgraph driver.
+- Modify: [`backend/src/paperhub/agents/state.py`](../../../backend/src/paperhub/agents/state.py) — extend `AgentState` with `pq_dispatched_paper_ids`, `pq_per_paper_picks`.
+- New: [`backend/src/paperhub/llm/prompts/paper_qa_synthesize_v2.yaml`](../../../backend/src/paperhub/llm/prompts/paper_qa_synthesize_v2.yaml) — finalizer sees raw chunks, not analyst prose.
+- Delete: [`backend/src/paperhub/llm/prompts/paper_qa_per_paper_v1.yaml`](../../../backend/src/paperhub/llm/prompts/paper_qa_per_paper_v1.yaml) — no analyst stage anymore.
+- Delete: [`backend/src/paperhub/llm/prompts/paper_qa_synthesize_v1.yaml`](../../../backend/src/paperhub/llm/prompts/paper_qa_synthesize_v1.yaml) — superseded by v2.
+- Modify: [`backend/src/paperhub/llm/prompts/registry.py`](../../../backend/src/paperhub/llm/prompts/registry.py) — drop the deleted slot registrations, add the new ones.
+- Modify: [`backend/tests/test_research_paper_qa.py`](../../../backend/tests/test_research_paper_qa.py) — replace map-reduce tests with subgraph tests.
+- Modify: [`backend/tests/test_research_subgraph.py`](../../../backend/tests/test_research_subgraph.py) — paper_qa subgraph topology assertions.
+
+**Finalizer prompt** (`paper_qa_synthesize_v2.yaml`):
+
+```yaml
+system: |
+  You are PaperHub's synthesis agent. The user has a question about
+  multiple papers. For each paper, a per-paper subagent has read the
+  paper's section table-of-contents, picked the chunks containing
+  relevant evidence, and written a brief rationale. You receive the
+  picks (raw chunk text with `[chunk:<id>]` markers) and the rationales.
+  Compose the final user-facing answer.
+
+  Rules:
+  - Reference each paper by its TITLE in quotes (e.g., 'In "Attention
+    Is All You Need", the authors…'), never by an internal ID.
+  - Cite every claim with the `[chunk:<id>]` markers from the chunk
+    headers. Multiple cites OK: `[chunk:101,102]`.
+  - If the question is comparative ("how do X and Y differ"), structure
+    the answer to address EACH paper + the contrast.
+  - If a paper's subagent reported no relevant content, mention that
+    paper briefly so the user knows it was considered.
+  - Read the raw chunks — that's the ground truth. The subagent
+    rationales are hints, not authority. If a chunk contradicts the
+    rationale, trust the chunk.
+  - Be focused and well-structured. Don't restate every chunk verbatim.
+user: |
+  USER QUESTION: {user_message}
+
+  --- PAPERS ---
+  {per_paper_block}
+  --- END PAPERS ---
+
+  Compose the synthesis.
+```
+
+`per_paper_block` is built in Python as:
+
+```
+## "Title of paper A"
+Subagent rationale: <rationale text>
+Relevant chunks:
+[chunk:101]
+<chunk 101 text>
+
+[chunk:104]
+<chunk 104 text>
+
+---
+
+## "Title of paper B"
+Subagent rationale: <rationale text>
+Relevant chunks:
+[chunk:203]
+<chunk 203 text>
+```
+
+**Steps:**
+
+- [ ] **Step 1: Write a failing subgraph topology test**
+
+```python
+# backend/tests/test_research_subgraph.py — replace paper_qa cases
+async def test_paper_qa_subgraph_dispatches_one_subagent_per_enabled_paper():
+    """pq_dispatch fans out per asyncio.gather; one PerPaperPicks per paper
+    lands in state.pq_per_paper_picks before pq_finalize runs."""
+    state = _state_with_enabled_papers(ids=[15, 16])
+    stub_subagent = _stub_subagent_factory({
+        15: PerPaperPicks(paper_content_id=15, title="A", picked_chunks=[_chunk(101, "a")], rationale="r"),
+        16: PerPaperPicks(paper_content_id=16, title="B", picked_chunks=[_chunk(201, "b")], rationale="s"),
+    })
+    with patch("paperhub.agents.research_graph.run_paper_qa_subagent", stub_subagent):
+        graph = build_research_subgraph()
+        result = await graph.ainvoke(state)
+    assert sorted(p.paper_content_id for p in result["pq_per_paper_picks"]) == [15, 16]
+    # Both subagents ran in parallel (not serial) — verify via fixture timing.
+    assert stub_subagent.max_concurrency == 2
+```
+
+- [ ] **Step 2: Write a failing finalizer test**
+
+```python
+async def test_paper_qa_finalizer_streams_synthesis_with_chunk_markers_preserved():
+    """The finalizer prompt embeds raw chunk text + rationale per paper; its
+    streaming output preserves `[chunk:N]` markers for the Citation Canvas."""
+    picks = [
+        PerPaperPicks(
+            paper_content_id=15, title="MolmoAct",
+            picked_chunks=[_chunk(101, "We compute action tokens via Q-former."),
+                           _chunk(102, "Loss is cross-entropy on tokenized actions.")],
+            rationale="Method centers on action tokenization.",
+        ),
+        PerPaperPicks(
+            paper_content_id=16, title="X-VLA",
+            picked_chunks=[_chunk(203, "Soft prompts learned per embodiment.")],
+            rationale="Method centers on soft-prompt heterogeneity.",
+        ),
+    ]
+    stub_llm = _StubStreamLlm(
+        "Both papers tokenize actions [chunk:101] but X-VLA adds soft "
+        "prompts [chunk:203]. Loss is CE [chunk:102].",
+    )
+    tokens = []
+    async for tok in run_paper_qa_finalize(
+        per_paper_picks=picks, user_message="compare the methods",
+        adapter=stub_llm, tracer=_FakeTracer(), model="stub",
+    ):
+        tokens.append(tok)
+    out = "".join(tokens)
+    assert "[chunk:101]" in out
+    assert "[chunk:203]" in out
+```
+
+- [ ] **Step 3: Run both tests — confirm fails**
+
+```powershell
+uv run pytest tests/test_research_subgraph.py::test_paper_qa_subgraph_dispatches_one_subagent_per_enabled_paper tests/test_research_paper_qa.py::test_paper_qa_finalizer_streams_synthesis_with_chunk_markers_preserved -v
+```
+Expected: 2 FAIL.
+
+- [ ] **Step 4: Implement `paper_qa_finalize` in `research.py`**
+
+```python
+# backend/src/paperhub/agents/research.py — REPLACES old _paper_qa_synthesize_stream
+async def paper_qa_finalize(
+    *,
+    per_paper_picks: list[PerPaperPicks],
+    user_message: str,
+    adapter: LlmAdapter,
+    tracer: Tracer,
+    model: str,
+    state: AgentState | None = None,
+    **adapter_kwargs: Any,
+) -> AsyncIterator[str]:
+    """Finalizer: stream a user-facing synthesis over per-paper picks.
+
+    Replaces the v2.7 _paper_qa_synthesize_stream — that variant saw only
+    analyst prose; this one sees raw chunk text + a brief subagent
+    rationale per paper, mirroring NOTES.md v5's evidence+context lesson.
+    """
+    parts: list[str] = []
+    for pp in per_paper_picks:
+        chunks_block = "\n\n".join(
+            f"[chunk:{c.chunk_id}]\n{c.text}" for c in pp.picked_chunks
+        ) or "(no chunks cited)"
+        parts.append(
+            f'## "{pp.title}"\n'
+            f"Subagent rationale: {pp.rationale}\n"
+            f"Relevant chunks:\n{chunks_block}",
+        )
+    per_paper_block = "\n\n---\n\n".join(parts)
+
+    async with tracer.step(
+        agent="research", tool="paper_qa:finalize", model=model,
+    ) as step:
+        step.record_args({
+            "n_papers": len(per_paper_picks),
+            "n_chunks": sum(len(p.picked_chunks) for p in per_paper_picks),
+        })
+        collected: list[str] = []
+        async for tok in adapter.stream(
+            slot="paper_qa_synthesize/v2",
+            variables={"user_message": user_message, "per_paper_block": per_paper_block},
+            model=model,
+            history=state.get("history") if state else None,
+            **adapter_kwargs,
+        ):
+            collected.append(tok)
+            yield tok
+        step.record_result({"length": sum(len(c) for c in collected)})
+```
+
+- [ ] **Step 5: Replace the LangGraph wiring in `research_graph.py`**
+
+Find the existing paper_qa node registrations + edges (the v2.7 map-reduce path) and replace with:
+
+```python
+# backend/src/paperhub/agents/research_graph.py — paper_qa subgraph
+from paperhub.agents.paper_qa_subagent import run_paper_qa_subagent, PerPaperPicks
+from paperhub.agents.research import paper_qa_finalize
+
+async def _pq_dispatch(state: AgentState) -> AgentState:
+    """Fan-out: one subagent task per enabled paper, asyncio.gather."""
+    pids = state["enabled_paper_content_ids"]
+    settings = state["_settings"]  # threaded through from caller
+    coros = [
+        run_paper_qa_subagent(
+            paper_content_id=pid,
+            title=state["_paper_titles_by_id"][pid],
+            user_message=state["user_message"],
+            adapter=state["_adapter"],
+            tracer=state["_tracer"],
+            model=settings.paper_qa_subagent_model,
+            conn=state["_conn"],
+            max_section_reads=settings.paper_qa_max_section_reads,
+        )
+        for pid in pids
+    ]
+    picks_list = await asyncio.gather(*coros)
+    return {**state, "pq_per_paper_picks": picks_list}
+
+async def _pq_finalize_node(state: AgentState) -> AgentState:
+    """Single flagship call; tokens stream via the existing SSE pipe."""
+    picks = state["pq_per_paper_picks"]
+    if all(not p.picked_chunks for p in picks):
+        # Short-circuit: nothing to synthesize.
+        return {**state, "final_response": (
+            "I checked every enabled reference but none contained content "
+            "relevant to your question. Try a more specific question or "
+            "add more references."
+        )}
+    parts: list[str] = []
+    async for tok in paper_qa_finalize(
+        per_paper_picks=picks,
+        user_message=state["user_message"],
+        adapter=state["_adapter"],
+        tracer=state["_tracer"],
+        model=state["_settings"].paper_qa_model,
+        state=state,
+    ):
+        parts.append(tok)
+        # streaming sink wired by chat.py — same as v2.7 finalize hook
+    return {**state, "final_response": "".join(parts)}
+
+# In build_research_subgraph(): register the two nodes + edge
+graph.add_node("pq_dispatch", _pq_dispatch)
+graph.add_node("pq_finalize", _pq_finalize_node)
+graph.add_edge("pq_resolve", "pq_dispatch")
+graph.add_edge("pq_dispatch", "pq_finalize")
+graph.add_edge("pq_finalize", END)
+```
+
+(Verify against the actual `build_research_subgraph` shape — node names + edges should mirror the v2.7 `ps_*` pattern.)
+
+- [ ] **Step 6: Delete the old map-reduce code**
+
+Remove from `backend/src/paperhub/agents/research.py`: `_K_PER_PAPER`, `_paper_qa_map_one`, `_paper_qa_synthesize_stream`, `_paper_qa_map_reduce`. Keep the top-level `paper_qa(...)` entry-point — but slim it to a subgraph invoker (compatible with existing chat.py call sites).
+
+Delete:
+- `backend/src/paperhub/llm/prompts/paper_qa_per_paper_v1.yaml`
+- `backend/src/paperhub/llm/prompts/paper_qa_synthesize_v1.yaml`
+
+Update `paperhub.llm.prompts.registry.PromptRegistry`: drop `paper_qa_per_paper/v1` and `paper_qa_synthesize/v1` registrations; add `paper_qa_subagent/v1` and `paper_qa_synthesize/v2`.
+
+- [ ] **Step 7: Run the new subgraph tests + the full backend suite**
+
+```powershell
+uv run pytest tests/test_research_subgraph.py tests/test_research_paper_qa.py -v
+uv run pytest -q
+```
+Expected: green across the board (modulo the pre-existing flaky `test_paper_qa_map_reduce_runs_map_steps_in_parallel_via_gather` — DELETE that test in this task since the map-reduce path is gone).
+
+- [ ] **Step 8: Run ruff + mypy**
+
+```powershell
+uv run ruff check src tests
+uv run mypy src
+```
+Expected: clean.
+
+- [ ] **Step 9: Commit**
+
+```powershell
+git add backend/src/paperhub/agents/ backend/src/paperhub/llm/prompts/ backend/tests/test_research_subgraph.py backend/tests/test_research_paper_qa.py
+git commit -m "refactor(agents): paper_qa hierarchical agentic pipeline replaces map-reduce (Plan C v2.10-4)"
+```
+
+---
+
+### Task v2.10-5 — Re-ingest existing papers (drop chunks + Chroma vectors + re-run pipeline)
+
+**Files:**
+- New: [`backend/scripts/reingest_all_papers.ps1`](../../../backend/scripts/reingest_all_papers.ps1) — operator script.
+- New: [`backend/src/paperhub/cli/reingest.py`](../../../backend/src/paperhub/cli/reingest.py) — `paperhub-reingest` entry-point.
+- Modify: [`backend/pyproject.toml`](../../../backend/pyproject.toml) — script entry.
+
+**Why this is mandatory:** every `paper_content` row in the live workspace was chunked by the broken pre-v2.10-1 chunker AND lacks `sections_json`. The subagent's `list_sections` returns nothing useful and `read_section` finds the right `section` field but its chunks are 1-char garbage. Re-ingest is the only way the new pipeline becomes useful on existing data.
+
+**Approach:** for each `paper_content` row, the source is already cached under `workspace/papers_cache/{arxiv,upload}/<key>/source/`. Re-run the pipeline starting from "read flattened source → chunk → embed → persist" while preserving `paper_content.id` (so existing `papers` membership rows and `messages` referencing the paper survive).
+
+- [ ] **Step 1: Write the CLI**
+
+```python
+# backend/src/paperhub/cli/reingest.py
+"""Re-chunk + re-embed every paper_content row using the current chunker.
+
+Deletes chunks + Chroma vectors first; preserves paper_content.id so
+membership (papers) + message history survive. Idempotent — runs as many
+times as needed.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+from pathlib import Path
+
+import aiosqlite
+
+from paperhub.config import load_settings
+from paperhub.pipelines.chunker import chunk_text
+from paperhub.pipelines.embedder import get_embedder
+from paperhub.rag.chroma import ChromaStore
+
+
+async def _reingest_one(
+    pcid: int,
+    conn: aiosqlite.Connection,
+    chroma: ChromaStore,
+    embedder,
+) -> tuple[int, int]:
+    """Returns (chunks_before, chunks_after) for logging."""
+    async with conn.execute(
+        "SELECT source_path, source_dir_path FROM paper_content WHERE id = ?",
+        (pcid,),
+    ) as cur:
+        row = await cur.fetchone()
+    if row is None:
+        return (0, 0)
+    source_path = row[0]
+    flattened = Path(source_path).read_text(encoding="utf-8", errors="replace")
+
+    async with conn.execute(
+        "SELECT COUNT(*) FROM chunks WHERE paper_content_id = ?", (pcid,),
+    ) as cur:
+        before_row = await cur.fetchone()
+    before = int(before_row[0]) if before_row else 0
+
+    # Delete in dependency order.
+    await conn.execute("DELETE FROM chunks WHERE paper_content_id = ?", (pcid,))
+    chroma.delete_by_paper(pcid)
+    await conn.commit()
+
+    # Re-chunk + re-embed + persist (same path the pipeline uses).
+    chunks = chunk_text(flattened)
+    if not chunks:
+        return (before, 0)
+    embeddings = embedder.embed([c.text for c in chunks])
+
+    # Insert chunks, capture new ids.
+    cursor = await conn.execute("BEGIN")
+    new_ids: list[int] = []
+    for c in chunks:
+        async with conn.execute(
+            "INSERT INTO chunks (paper_content_id, section, char_start, char_end, text) "
+            "VALUES (?, ?, ?, ?, ?) RETURNING id",
+            (pcid, c.section, c.char_start, c.char_end, c.text),
+        ) as cur:
+            r = await cur.fetchone()
+            assert r is not None
+            new_ids.append(int(r[0]))
+
+    # Populate sections_json (mirrors paper_pipeline.py logic).
+    import tiktoken
+    from collections import defaultdict
+
+    enc = tiktoken.get_encoding("cl100k_base")
+    per_section: dict[str | None, list] = defaultdict(list)
+    for c in chunks:
+        per_section[c.section].append(c)
+    sections = []
+    for name, group in per_section.items():
+        if name is None:
+            continue
+        section_text = flattened[group[0].char_start : group[-1].char_end]
+        sections.append({
+            "name": name,
+            "char_start": group[0].char_start,
+            "char_end": group[-1].char_end,
+            "token_count": len(enc.encode(section_text)),
+            "chunk_count": len(group),
+        })
+    await conn.execute(
+        "UPDATE paper_content SET sections_json = ? WHERE id = ?",
+        (json.dumps(sections), pcid),
+    )
+
+    # Insert Chroma vectors keyed by new chunk ids.
+    chroma.add(
+        ids=[str(i) for i in new_ids],
+        embeddings=embeddings,
+        metadatas=[
+            {"paper_content_id": pcid, "section": c.section or "",
+             "char_start": c.char_start, "char_end": c.char_end}
+            for c in chunks
+        ],
+        documents=[c.text for c in chunks],
+    )
+    await conn.commit()
+    return (before, len(chunks))
+
+
+async def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--paper-content-id", type=int, default=None,
+                        help="Re-ingest just this paper_content.id (default: all).")
+    args = parser.parse_args()
+
+    settings = load_settings()
+    chroma = ChromaStore(settings.chroma_dir)
+    embedder = get_embedder()
+    async with aiosqlite.connect(settings.db_path) as conn:
+        if args.paper_content_id is not None:
+            ids = [args.paper_content_id]
+        else:
+            async with conn.execute("SELECT id FROM paper_content ORDER BY id") as cur:
+                ids = [int(r[0]) for r in await cur.fetchall()]
+        print(f"Re-ingesting {len(ids)} paper(s)...")
+        for pcid in ids:
+            before, after = await _reingest_one(pcid, conn, chroma, embedder)
+            print(f"  pcid={pcid}: {before} chunks -> {after} chunks")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+- [ ] **Step 2: Wire the script entry**
+
+```toml
+# backend/pyproject.toml — under [project.scripts]
+paperhub-reingest = "paperhub.cli.reingest:main"
+```
+
+- [ ] **Step 3: Wrap in a PowerShell smoke for the operator**
+
+```powershell
+# backend/scripts/reingest_all_papers.ps1
+$ErrorActionPreference = "Stop"
+Write-Host "Backing up workspace/paperhub.db -> paperhub.db.bak.v2.10..."
+Copy-Item workspace/paperhub.db workspace/paperhub.db.bak.v2.10 -Force
+Write-Host "Backing up workspace/chroma -> chroma.bak.v2.10..."
+if (Test-Path workspace/chroma.bak.v2.10) { Remove-Item -Recurse -Force workspace/chroma.bak.v2.10 }
+Copy-Item workspace/chroma workspace/chroma.bak.v2.10 -Recurse
+Write-Host "Running re-ingest..."
+uv run paperhub-reingest
+Write-Host "Done. Old data preserved at workspace/*.bak.v2.10/."
+```
+
+- [ ] **Step 4: Manual run + verify**
+
+```powershell
+.\scripts\reingest_all_papers.ps1
+```
+Expected:
+- Pre-existing 29,891 chunks for paper 15 collapse to ~30-60 chunks
+- Pre-existing 1,839 chunks for paper 16 collapse to ~30-50 chunks
+- `paper_content.sections_json` is populated for every row
+- Workspace backup directory exists for rollback
+
+- [ ] **Step 5: Commit (script + cli)**
+
+```powershell
+git add backend/src/paperhub/cli/reingest.py backend/scripts/reingest_all_papers.ps1 backend/pyproject.toml
+git commit -m "feat(cli): paperhub-reingest — rechunk + reembed existing papers under v2.10 chunker (Plan C v2.10-5)"
+```
+
+---
+
+### Task v2.10-6 — End-to-end smoke: hierarchical paper_qa on the failing MolmoACT2 + X-VLA question
+
+**Files:**
+- Modify: [`backend/scripts/query_papers.ps1`](../../../backend/scripts/query_papers.ps1) — assert the new tool_step shapes.
+
+**Steps:**
+
+- [ ] **Step 1: Update the smoke to assert subagent + finalize trace shape**
+
+The script already runs a multi-paper Q&A and asserts `[chunk:N]` markers. Add assertions for the new trace structure:
+
+```powershell
+# scripts/query_papers.ps1 — append assertions
+$expected_steps = @("paper_qa:resolve", "paper_qa:subagent", "paper_qa:finalize")
+foreach ($s in $expected_steps) {
+  if (-not ($sseRaw -match "tool=`"$s`"")) {
+    Write-Error "Expected tool_step '$s' missing from SSE trace"; exit 1
+  }
+}
+# At least one paper_qa:subagent step per enabled paper.
+$subagent_count = ([regex]::Matches($sseRaw, 'tool="paper_qa:subagent"')).Count
+if ($subagent_count -lt 2) {
+  Write-Error "Expected >=2 paper_qa:subagent steps (one per enabled paper), got $subagent_count"
+  exit 1
+}
+```
+
+- [ ] **Step 2: Run the smoke (manual — needs the user's actual papers + a real LLM key)**
+
+```powershell
+.\scripts\query_papers.ps1 "Compare the methods of these two papers" 60 16
+```
+Expected:
+- Trace shows `paper_qa:resolve` → 2× `paper_qa:subagent` (one per paper, in parallel) → `paper_qa:finalize`
+- Each subagent's `result_summary` has `reads_used > 0`, `chunks_cited > 0`
+- Finalizer output contains `[chunk:N]` markers for chunks from BOTH papers (acceptance criterion I-8 #3)
+- The "I cannot provide a comparison" failure mode is gone
+
+- [ ] **Step 3: Commit**
+
+```powershell
+git add backend/scripts/query_papers.ps1
+git commit -m "test(smoke): assert v2.10 paper_qa subagent + finalize trace shape (Plan C v2.10-6)"
+```
+
+---
+
+### Quality gates after the v2.10 round
+
+From `backend/`:
+
+```powershell
+uv run pytest -v                       # subagent + topology + finalize tests added; map-reduce tests removed
+uv run ruff check src tests
+uv run mypy src                        # strict-clean
+.\scripts\reingest_all_papers.ps1      # one-shot, idempotent
+.\scripts\query_papers.ps1             # end-to-end with new trace shape
+.\scripts\smoke_mcp_papers.ps1         # regression — unchanged path
+.\scripts\smoke_chat_real.ps1          # paper_search regression
+```
+
+Browser verification (manual, after re-ingest + backend restart):
+- "Compare the methods of MolmoAct2 and X-VLA" → trace panel shows the four `paper_qa:resolve` → `paper_qa:subagent` ×2 → `paper_qa:finalize` rows; expanding a subagent row reveals `reads_used`, `chunks_read`, `chunks_cited`; final assistant message contains `[chunk:N]` citations resolvable in the Citation Canvas to chunks from BOTH papers.
+- Single-paper Q&A still works (only one subagent fires; finalizer handles single-paper case).
+- Disabling one of the two papers via the References drawer + re-asking → only one subagent fires; answer cites only the remaining paper. (Validates v2.10 honors `enabled=true` filter at `pq_resolve`.)
+- Operator workflow: starting the backend on a fresh clone with no `papers_cache` → `paper_qa` returns the "I checked every enabled reference but none contained content" short-circuit; ingesting a paper then re-asking succeeds.
+
+### Files touched (summary)
+
+- New: [`backend/src/paperhub/agents/paper_qa_subagent.py`](../../../backend/src/paperhub/agents/paper_qa_subagent.py)
+- New: [`backend/src/paperhub/llm/prompts/paper_qa_subagent_v1.yaml`](../../../backend/src/paperhub/llm/prompts/paper_qa_subagent_v1.yaml)
+- New: [`backend/src/paperhub/llm/prompts/paper_qa_synthesize_v2.yaml`](../../../backend/src/paperhub/llm/prompts/paper_qa_synthesize_v2.yaml)
+- New: [`backend/src/paperhub/cli/reingest.py`](../../../backend/src/paperhub/cli/reingest.py)
+- New: [`backend/scripts/reingest_all_papers.ps1`](../../../backend/scripts/reingest_all_papers.ps1)
+- New: [`backend/src/paperhub/db/migrations/0006_paper_content_sections_json.sql`](../../../backend/src/paperhub/db/migrations/0006_paper_content_sections_json.sql) (or equivalent — verify migration mechanism)
+- New: [`backend/tests/test_paper_qa_subagent.py`](../../../backend/tests/test_paper_qa_subagent.py)
+- Modify: [`backend/src/paperhub/pipelines/chunker.py`](../../../backend/src/paperhub/pipelines/chunker.py) — safe halving shrink, LaTeX comment strip, paragraph boundary preference
+- Modify: [`backend/src/paperhub/pipelines/paper_pipeline.py`](../../../backend/src/paperhub/pipelines/paper_pipeline.py) — populate `sections_json`
+- Modify: [`backend/src/paperhub/agents/research_graph.py`](../../../backend/src/paperhub/agents/research_graph.py) — paper_qa subgraph topology
+- Modify: [`backend/src/paperhub/agents/research.py`](../../../backend/src/paperhub/agents/research.py) — delete map-reduce helpers; add `paper_qa_finalize`
+- Modify: [`backend/src/paperhub/agents/state.py`](../../../backend/src/paperhub/agents/state.py) — `pq_per_paper_picks`
+- Modify: [`backend/src/paperhub/models/domain.py`](../../../backend/src/paperhub/models/domain.py) — `SectionEntry`, `PickedChunk`, `PerPaperPicks` exposure
+- Modify: [`backend/src/paperhub/llm/prompts/registry.py`](../../../backend/src/paperhub/llm/prompts/registry.py) — slot registrations
+- Modify: [`backend/src/paperhub/config.py`](../../../backend/src/paperhub/config.py) — `paper_qa_subagent_model`, `paper_qa_max_section_reads`
+- Modify: [`backend/.env.example`](../../../backend/.env.example) — new env vars
+- Modify: [`backend/pyproject.toml`](../../../backend/pyproject.toml) — `paperhub-reingest` script entry
+- Modify: [`backend/tests/test_chunker.py`](../../../backend/tests/test_chunker.py), [`test_paper_pipeline.py`](../../../backend/tests/test_paper_pipeline.py), [`test_research_subgraph.py`](../../../backend/tests/test_research_subgraph.py), [`test_research_paper_qa.py`](../../../backend/tests/test_research_paper_qa.py)
+- Modify: [`backend/scripts/query_papers.ps1`](../../../backend/scripts/query_papers.ps1)
+- Delete: [`backend/src/paperhub/llm/prompts/paper_qa_per_paper_v1.yaml`](../../../backend/src/paperhub/llm/prompts/paper_qa_per_paper_v1.yaml), [`paper_qa_synthesize_v1.yaml`](../../../backend/src/paperhub/llm/prompts/paper_qa_synthesize_v1.yaml)
+- Update at PR time (separate commit): [`CLAUDE.md`](../../../CLAUDE.md), [`docs/superpowers/specs/2026-05-17-paperhub-srs.md`](../../../docs/superpowers/specs/2026-05-17-paperhub-srs.md) — SRS v2.10 revision entry, §III-3 Research Agent row paper_qa paragraph, §III-5.2 RAG retrieval section.
+
+---
