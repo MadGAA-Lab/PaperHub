@@ -228,10 +228,13 @@ async def test_discover_natural_language_multi_angle_then_returns_identity(
     reg = _StubRegistry(web_hits=[
         {"title": "Mamba: Linear-Time Sequence Modeling", "url": "https://arxiv.org/abs/2312.00752"},
     ])
-    # 1) LLM responds with a tool call to web.search.
+    # 1) LLM responds with a tool call to the structured-output wrapper.
     # 2) After tool result, LLM emits canonical identity JSON.
     seq = [
-        _msg(tool_calls=[_tool_call("c1", "web.search", {"query": "mamba paper foundational"})]),
+        _msg(tool_calls=[_tool_call(
+            "c1", "paperhub.search_web",
+            {"paper_hint": "mamba paper", "extra_terms": ["foundational"]},
+        )]),
         _msg(content=json.dumps({
             "title": "Mamba: Linear-Time Sequence Modeling with Selective State Spaces",
             "author_surname": "Gu",
@@ -251,7 +254,7 @@ async def test_discover_natural_language_multi_angle_then_returns_identity(
     assert out.year == 2023
     assert out.author_surname == "Gu"
     assert out.confidence == "high"
-    # Exactly one web.search invocation logged.
+    # The wrapper dispatched to web.search server-side.
     web_calls = [n for n, _ in reg.call_log if n == "web.search"]
     assert len(web_calls) == 1
 
@@ -262,7 +265,10 @@ async def test_discover_returns_none_when_llm_says_not_found(
     """Title=null in the canonical identity payload → returns None."""
     reg = _StubRegistry(web_hits=[])
     seq = [
-        _msg(tool_calls=[_tool_call("c1", "web.search", {"query": "foo"})]),
+        _msg(tool_calls=[_tool_call(
+            "c1", "paperhub.search_web",
+            {"paper_hint": "foo", "extra_terms": []},
+        )]),
         _msg(content='{"title": null, "reason": "no usable hits"}'),
     ]
     comp = _async_completion_mock(seq)
@@ -297,7 +303,10 @@ async def test_discover_trace_records_full_context(
         "rationale": "Top hit names Gu & Dao 2023.",
     })
     seq = [
-        _msg(tool_calls=[_tool_call("c1", "web.search", {"query": "mamba paper"})]),
+        _msg(tool_calls=[_tool_call(
+            "c1", "paperhub.search_web",
+            {"paper_hint": "mamba paper", "extra_terms": []},
+        )]),
         _msg(content=identity_json),
     ]
     comp = _async_completion_mock(seq)
@@ -317,22 +326,107 @@ async def test_discover_trace_records_full_context(
             rows.append({"tool": r[0], "result": json.loads(r[1] or "{}")})
 
     plan_rows = [r for r in rows if r["tool"] == "paper_search:discover_plan"]
-    web_rows = [r for r in rows if r["tool"] == "paper_search:web.search"]
+    web_rows = [r for r in rows if r["tool"] == "paper_search:paperhub.search_web"]
 
     # discover_plan iteration 0: tool call recorded with its name + args.
     assert plan_rows[0]["result"].get("tool_calls"), (
         f"discover_plan must record the actual tool_calls; got {plan_rows[0]['result']!r}"
     )
-    assert plan_rows[0]["result"]["tool_calls"][0]["name"] == "web.search"
+    assert plan_rows[0]["result"]["tool_calls"][0]["name"] == "paperhub.search_web"
     # discover_plan iteration 1: full content from the LLM, not just length.
     assert "Linear-Time" in plan_rows[1]["result"].get("content", ""), (
         f"discover_plan finalize must record full content; got {plan_rows[1]['result']!r}"
     )
-    # web.search row: top hits stored verbatim (not just count).
+    # web-call row: top hits stored verbatim (not just count).
     assert web_rows[0]["result"].get("top"), (
         f"web.search must record top hits; got {web_rows[0]['result']!r}"
     )
     assert web_rows[0]["result"]["top"][0]["url"] == web_hit["url"]
+
+
+async def test_discover_wrapper_strips_quotes_from_paper_hint(
+    fake_tracer: Tracer,
+) -> None:
+    """The structured-output wrapper sanitises the LLM's paper_hint:
+    even if Gemini sneaks quotes into the field value, the underlying
+    web.search query has no quotes. This is the structural guarantee
+    that replaces the prompt rule against quoting.
+
+    Probing the open-websearch daemon empirically showed that DDG
+    returns 0 hits for ``"MolmoACT2"`` and 10 hits for the bare token
+    — so this sanitiser is the difference between finding the paper
+    and a confabulated NotFound."""
+    reg = _StubRegistry(web_hits=[
+        {"title": "MolmoAct 2", "url": "https://arxiv.org/abs/2605.02881"},
+    ])
+    seq = [
+        # Adversarial LLM: tries to inject quotes into paper_hint AND
+        # uses boolean OR syntax in extra_terms.
+        _msg(tool_calls=[_tool_call(
+            "c1", "paperhub.search_web",
+            {
+                "paper_hint": '"MolmoACT2"',
+                "extra_terms": ['"paper"', "OR", "arxiv"],
+            },
+        )]),
+        _msg(content=json.dumps({
+            "title": "MolmoAct 2: Action Reasoning Models",
+            "arxiv_id": "2605.02881",
+            "confidence": "high",
+            "rationale": "arxiv hit",
+        })),
+    ]
+    comp = _async_completion_mock(seq)
+    with patch("paperhub.agents.research_pipeline.litellm.acompletion", new=comp):
+        out = await discover_canonical(
+            ParsedRequest(hint="MolmoACT2", kind="natural_language"),
+            tracer=fake_tracer, model="m", mcp_registry=reg,  # type: ignore[arg-type]
+        )
+    assert out is not None
+    # The underlying web.search must have been called with a query
+    # that has NO quotes (the structural guarantee).
+    web_calls = [args for name, args in reg.call_log if name == "web.search"]
+    assert len(web_calls) == 1
+    built_query = web_calls[0]["query"]
+    assert '"' not in built_query, (
+        f"quotes leaked through the sanitiser: {built_query!r}"
+    )
+    assert " OR " not in built_query, (
+        f"boolean OR leaked through the sanitiser: {built_query!r}"
+    )
+    assert "MolmoACT2" in built_query, (
+        f"paper_hint token must survive sanitisation: {built_query!r}"
+    )
+
+
+async def test_discover_rejects_off_palette_tool_calls(
+    fake_tracer: Tracer,
+) -> None:
+    """If the LLM hallucinates a tool name other than the exposed
+    wrapper (e.g. directly calls web.search by name), the orchestrator
+    must NOT dispatch — that would bypass the query sanitiser. Return
+    an error tool message so the LLM corrects on the next turn."""
+    reg = _StubRegistry(web_hits=[
+        {"title": "should not appear", "url": "https://example.com"},
+    ])
+    seq = [
+        # Adversarial: LLM tries to call web.search directly with a
+        # quoted query, hoping to bypass the wrapper.
+        _msg(tool_calls=[_tool_call(
+            "c1", "web.search", {"query": '"MolmoACT2"'},
+        )]),
+        _msg(content='{"title": null, "reason": "tool error"}'),
+    ]
+    comp = _async_completion_mock(seq)
+    with patch("paperhub.agents.research_pipeline.litellm.acompletion", new=comp):
+        await discover_canonical(
+            ParsedRequest(hint="MolmoACT2", kind="natural_language"),
+            tracer=fake_tracer, model="m", mcp_registry=reg,  # type: ignore[arg-type]
+        )
+    # web.search must NOT have been dispatched.
+    assert not [n for n, _ in reg.call_log if n == "web.search"], (
+        f"off-palette web.search call leaked through: {reg.call_log!r}"
+    )
 
 
 async def test_discover_falls_back_when_web_not_in_registry(
@@ -480,7 +574,10 @@ async def test_resolver_extracts_arxiv_id_from_evidence_safety_net(
         "rationale": "found on arxiv",
     })
     seq = [
-        _msg(tool_calls=[_tool_call("c1", "web.search", {"query": "X-VLA"})]),
+        _msg(tool_calls=[_tool_call(
+            "c1", "paperhub.search_web",
+            {"paper_hint": "X-VLA", "extra_terms": ["arxiv"]},
+        )]),
         _msg(content=identity_json),
     ]
     comp = _async_completion_mock(seq)

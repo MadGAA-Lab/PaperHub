@@ -64,6 +64,86 @@ MAX_WEB_SEARCHES_PER_DISCOVER = 2
 RequestKind = Literal["arxiv_id", "doi", "quoted_title", "natural_language"]
 
 
+# ────────────────── Structured-output web-search wrapper ──────────────────
+#
+# Empirical finding (probing the daemon at :3000): DuckDuckGo treats a
+# double-quoted token as a strict-substring match. The LLM has a strong
+# habit of wrapping single-token paper hints in quotes ("MolmoACT2"),
+# which kills recall — bare `MolmoACT2` returns 10 hits including arxiv
+# URLs, while `"MolmoACT2"` returns 0. Prompt rules against quoting are
+# unreliable (Gemini ignores them under pressure), so we hide raw
+# web.search from the LLM and expose a typed wrapper instead. The
+# wrapper's schema literally has no field that accepts a free-form
+# query string; the LLM passes a paper_hint + bag of extra_terms, and
+# we build the underlying query deterministically — quotes that sneak
+# into field values are stripped server-side.
+
+_DISCOVER_TOOL_NAME = "paperhub.search_web"
+
+_DISCOVER_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": _DISCOVER_TOOL_NAME,
+        "description": (
+            "Web-search for a paper by hint. Pass the user's paper name "
+            "VERBATIM in paper_hint — do NOT add quotes or normalise "
+            "capitalisation. Extra bare keywords are appended unquoted to "
+            "bias toward paper pages (arxiv, github, openreview)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "paper_hint": {
+                    "type": "string",
+                    "description": (
+                        "The user's name for the paper, verbatim "
+                        "(e.g. 'MolmoACT2' or 'mamba paper'). No quotes, "
+                        "no boolean operators."
+                    ),
+                },
+                "extra_terms": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Additional bare keywords (e.g. ['arxiv'], "
+                        "['paper', 'author', 'year']). Avoid quotes "
+                        "and OR operators."
+                    ),
+                },
+            },
+            "required": ["paper_hint"],
+        },
+    },
+}
+
+
+_BOOLEAN_OPERATORS = {"OR", "AND", "NOT"}
+
+
+def _build_safe_web_query(paper_hint: str, extra_terms: list[str]) -> str:
+    """Deterministic query builder. Strips quotes, boolean operators,
+    and any other syntax the LLM may have snuck through the typed
+    schema. The output is a bare bag-of-keywords query that DDG handles
+    via case-folded fuzzy match."""
+    def _scrub(s: str) -> str:
+        return (
+            s.replace('"', "").replace("'", "").replace("“", "")
+            .replace("”", "").replace(" OR ", " ").replace(" AND ", " ")
+            .replace(" NOT ", " ").strip()
+        )
+    cleaned_hint = _scrub(paper_hint)
+    cleaned_terms: list[str] = []
+    for raw in extra_terms:
+        scrubbed = _scrub(raw)
+        # Drop bare boolean-operator terms (the LLM sometimes splits
+        # `"a OR b"` into ["a", "OR", "b"] under the typed schema).
+        if not scrubbed or scrubbed.upper() in _BOOLEAN_OPERATORS:
+            continue
+        cleaned_terms.append(scrubbed)
+    parts = [cleaned_hint, *cleaned_terms]
+    return " ".join(p for p in parts if p)
+
+
 # ─────────────────────────────── A. Parser ───────────────────────────────
 
 
@@ -297,10 +377,10 @@ async def discover_canonical(
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
-    web_tools = [
-        s for s in await mcp_registry.aggregate_tool_schemas()
-        if s["function"]["name"].startswith("web.")
-    ]
+    # Hide raw web.search from the LLM. Expose only the typed wrapper
+    # so the LLM cannot pass a quoted query string. The wrapper
+    # synthesises the underlying web.search query server-side.
+    web_tools = [_DISCOVER_TOOL_SCHEMA]
 
     web_calls = 0
     for iteration in range(MAX_WEB_SEARCHES_PER_DISCOVER + 1):
@@ -351,28 +431,68 @@ async def discover_canonical(
             if web_calls >= MAX_WEB_SEARCHES_PER_DISCOVER:
                 result: Any = {"error": "web_search_cap_reached"}
             else:
-                args = json.loads(call["function"]["arguments"] or "{}")
-                async with tracer.step(
-                    agent="research", tool=f"paper_search:{name}", model=None,
-                ) as step2:
-                    step2.record_args(args)
-                    try:
-                        result = await mcp_registry.call(name, args)
-                    except (MCPUnavailableError, MCPToolError) as exc:
-                        result = {"error": str(exc), "tool": name}
-                        step2.mark_error(str(exc))
-                    if isinstance(result, dict):
+                raw_args = json.loads(call["function"]["arguments"] or "{}")
+                # Route paperhub.search_web through the safe query builder
+                # → underlying web.search. Anything else is forbidden (LLM
+                # got the schema; off-palette calls are a bug, so surface
+                # them as a tool error rather than silently passing through).
+                if name != _DISCOVER_TOOL_NAME:
+                    # Off-palette tool call. We never expose anything
+                    # other than the wrapper, so this is either an LLM
+                    # hallucination or an attempt to bypass the query
+                    # sanitiser. Don't dispatch; tell the LLM what's
+                    # allowed.
+                    result = {
+                        "error": "off_palette_tool",
+                        "received": name,
+                        "allowed": [_DISCOVER_TOOL_NAME],
+                        "hint": (
+                            f"Only {_DISCOVER_TOOL_NAME} is exposed. "
+                            "Call it with paper_hint + extra_terms."
+                        ),
+                    }
+                    async with tracer.step(
+                        agent="research", tool=f"paper_search:{name}", model=None,
+                    ) as step2:
+                        step2.record_args(raw_args if isinstance(raw_args, dict) else {})
                         step2.record_result({"summary": result})
-                    elif isinstance(result, list):
-                        # Keep the top 5 hits verbatim so post-hoc debug
-                        # can tell what the LLM actually saw. The
-                        # redactor walks nested structures.
-                        step2.record_result(
-                            {"count": len(result), "top": result[:5]},
+                        step2.mark_error("off_palette_tool")
+                else:
+                    paper_hint = (
+                        raw_args.get("paper_hint") if isinstance(raw_args, dict) else None
+                    ) or request.hint
+                    extra_terms = (
+                        raw_args.get("extra_terms") if isinstance(raw_args, dict) else None
+                    ) or []
+                    if not isinstance(extra_terms, list):
+                        extra_terms = []
+                    safe_query = _build_safe_web_query(str(paper_hint), list(extra_terms))
+                    async with tracer.step(
+                        agent="research", tool=f"paper_search:{name}", model=None,
+                    ) as step2:
+                        step2.record_args(
+                            {
+                                "paper_hint": paper_hint,
+                                "extra_terms": extra_terms,
+                                "built_query": safe_query,
+                            },
                         )
-                    else:
-                        step2.record_result({"value": result})
-                if name.startswith("web."):
+                        try:
+                            result = await mcp_registry.call(
+                                "web.search", {"query": safe_query},
+                            )
+                        except (MCPUnavailableError, MCPToolError) as exc:
+                            result = {"error": str(exc), "tool": "web.search"}
+                            step2.mark_error(str(exc))
+                        if isinstance(result, dict):
+                            step2.record_result({"summary": result})
+                        elif isinstance(result, list):
+                            step2.record_result(
+                                {"count": len(result), "top": result[:5]},
+                            )
+                        else:
+                            step2.record_result({"value": result})
+                if name == _DISCOVER_TOOL_NAME:
                     web_calls += 1
             messages.append({
                 "role": "tool",
