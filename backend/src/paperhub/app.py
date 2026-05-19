@@ -191,4 +191,5 @@ def create_app() -> FastAPI:
     mount_paperhub_papers_on(app, build_paperhub_papers_server(), path="/mcp")
     return app
 
+
 app = create_app()
