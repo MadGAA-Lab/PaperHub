@@ -330,21 +330,56 @@ def _host_port_from_url(url: str) -> tuple[str | None, int | None]:
 
 
 async def _tcp_reachable(host: str, port: int) -> bool:
-    """Cheap probe: open a TCP connection, close immediately. The streamable-
-    HTTP transport tolerates a closed socket so this doesn't disturb a live
-    daemon."""
+    """Cheap probe: TCP-connect to any address ``host`` resolves to.
+
+    Resolves ``host`` via :func:`socket.getaddrinfo` and tries each
+    address (IPv4 + IPv6) in turn. Returns True on the first successful
+    connect. Closes the probe socket immediately — streamable-HTTP MCP
+    servers tolerate a closed probe.
+
+    **Windows / dual-stack gotcha.** On Windows the loopback resolver
+    returns ``::1`` (IPv6) FIRST for ``localhost``, but `npx open-
+    websearch` binds IPv4 only. ``asyncio.open_connection("localhost",
+    port)`` then tries ``::1`` first; if it hangs instead of refusing
+    fast (common on Windows where IPv6 connectivity *appears* present),
+    every probe times out at ``_PROBE_CONNECT_TIMEOUT`` and the autostart
+    declares the daemon unreachable — even though IPv4 ``127.0.0.1:PORT``
+    is happily serving. Explicit per-family iteration avoids that.
+
+    This bug was caught by **live-backend testing**, not pytest — the
+    unit tests stubbed `_tcp_reachable` and so couldn't see it. A real
+    socket-roundtrip test lives in `tests/mcp/test_registry_probe.py`.
+    """
+    import socket as _socket
+
+    loop = asyncio.get_event_loop()
     try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port),
-            timeout=_PROBE_CONNECT_TIMEOUT,
+        addrinfo = await loop.getaddrinfo(
+            host, port, type=_socket.SOCK_STREAM,
         )
-    except (OSError, TimeoutError):
+    except _socket.gaierror:
         return False
-    writer.close()
-    with contextlib.suppress(Exception):
-        # Closing a probe socket; benign races on the response side.
-        await writer.wait_closed()
-    return True
+
+    # Prefer IPv4 (loopback servers on Windows / Node bind IPv4 only by
+    # default). Stable-sort so the order is otherwise preserved.
+    addrinfo.sort(key=lambda ai: 0 if ai[0] == _socket.AF_INET else 1)
+
+    for family, _socktype, _proto, _canon, sockaddr in addrinfo:
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(
+                    host=sockaddr[0], port=sockaddr[1], family=family,
+                ),
+                timeout=_PROBE_CONNECT_TIMEOUT,
+            )
+        except (OSError, TimeoutError):
+            continue
+        writer.close()
+        with contextlib.suppress(Exception):
+            # Closing a probe socket; benign races on the response side.
+            await writer.wait_closed()
+        return True
+    return False
 
 
 async def _wait_until_reachable(host: str, port: int, deadline_after: float) -> bool:  # noqa: ASYNC109 — operator-facing knob from MCPServerConfig.launch_ready_timeout

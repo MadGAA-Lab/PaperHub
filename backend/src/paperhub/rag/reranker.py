@@ -7,6 +7,7 @@ from typing import Protocol, runtime_checkable
 from sentence_transformers import CrossEncoder
 
 from paperhub.config import load_settings
+from paperhub.pipelines._device import resolve_device
 
 
 @dataclass(frozen=True)
@@ -34,7 +35,7 @@ class _CrossEncoderReranker:
 
     def _load(self) -> CrossEncoder:
         if self._model is None:
-            self._model = CrossEncoder(self._model_name)
+            self._model = CrossEncoder(self._model_name, device=resolve_device())
         return self._model
 
     def rerank(self, query: str, texts: list[str], top_k: int) -> list[RerankResult]:

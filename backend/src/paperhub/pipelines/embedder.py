@@ -11,6 +11,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from paperhub.config import load_settings
+from paperhub.pipelines._device import resolve_device
 
 
 class Embedder(Protocol):
@@ -25,7 +26,9 @@ class _SentenceTransformersEmbedder:
 
     def _load(self) -> SentenceTransformer:
         if self._model is None:
-            self._model = SentenceTransformer(self._model_name)
+            self._model = SentenceTransformer(
+                self._model_name, device=resolve_device(),
+            )
         return self._model
 
     def embed(self, texts: list[str]) -> np.ndarray:
