@@ -18,6 +18,7 @@ from httpx import ASGITransport, AsyncClient
 
 from paperhub.app import create_app
 from paperhub.db.migrate import apply_schema
+from paperhub.pipelines.title_extract import PaperTitleResult
 
 
 def _build_pdf_with_metadata(
@@ -32,6 +33,44 @@ def _build_pdf_with_metadata(
     doc.set_metadata({  # type: ignore[arg-type]
         "format": "PDF 1.7",
         "title": title,
+        "author": "",
+        "subject": "",
+        "keywords": "",
+        "creator": "",
+        "producer": "",
+        "creationDate": "",
+        "modDate": "",
+        "trapped": "",
+        "encryption": None,
+    })
+    out = tmp_path / filename
+    doc.save(str(out))
+    doc.close()
+    return out
+
+
+def _build_pdf_with_page1_title(
+    tmp_path: Path,
+    *,
+    page1_lines: list[tuple[str, float]],
+    metadata_title: str = "",
+    filename: str = "paper.pdf",
+) -> Path:
+    """Build a 1-page PDF whose page-1 layout carries title-sized spans.
+
+    Used to exercise the page-1 largest-font fallback path — the typical
+    InDesign / Word publisher PDF where ``doc.metadata['title']`` is empty
+    but page 1 carries the title at 24-26pt.
+    """
+    doc = pymupdf.open()  # type: ignore[no-untyped-call]
+    page = doc.new_page()
+    y = 72.0
+    for text, size in page1_lines:
+        page.insert_text((72, y), text, fontsize=size)
+        y += size + 8
+    doc.set_metadata({  # type: ignore[arg-type]
+        "format": "PDF 1.7",
+        "title": metadata_title,
         "author": "",
         "subject": "",
         "keywords": "",
@@ -325,6 +364,163 @@ async def test_upload_pdf_auto_detects_embedded_title(
         row = await cur.fetchone()
     assert row is not None
     assert row[0] == "Single-cell RNA sequencing of human breast cancer"
+
+
+@pytest.mark.asyncio
+async def test_upload_pdf_auto_detects_page1_title_when_metadata_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``doc.metadata['title']`` is empty (typical InDesign / Word
+    publisher PDF — e.g. the user's ``s41598-025-86323-1.pdf`` reproducer)
+    but page 1 carries the title at a clearly larger font than authors /
+    abstract / journal citation, the pipeline must recover the title via
+    the page-1 largest-font heuristic instead of falling back to the
+    DOI-named filename stem."""
+    session_id = await _setup_workspace(tmp_path, monkeypatch)
+    # NOTE: page1 title is split into two lines so a 26pt single-line render
+    # does not overflow the page width and get clipped by PyMuPDF's
+    # ``insert_text``. This mirrors the real-world layout where long
+    # journal titles wrap onto two lines — the heuristic concatenates them
+    # back together via the spans-at-max-size pass.
+    pdf_path = _build_pdf_with_page1_title(
+        tmp_path,
+        metadata_title="",  # the failure mode we're patching
+        page1_lines=[
+            ("YOLOSeg with applications to", 26),
+            ("wafer die particle defect segmentation", 26),
+            ("Yen-Ting Li, Yu-Cheng Chan, Po-Hsiang Lin", 10),
+            ("Abstract: short body here.", 9),
+        ],
+        filename="s41598-025-86323-1.pdf",
+    )
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        with pdf_path.open("rb") as f:
+            r = await ac.post(
+                "/papers/upload",
+                data={"session_id": str(session_id)},
+                files={
+                    "file": (
+                        "s41598-025-86323-1.pdf",
+                        f,
+                        "application/pdf",
+                    ),
+                },
+            )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["title"] == (
+        "YOLOSeg with applications to wafer die particle defect segmentation"
+    )
+    # The DOI-named filename stem must NOT have leaked through.
+    assert body["title"] != "s41598-025-86323-1"
+
+    # DB-level assertion — page-1-derived title must actually persist.
+    async with (
+        aiosqlite.connect(tmp_path / "paperhub.db") as conn,
+        conn.execute(
+            "SELECT title FROM paper_content WHERE id = ?",
+            (body["paper_content_id"],),
+        ) as cur,
+    ):
+        row = await cur.fetchone()
+    assert row is not None
+    assert row[0] == (
+        "YOLOSeg with applications to wafer die particle defect segmentation"
+    )
+
+
+class _UploadStubLlm:
+    """Minimal stub used to inject a deterministic LLM response into the
+    upload route via ``app.state.llm``. Mirrors the
+    ``paperhub.llm.adapter.LlmAdapter`` Protocol's ``structured`` method —
+    that's all the title-extract path uses."""
+
+    def __init__(self, title: str | None) -> None:
+        self._title = title
+        self.call_count = 0
+
+    async def structured(
+        self,
+        *,
+        slot: str,
+        variables: dict[str, Any],
+        response_model: Any,
+        model: str,
+        history: list[dict[str, str]] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        self.call_count += 1
+        return PaperTitleResult(title=self._title)
+
+    def stream(self, **kwargs: Any) -> Any:
+        raise NotImplementedError("upload path never calls stream")
+
+
+@pytest.mark.asyncio
+async def test_upload_pdf_uses_llm_when_metadata_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When BOTH ``doc.metadata['title']`` is empty AND the page-1 largest-
+    font heuristic returns empty (e.g. because the max-font spans concatenate
+    to a string longer than the 500-char sanitisation ceiling), the LLM
+    fallback must fire and its returned title must win over the filename
+    stem. Mirrors the InDesign + Springer reproducer where every metadata
+    field is stripped and the font heuristic's first attempt mis-fires."""
+    session_id = await _setup_workspace(tmp_path, monkeypatch)
+
+    # Build a page-1 layout where the largest-font spans concatenate to >500
+    # chars — this is what makes the existing font heuristic in extract.py
+    # return "" (via _sanitise_pdf_title rejecting overlong strings) and so
+    # forces the LLM path to engage.
+    long_runner_lines: list[tuple[str, float]] = [
+        (f"runner line number {i:02d} that contributes to the max-size pool", 24)
+        for i in range(12)
+    ]
+    pdf_path = _build_pdf_with_page1_title(
+        tmp_path,
+        metadata_title="",
+        page1_lines=long_runner_lines,
+        filename="s41598-025-86323-1.pdf",
+    )
+
+    app = create_app()
+    stub = _UploadStubLlm(title="Recovered Title")
+    app.state.llm = stub
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        with pdf_path.open("rb") as f:
+            r = await ac.post(
+                "/papers/upload",
+                data={"session_id": str(session_id)},
+                files={
+                    "file": (
+                        "s41598-025-86323-1.pdf",
+                        f,
+                        "application/pdf",
+                    ),
+                },
+            )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["title"] == "Recovered Title"
+    assert body["title"] != "s41598-025-86323-1"
+    assert stub.call_count == 1
+
+    # DB-level assertion — the LLM-derived title must actually persist.
+    async with (
+        aiosqlite.connect(tmp_path / "paperhub.db") as conn,
+        conn.execute(
+            "SELECT title FROM paper_content WHERE id = ?",
+            (body["paper_content_id"],),
+        ) as cur,
+    ):
+        row = await cur.fetchone()
+    assert row is not None
+    assert row[0] == "Recovered Title"
 
 
 @pytest.mark.asyncio

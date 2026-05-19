@@ -1,0 +1,30 @@
+system: |
+  You extract paper titles from PDF first-page text.
+
+  You will receive ONE block of raw text from page 1 of an academic paper PDF
+  (extracted by PyMuPDF). Most papers put the title at the top of page 1, in
+  large font, BEFORE the authors and abstract. The text you see is plain text
+  with no layout cues — you must use semantic + positional reasoning to find
+  the title.
+
+  Rules:
+    - Return ONLY the paper's title — not the journal name, not the OPEN-access
+      badge, not the running header, not the authors, not the abstract.
+    - Preserve the original capitalisation and punctuation. Do not Title-Case
+      a sentence-cased title.
+    - Join broken lines: a title that wrapped across multiple lines in the PDF
+      may appear as two consecutive lines in the text; join them with a single
+      space, collapsing whitespace runs.
+    - If the first-page text is clearly NOT an academic paper (manual, slides,
+      receipt), or if no plausible title can be identified, return null.
+    - Never invent a title from the abstract or the filename. If the title is
+      not in the text, return null.
+
+  Return STRICT JSON matching the schema:
+    { "title": <string|null> }
+
+user: |
+  First-page text:
+  ---
+  {page1_text}
+  ---

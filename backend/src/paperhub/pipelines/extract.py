@@ -37,6 +37,9 @@ _PDF_DATE_YEAR = re.compile(r"D:(\d{4})")
 # academic author lists routinely embed commas inside a single name
 # ("Smith, A; Lee, B"), and splitting on ``,`` would shred those.
 _AUTHOR_SPLIT = re.compile(r"\s*(?:;|\band\b)\s*", re.IGNORECASE)
+# Collapses runs of whitespace into a single space when stitching page-1
+# spans back together for the largest-font title heuristic.
+_WHITESPACE_RUN = re.compile(r"\s+")
 
 
 @dataclass(frozen=True)
@@ -114,6 +117,24 @@ def extract_pdf(pdf_path: Path) -> str:
     return "\n\f\n".join(pieces).strip()
 
 
+def extract_pdf_page1_text(pdf_path: Path) -> str:
+    """Return plain text from page 1 of a PDF, or ``""`` if the doc is empty.
+
+    Used by the LLM-based title-extraction fallback in
+    ``paperhub.pipelines.title_extract`` — the model needs just page 1
+    (where titles, authors, and the abstract live), not the whole paper.
+    Same ``with pymupdf.open(...) as doc:`` resource-management pattern
+    as ``extract_pdf`` to keep PDF handles deterministic on Windows.
+    """
+    if not pdf_path.exists():
+        raise FileNotFoundError(pdf_path)
+    with pymupdf.open(pdf_path) as doc:  # type: ignore[no-untyped-call]
+        if len(doc) == 0:
+            return ""
+        text: str = doc[0].get_text("text")
+        return text
+
+
 def _sanitise_pdf_title(raw: object) -> str:
     """Return a trimmed title or an empty string if the value is junk.
 
@@ -167,6 +188,61 @@ def _sanitise_pdf_year(creation: object, mod: object) -> int | None:
     return None
 
 
+def _extract_pdf_title_from_page1_doc(doc: pymupdf.Document) -> str:
+    """Heuristic: title is the text at the largest font size on page 1.
+
+    Works for the typical academic-paper layout (title prominent at the top
+    of page 1, larger than abstract / authors / affiliations / journal
+    citation). Returns ``""`` when page 1 is empty, image-only, or the
+    largest-font text fails to sanitise into a plausible title.
+
+    This is the second-tier fallback used when ``doc.metadata['title']`` is
+    empty or junk — Adobe InDesign / Word PDFs from Nature, Springer, etc.
+    routinely ship with metadata fields stripped even when the rendered
+    page-1 title is right there at 24-26pt.
+    """
+    if len(doc) == 0:
+        return ""
+    page = doc[0]
+    blocks = page.get_text("dict").get("blocks", [])
+    # First pass: find the maximum text-span font size on page 1.
+    max_size = 0.0
+    for b in blocks:
+        if b.get("type", 0) != 0:  # 0 = text; skip image blocks.
+            continue
+        for line in b.get("lines", []):
+            for span in line.get("spans", []):
+                sz = round(span.get("size", 0.0), 1)
+                if sz > max_size:
+                    max_size = sz
+    if max_size <= 0.0:
+        return ""
+    # Second pass: collect every span at the max size in document order
+    # (blocks, then lines within each block, then spans within each line).
+    pieces: list[str] = []
+    for b in blocks:
+        if b.get("type", 0) != 0:
+            continue
+        for line in b.get("lines", []):
+            for span in line.get("spans", []):
+                if round(span.get("size", 0.0), 1) == max_size:
+                    txt = span.get("text", "")
+                    if txt:
+                        pieces.append(txt)
+    joined = " ".join(pieces)
+    cleaned = _WHITESPACE_RUN.sub(" ", joined).strip()
+    return _sanitise_pdf_title(cleaned)
+
+
+def _extract_pdf_title_from_page1(pdf_path: Path) -> str:
+    """Thin wrapper around ``_extract_pdf_title_from_page1_doc`` that opens
+    the PDF and delegates — exists for unit-testability without forcing
+    tests to manage the ``pymupdf.Document`` lifecycle.
+    """
+    with pymupdf.open(pdf_path) as doc:  # type: ignore[no-untyped-call]
+        return _extract_pdf_title_from_page1_doc(doc)
+
+
 def _extract_pdf_metadata(pdf_path: Path) -> dict[str, object]:
     """Best-effort extraction of title/authors/year from PDF embedded metadata.
 
@@ -176,13 +252,25 @@ def _extract_pdf_metadata(pdf_path: Path) -> dict[str, object]:
     values may be empty/None when metadata is missing or fails sanity checks.
     Callers should treat an empty ``title`` as a signal to fall back to a
     non-metadata default (e.g. filename stem).
+
+    The ``title`` field uses a two-tier fallback: first ``doc.metadata['title']``
+    (after sanitisation), then — when that's empty — the page-1 largest-font
+    heuristic. Publisher PDFs from InDesign / Word commonly ship with the
+    metadata title stripped even when page 1 carries the title at 24-26pt.
     """
     with pymupdf.open(pdf_path) as doc:  # type: ignore[no-untyped-call]
         raw = doc.metadata or {}
-    return {
-        "title": _sanitise_pdf_title(raw.get("title")),
-        "authors": _sanitise_pdf_authors(raw.get("author")),
-        "year": _sanitise_pdf_year(
+        meta_title = _sanitise_pdf_title(raw.get("title"))
+        # Fall back to the page-1 largest-font heuristic ONLY when the
+        # embedded metadata title is unusable. Pass the already-open doc
+        # through to avoid a second pymupdf.open() round-trip.
+        title = meta_title or _extract_pdf_title_from_page1_doc(doc)
+        authors = _sanitise_pdf_authors(raw.get("author"))
+        year = _sanitise_pdf_year(
             raw.get("creationDate"), raw.get("modDate"),
-        ),
+        )
+    return {
+        "title": title,
+        "authors": authors,
+        "year": year,
     }

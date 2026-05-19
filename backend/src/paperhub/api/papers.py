@@ -17,7 +17,7 @@ from paperhub.agents.research_tools import (
     _to_fts5_query,
     add_paper_to_session_dispatch,
 )
-from paperhub.api.deps import get_chroma
+from paperhub.api.deps import get_chroma, get_llm
 from paperhub.config import load_settings
 from paperhub.db.connection import open_db
 from paperhub.pipelines.paper_pipeline import (
@@ -249,6 +249,8 @@ async def upload_paper(
                 conn,
                 papers_cache_dir=settings.papers_cache_dir,
                 chroma=get_chroma(request, settings),
+                llm=get_llm(request),
+                title_extract_model=settings.router_model,
             )
             result = await pipeline.ingest(
                 IngestRequest(

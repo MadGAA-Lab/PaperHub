@@ -23,6 +23,7 @@ from typing import Literal
 import aiosqlite
 import httpx
 
+from paperhub.llm.adapter import LlmAdapter
 from paperhub.pipelines.arxiv_client import (
     _TRANSIENT_DOWNLOAD_EXCEPTIONS,
     TarballCorrupt,
@@ -36,8 +37,10 @@ from paperhub.pipelines.extract import (
     _extract_pdf_metadata,
     extract_latex,
     extract_pdf,
+    extract_pdf_page1_text,
 )
 from paperhub.pipelines.renderer import render_html
+from paperhub.pipelines.title_extract import llm_extract_title
 from paperhub.rag.chroma import ChromaStore
 
 _PDF_DOWNLOAD_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
@@ -108,11 +111,19 @@ class PaperPipeline:
         papers_cache_dir: Path,
         chroma: ChromaStore,
         embedder: Embedder | None = None,
+        llm: LlmAdapter | None = None,
+        title_extract_model: str | None = None,
     ) -> None:
         self._conn = conn
         self._cache_root = papers_cache_dir
         self._chroma = chroma
         self._embedder = embedder or get_embedder()
+        # Optional LLM fallback for PDF title extraction. Both must be set
+        # to enable the path; either ``None`` (legacy callers, tests) leaves
+        # the existing metadata + page-1-font heuristic + filename-stem
+        # ladder untouched.
+        self._llm = llm
+        self._title_extract_model = title_extract_model
 
     async def ingest(self, req: IngestRequest) -> IngestResult:
         """Ingest a paper, returning immediately on cache hit."""
@@ -372,7 +383,27 @@ class PaperPipeline:
             metadata: dict[str, object] = asdict(req.metadata_override)
         elif req.upload_kind == "pdf":
             auto = _extract_pdf_metadata(req.upload_path)
-            title = str(auto["title"]) or req.upload_path.stem
+            title = str(auto["title"])
+            # Third-tier fallback: ask a small-tier LLM to extract the title
+            # from page-1 text. Only fires when (a) embedded metadata title
+            # was empty/junk, (b) the page-1 largest-font heuristic also
+            # came back empty, and (c) the route wired an ``llm`` adapter
+            # plus a ``title_extract_model``. Best-effort: any LLM failure
+            # returns ``""`` and we fall through to the filename stem.
+            if (
+                not title
+                and self._llm is not None
+                and self._title_extract_model is not None
+            ):
+                page1_text = extract_pdf_page1_text(req.upload_path)
+                if len(page1_text) >= 100:
+                    title = await llm_extract_title(
+                        self._llm,
+                        self._title_extract_model,
+                        page1_text,
+                    )
+            if not title:
+                title = req.upload_path.stem
             metadata = {
                 "title": title,
                 "authors": auto["authors"],
