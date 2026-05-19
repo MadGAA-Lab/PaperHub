@@ -124,3 +124,67 @@ def test_chunker_closes_at_paragraph_boundary_not_mid_sentence():
             assert stripped.endswith(".") or stripped.endswith("\n"), (
                 f"Chunk closes mid-sentence: ...{stripped[-30:]!r}"
             )
+
+
+def test_chunker_closes_at_paragraph_boundary_not_sentence_when_both_present():
+    """Verify the new behavior: when a chunk could close at EITHER a
+    sentence end mid-paragraph OR at a paragraph break, it must pick the
+    paragraph break. The old chunker preferred sentence-end (the latest
+    ``(?<=[.!?]) `` match), so the chunk would include the start of the
+    next paragraph. The new chunker must close at ``\\n\\n``.
+
+    Parameters are chosen so that the two paragraphs combined exceed ``hard``
+    (forcing the chunker to split), but each paragraph alone fits within
+    ``hard`` (so the paragraph break, not the hard cap, dictates the cut).
+    """
+    # Each paragraph ~400 tokens; combined ~800 tokens. hard=600 forces a split.
+    para1 = ("This is paragraph one with several sentences. " * 50).rstrip()
+    para2 = ("This is paragraph two with several sentences. " * 50).rstrip()
+    text = f"\\section{{Body}}\n{para1}\n\n{para2}\n"
+    chunks = chunk_text(text, target=400, hard=600)
+    # The first chunk's text must be exactly para1 (no leakage from para2).
+    assert chunks[0].text == para1, (
+        f"First chunk must equal paragraph 1 verbatim — paragraph boundary "
+        f"alignment regressed. Got: ...{chunks[0].text[-80:]!r}"
+    )
+
+
+def test_chunker_paragraph_aligned_even_when_under_target():
+    """Invariant for Option B (unconditional paragraph-close): when a piece
+    after halving contains a paragraph break but is below target, the chunker
+    still closes at the paragraph boundary rather than emitting a mid-paragraph
+    cut. Under-target paragraph-aligned chunks are acceptable — a clean break
+    beats a mid-paragraph cut, and the next chunk picks up the slack.
+
+    Paragraphs are each ~150 tokens (below target=400). Combined they exceed
+    hard=200, forcing a split. The split must land at the paragraph break, NOT
+    mid-sentence, even though neither paragraph reaches target.
+    """
+    # Each paragraph ~150 tokens; combined ~300 tokens. hard=200 forces a split.
+    para_small = ("short sentence here. " * 30).rstrip()
+    text = f"{para_small}\n\n{para_small}\n"
+    chunks = chunk_text(text, target=400, hard=200)
+    # Each chunk must correspond to at most one paragraph (no \n\n inside).
+    for c in chunks:
+        assert "\n\n" not in c.text, (
+            f"Chunk spans a paragraph break — paragraph alignment failed: {c.text[:80]!r}"
+        )
+
+
+def test_chunker_strips_comment_after_latex_line_break():
+    """LaTeX tabular / align row-ends use \\\\ followed immediately by %
+    for end-of-row comments. The two-backslash case must be stripped (the
+    % is a real comment-start, not preceded by an escaped percent)."""
+    text = (
+        "\\section{Table}\n"
+        "a & b \\\\% trailing row comment\n"
+        "c & d \\\\\n"
+        "\\section{After}\n"
+        "real content here.\n"
+    )
+    chunks = chunk_text(text)
+    joined = "\n".join(c.text for c in chunks)
+    assert "trailing row comment" not in joined
+    assert "real content here" in joined
+    # Both \\ row-end markers preserved.
+    assert "\\\\" in joined

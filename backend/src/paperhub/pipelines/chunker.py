@@ -2,9 +2,13 @@
 
 Target ~800 tokens per chunk, hard cap 1000 (configurable). Splits at
 \\section{...} boundaries when possible. LaTeX %-comments are stripped
-before chunking. Within a section, the shrink loop uses safe halving
-(never overshoots below ``cursor + 1``) and prefers paragraph breaks
-over sentence-end when closing a chunk at or above target.
+before chunking via a single-pass parity check that correctly handles
+``\\\\%`` (LaTeX line-break followed by a comment). Within a section,
+the shrink loop uses safe halving (never overshoots below ``cursor + 1``)
+and prefers paragraph breaks over sentence-end. Paragraph-boundary close
+fires unconditionally (a clean boundary beats a mid-paragraph cut);
+sentence-boundary close is gated on ``tok_len >= target`` to avoid
+over-splitting small pieces.
 """
 from __future__ import annotations
 
@@ -14,8 +18,10 @@ from dataclasses import dataclass
 import tiktoken
 
 _SECTION_RE = re.compile(r"\\section\{([^}]+)\}")
-# Single-% line comments to end-of-line, EXCEPT escaped \% (literal percent).
-_COMMENT_RE = re.compile(r"(?<!\\)%[^\n]*")
+# Matches a run of backslashes (group 1) followed by % and the rest of line
+# (group 2). Used by _strip_latex_comments to decide whether % is a comment
+# (even-count backslash prefix) or an escaped literal percent (odd-count).
+_COMMENT_FULL_RE = re.compile(r"(\\*)(%[^\n]*)")
 # Paragraph break is the strongest natural boundary; sentence-end is fallback.
 _PARA_BOUNDARY_RE = re.compile(r"\n\s*\n")
 _SENT_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+")
@@ -30,8 +36,27 @@ class Chunk:
 
 
 def _strip_latex_comments(text: str) -> str:
-    """Remove % line-comments while preserving \\% (literal percent)."""
-    return _COMMENT_RE.sub("", text)
+    """Remove LaTeX % line-comments while preserving \\% (literal percent).
+
+    A ``%`` preceded by an **odd** number of backslashes is an escaped literal
+    percent (``\\%``) — preserved unchanged.  A ``%`` preceded by an **even**
+    number of backslashes (including zero) starts a comment — stripped to
+    end-of-line.
+
+    This single-pass regex approach handles the ``\\\\%`` case (LaTeX
+    line-break ``\\\\`` followed by a comment ``%``) which a one-pass
+    negative-lookbehind cannot — ``re`` has no variable-length lookbehind.
+    """
+
+    def _replace(m: re.Match[str]) -> str:
+        backslashes = m.group(1)
+        if len(backslashes) % 2 == 1:
+            # Odd prefix: last backslash escapes the %; keep the whole match.
+            return m.group(0)
+        # Even prefix (includes zero): % is a comment start; strip it.
+        return backslashes
+
+    return _COMMENT_FULL_RE.sub(_replace, text)
 
 
 def chunk_text(text: str, *, target: int = 800, hard: int = 1000) -> list[Chunk]:
@@ -73,10 +98,13 @@ def chunk_text(text: str, *, target: int = 800, hard: int = 1000) -> list[Chunk]
 
             # Early-close at a natural boundary when we are not at the last
             # chunk in the span and the piece is not a sliver (floor 100 chars).
-            # Paragraph-boundary close fires whenever a \n\n exists (regardless
-            # of tok_len vs target) so that chunks always align to paragraph
-            # breaks when possible. Sentence-boundary close is gated on
-            # tok_len >= target to avoid over-splitting short pieces.
+            # Paragraph-boundary close fires unconditionally (no tok_len gate)
+            # so chunks always align to paragraph breaks. This intentionally
+            # produces under-target chunks when paragraphs are individually
+            # smaller than target: a clean paragraph boundary is preferable to a
+            # mid-paragraph cut, and the next chunk simply picks up the slack.
+            # Sentence-boundary close is gated on tok_len >= target to avoid
+            # over-splitting already-small pieces.
             if tentative_end < span_end and tentative_end - cursor > 100:
                 para_matches = list(_PARA_BOUNDARY_RE.finditer(piece))
                 if para_matches and para_matches[-1].end() > 100:
