@@ -82,6 +82,15 @@ class AgentState(TypedDict, total=False):
     ps_recent_results: dict[str, dict[str, Any]]
     ps_final_text: str
     ps_last_step_index: int
+    # Hallucination guard (v2.6 follow-up): the subgraph runs ONE
+    # corrective re-plan when the agent ends with prose-only output but
+    # either (A) recent_results has hits the prose mentioned without a
+    # json:candidates block, or (B) no tools surfaced anything but the
+    # external-discovery budget hasn't been spent. Both cases ship the
+    # agent back to ps_plan with a corrective user message.
+    ps_corrective_retry_used: bool
+    ps_corrective_retry_pending: bool
+    ps_any_tools_called: bool
     # paper_qa branch:
     #   - pq_papers: enabled (paper_content_id, title) pairs resolved by
     #     pq_resolve and consumed by the count branch.

@@ -107,10 +107,17 @@ class SearchResultsYield:
 # (search, fetch) — discovery is rate-limited, navigation isn't.
 # `papers.search_library` and `papers.find_related_papers` remain uncapped:
 # library lookup is local + cheap, citation-graph navigation is precise.
-MAX_EXTERNAL_DISCOVERY_CALLS_PER_TURN = 3
-# Hard ceiling: search_library + 3 × external discovery + a couple of
+#
+# v2.6 follow-up: raised 3 → 10 to support the v2 prompt's enforced
+# multi-paper fan-out. A user query naming multiple works (e.g.
+# "Mamba, DDPM, and Vaswani 2017") legitimately needs N × (2-3
+# web.search + 1 papers.search_semantic_scholar) calls — one full
+# discover-then-refine cycle per distinct paper. The single-paper
+# baseline (~3-4 calls) lives well inside this budget.
+MAX_EXTERNAL_DISCOVERY_CALLS_PER_TURN = 10
+# Hard ceiling: search_library + 10 × external discovery + a couple of
 # find_related_papers + slack for clarification turns.
-MAX_TOOL_ITERATIONS = 8
+MAX_TOOL_ITERATIONS = 15
 
 # Tool names (un-namespaced) that count toward the external-discovery cap.
 # Inspected against the suffix after the first ``.`` in the namespaced
@@ -170,6 +177,80 @@ def _extract_candidates(
             ),
         )
     return cleaned_text, candidates
+
+
+def _corrective_message_no_results() -> str:
+    """Corrective user message for the "no results, budget left" case.
+
+    Emitted when the agent ran tools but every call returned an empty
+    set AND has remaining external-discovery budget. The agent gave up
+    too early — push it to try different query angles or explicitly
+    admit it can't find the paper.
+    """
+    return (
+        "Your previous response stopped without surfacing any verifiable "
+        "paper references. The tools you called returned empty results, "
+        "but you still have external-discovery budget left this turn.\n\n"
+        "Try again with DIFFERENT query angles. Common recovery moves:\n"
+        "  - Did you call ``web.search`` with multiple distinct phrasings "
+        "(user's literal words, canonical-title guess, author + year)?\n"
+        "  - If web.search returned plausible titles but "
+        "papers.search_semantic_scholar found nothing, try the SS call "
+        "again with EXACT title quoting or the discovered author surname.\n"
+        "  - If the user named multiple papers in one turn, ensure you "
+        "ran a separate discover-then-refine cycle for each.\n\n"
+        "If after this second pass you still find nothing, your next "
+        "response MUST explicitly tell the user you could not locate the "
+        "paper, name what you searched for, and ask for clarification "
+        "(an arxiv ID, author + year, or alternative title). Do NOT "
+        "fabricate paper references — emitting prose that mentions "
+        "paper titles without backing ``json:candidates`` entries will "
+        "be flagged as hallucination."
+    )
+
+
+def _corrective_message(recent_results: dict[str, dict[str, Any]]) -> str:
+    """Build the corrective user message for the hallucination-guard retry.
+
+    Emitted when the agent's final assistant message has no
+    ``json:candidates`` block but earlier tool calls returned real papers
+    in ``recent_results``. Lists the available paper_ids + titles so the
+    LLM has everything it needs to construct a valid block on the next
+    plan step — no need to re-call any search tool.
+    """
+    if not recent_results:
+        return (
+            "Your previous response was missing the required `json:candidates` "
+            "fenced block. The next response MUST include one."
+        )
+    lines = ["Available paper_ids from this turn's tool calls:"]
+    for pid, meta in recent_results.items():
+        title = str(meta.get("title", "") or "").strip()
+        year = meta.get("year")
+        year_str = f" ({year})" if year else ""
+        if title:
+            lines.append(f"  - {pid}: {title}{year_str}")
+        else:
+            lines.append(f"  - {pid}")
+    available = "\n".join(lines)
+    return (
+        "Your previous response described papers in prose but did NOT emit "
+        "the required ``json:candidates`` fenced block. Without that block "
+        "the user sees zero Add buttons and no paper cards — visually "
+        "indistinguishable from hallucination.\n\n"
+        "Re-send your response now WITH the block. Use only paper_ids that "
+        "appear in the list below; do not invent or rephrase ids.\n\n"
+        f"{available}\n\n"
+        "Format reminder:\n"
+        "```json:candidates\n"
+        "[\n"
+        "  {\"paper_id\": \"<one of the ids above>\", \"reason\": \"<one-line reason>\", \"finalize\": false},\n"
+        "  ...\n"
+        "]\n"
+        "```\n"
+        "Mark at most 2 picks with ``finalize: true``; the rest are "
+        "suggested-only. Emit the block even if you have only 1 pick."
+    )
 
 
 def _index_library_hit(hit: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -476,6 +557,13 @@ async def paper_search(
     # Accumulator: paper_id → metadata, keyed by the prefixed id the agent will
     # quote back in its ``json:candidates`` block.
     recent_results: dict[str, dict[str, Any]] = {}
+    # Hallucination guard (v2.6 follow-up): if the agent ends with prose but
+    # no ``json:candidates`` block AND tools returned results, run ONE
+    # corrective re-plan that explicitly tells the agent to emit the block
+    # using the paper_ids it actually surfaced. Without this, the user
+    # sees prose claiming papers exist but gets zero Add cards — visually
+    # indistinguishable from hallucination.
+    corrective_retry_used = False
 
     for iteration in range(MAX_TOOL_ITERATIONS):
         msg = await _paper_search_plan_step(
@@ -491,13 +579,55 @@ async def paper_search(
 
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:
-            # Final response — clarification or shortlist.
+            # Final response — clarification, shortlist, or hallucination.
             final_text = str(msg.get("content") or "(no response)")
             cleaned_text, candidates = _extract_candidates(final_text, recent_results)
             if candidates:
                 yield SearchResultsYield(candidates=candidates)
-            yield FinalOnlyMessage(cleaned_text)
-            return
+                yield FinalOnlyMessage(cleaned_text)
+                return
+            # No candidates parsed. Two legitimate cases vs one bug:
+            #   (a) recent_results == {} → no tools ran or all returned []
+            #       → agent legitimately had nothing to shortlist; could be
+            #         a clarifying question or an "I couldn't find anything"
+            #         response. Yield as-is.
+            #   (b) recent_results != {} AND retry already used → agent
+            #         failed even after the corrective prompt. Yield
+            #         the prose; the user sees no Add cards but the agent
+            #         got its chance.
+            #   (c) recent_results != {} AND retry NOT yet used → the
+            #         hallucination case: agent talked about papers it
+            #         got from tools but forgot the block. Inject a
+            #         corrective message and re-plan.
+            # Corrective-retry decision (same shape as the subgraph):
+            #   Case A: recent_results non-empty but no block → retry
+            #     (the agent has paper_ids but forgot the block).
+            #   Case B: empty recent_results AND external discovery WAS
+            #     tried AND budget remains → retry for different angles.
+            #   Otherwise → finalize as-is (library-only-empty,
+            #     clarifying-question, or budget exhausted).
+            tried_external = external_discovery_calls > 0
+            budget_left = (
+                external_discovery_calls < MAX_EXTERNAL_DISCOVERY_CALLS_PER_TURN
+            )
+            should_retry_for_block = bool(recent_results) and not corrective_retry_used
+            should_retry_for_search = (
+                not recent_results
+                and tried_external
+                and budget_left
+                and not corrective_retry_used
+            )
+            if should_retry_for_block:
+                corrective = _corrective_message(recent_results)
+            elif should_retry_for_search:
+                corrective = _corrective_message_no_results()
+            else:
+                yield FinalOnlyMessage(cleaned_text)
+                return
+            corrective_retry_used = True
+            messages.append({"role": "assistant", "content": final_text})
+            messages.append({"role": "user", "content": corrective})
+            continue  # loop iterates and re-calls the LLM
 
         # Append the assistant turn that requested the tools, then dispatch each.
         messages.append(

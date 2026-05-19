@@ -343,26 +343,37 @@ async def test_external_search_refinement_within_cap(
     assert yields[0].candidates[0].paper_id == "arxiv:2404.00002"
 
 
-# ---------- Case 5: external search cap (N=3) enforced — 4th call returns cap error ----------
-async def test_external_search_cap_enforced_at_three(
+# ---------- Case 5: external-discovery cap enforced — past-cap call returns cap error ----------
+async def test_external_search_cap_enforced_at_limit(
     migrated_db: aiosqlite.Connection,
     fake_tracer: Tracer,
     fake_pipeline: MagicMock,
 ) -> None:
-    """4th search_semantic_scholar must NOT actually invoke the dispatcher;
-    tool result returns {error: external_search_call_cap_reached}."""
+    """The (N+1)th external-discovery call must NOT invoke the dispatcher; the
+    tool result returns {error: external_discovery_call_cap_reached}.
+
+    The cap value lives in `paperhub.agents.research.
+    MAX_EXTERNAL_DISCOVERY_CALLS_PER_TURN` — read it from there rather than
+    hardcoding so the test moves with the source of truth when the cap is
+    retuned (e.g. v2.6 raised it 3 → 10 to support multi-paper fan-out)."""
+    from paperhub.agents.research import MAX_EXTERNAL_DISCOVERY_CALLS_PER_TURN
+
+    cap = MAX_EXTERNAL_DISCOVERY_CALLS_PER_TURN
     state = {
         "run_id": 5, "branch": "", "session_id": 1,
         "user_message": "keep refining",
     }
-    call4 = _tool_call("c4", "papers.search_semantic_scholar", {"query": "v4"})
-    seq = [
-        _msg(tool_calls=[_tool_call("c1", "papers.search_semantic_scholar", {"query": "v1"})]),
-        _msg(tool_calls=[_tool_call("c2", "papers.search_semantic_scholar", {"query": "v2"})]),
-        _msg(tool_calls=[_tool_call("c3", "papers.search_semantic_scholar", {"query": "v3"})]),
-        _msg(tool_calls=[call4]),  # 4th — must be capped
-        _msg(content="I've reached the search cap."),
-    ]
+    # Build cap + 1 successive papers.search_semantic_scholar tool-call turns;
+    # the last one must be rejected by the dispatch-layer cap before reaching
+    # the dispatcher.
+    seq: list[dict[str, Any]] = []
+    for i in range(cap + 1):
+        seq.append(
+            _msg(tool_calls=[
+                _tool_call(f"c{i + 1}", "papers.search_semantic_scholar", {"query": f"v{i + 1}"})
+            ]),
+        )
+    seq.append(_msg(content="I've reached the search cap."))
     ss_calls = 0
 
     async def fake_ss(**_: Any) -> list[SemanticScholarToolHit]:
@@ -380,8 +391,125 @@ async def test_external_search_cap_enforced_at_three(
             model="m", conn=migrated_db, pipeline=fake_pipeline,
             mcp_registry=reg,
         ))
-    # Dispatcher invoked only 3 times — 4th was capped before dispatch.
-    assert ss_calls == 3
+    # Dispatcher invoked exactly `cap` times — the (cap+1)th was capped before dispatch.
+    assert ss_calls == cap
+
+
+# ---------- Case 6: corrective retry — block missing after papers were found ----------
+async def test_corrective_retry_when_block_missing_with_recent_results(
+    migrated_db: aiosqlite.Connection,
+    fake_tracer: Tracer,
+    fake_pipeline: MagicMock,
+) -> None:
+    """Hallucination guard: agent returns prose-only after a successful
+    ``papers.search_semantic_scholar`` call, then is re-prompted and emits
+    the missing ``json:candidates`` block on the second pass.
+
+    Verifies the v2.6 corrective-retry path keeps the search UX alive
+    when the model forgets the structured block.
+    """
+    state = {
+        "run_id": 6, "branch": "", "session_id": 1,
+        "user_message": "find the mamba paper",
+    }
+    # SS returns one hit so recent_results is non-empty.
+    ss_hit = SemanticScholarToolHit(
+        paper_id="arxiv:2312.00752",
+        title="Mamba: Linear-Time Sequence Modeling with Selective State Spaces",
+        abstract=None,
+        year=2023,
+        authors=["Albert Gu", "Tri Dao"],
+        arxiv_id="2312.00752",
+        has_open_pdf=True,
+    )
+
+    # 1st plan iteration: tool call to papers.search_semantic_scholar.
+    # 2nd plan iteration: prose only — no json:candidates block. This is
+    # the hallucination case. The subgraph injects a corrective message.
+    # 3rd plan iteration: prose + the missing json:candidates block.
+    prose_no_block = "I found the Mamba paper by Gu and Dao."
+    prose_with_block = (
+        prose_no_block + "\n\n"
+        "```json:candidates\n"
+        '[{"paper_id": "arxiv:2312.00752", "reason": "The Mamba paper.", "finalize": true}]\n'
+        "```"
+    )
+    seq = [
+        _msg(tool_calls=[_tool_call("c1", "papers.search_semantic_scholar", {"query": "mamba"})]),
+        _msg(content=prose_no_block),
+        _msg(content=prose_with_block),
+    ]
+
+    async def fake_ss(**_: Any) -> list[SemanticScholarToolHit]:
+        return [ss_hit]
+
+    comp = _async_completion_mock(seq)
+    reg = _FakeRegistry(conn=migrated_db, session_id=1)
+    with patch("paperhub.agents.research.litellm.acompletion", new=comp), \
+         patch("paperhub.agents.research_tools.search_semantic_scholar_dispatch",
+               side_effect=fake_ss):
+        final, items = await _collect(paper_search(
+            state, adapter=None, tracer=fake_tracer,
+            model="m", conn=migrated_db, pipeline=fake_pipeline,
+            mcp_registry=reg,
+        ))
+
+    # Three LLM calls — original plan, post-tool prose, corrected response.
+    assert comp.await_count == 3
+    # The SearchResultsYield was emitted on the corrective response.
+    yields = [i for i in items if isinstance(i, SearchResultsYield)]
+    assert len(yields) == 1
+    assert yields[0].candidates[0].paper_id == "arxiv:2312.00752"
+    # The final user-visible prose is the corrected version (sans block).
+    assert "Mamba paper" in final
+
+
+# ---------- Case 7: corrective retry — empty results with budget remaining ----------
+async def test_corrective_retry_when_empty_results_with_budget(
+    migrated_db: aiosqlite.Connection,
+    fake_tracer: Tracer,
+    fake_pipeline: MagicMock,
+) -> None:
+    """Empty-results case: the agent ran one external-discovery call,
+    got nothing, and gave up. The corrective retry asks for a different
+    angle; on the 2nd pass the agent (in this test) explicitly says it
+    can't find the paper — which is the policy-correct stop."""
+    state = {
+        "run_id": 7, "branch": "", "session_id": 1,
+        "user_message": "the obscure paper",
+    }
+    seq = [
+        _msg(tool_calls=[_tool_call("c1", "papers.search_semantic_scholar",
+                                    {"query": "obscure"})]),
+        _msg(content="Nothing found."),  # premature give-up
+        _msg(content=(
+            "I couldn't find a clear match. I searched Semantic Scholar "
+            "for 'obscure' but got no hits. Could you share an arxiv ID "
+            "or author + year?"
+        )),
+    ]
+
+    async def fake_ss(**_: Any) -> list[SemanticScholarToolHit]:
+        return []
+
+    comp = _async_completion_mock(seq)
+    reg = _FakeRegistry(conn=migrated_db, session_id=1)
+    with patch("paperhub.agents.research.litellm.acompletion", new=comp), \
+         patch("paperhub.agents.research_tools.search_semantic_scholar_dispatch",
+               side_effect=fake_ss):
+        final, items = await _collect(paper_search(
+            state, adapter=None, tracer=fake_tracer,
+            model="m", conn=migrated_db, pipeline=fake_pipeline,
+            mcp_registry=reg,
+        ))
+
+    # 3 LLM calls — original plan, premature give-up, corrected honest stop.
+    assert comp.await_count == 3
+    # No SearchResultsYield — the agent correctly said "couldn't find".
+    yields = [i for i in items if isinstance(i, SearchResultsYield)]
+    assert len(yields) == 0
+    # User-visible: an honest stop with a clarifying question.
+    assert "couldn't find" in final.lower() or "could you" in final.lower()
 
 
 # ---------------------------------------------------------------------------

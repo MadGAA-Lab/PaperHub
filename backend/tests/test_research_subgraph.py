@@ -277,12 +277,18 @@ async def test_paper_search_subgraph_external_search_cap_inside_dispatch_node(
     fake_tracer: Tracer,
     fake_pipeline: MagicMock,
 ) -> None:
-    """The ps_dispatch_tools node enforces the external-search cap (3)
-    by short-circuiting the 4th call without touching the dispatcher."""
+    """The ps_dispatch_tools node enforces the external-discovery cap
+    by short-circuiting the (cap+1)th call without touching the dispatcher.
+
+    Reads the cap from `paperhub.agents.research` so the test tracks v2.6's
+    bumped cap (3 → 10) without manual updates."""
+    from paperhub.agents.research import MAX_EXTERNAL_DISCOVERY_CALLS_PER_TURN
+
+    cap = MAX_EXTERNAL_DISCOVERY_CALLS_PER_TURN
     seq = [
         _msg(tool_calls=[_tool_call(f"c{i}", "papers.search_semantic_scholar",
                                     {"query": f"v{i}"})])
-        for i in range(4)
+        for i in range(cap + 1)
     ] + [_msg(content="capped")]
     ss_dispatcher = AsyncMock(return_value=[])
     comp = AsyncMock(side_effect=seq)
@@ -297,8 +303,8 @@ async def test_paper_search_subgraph_external_search_cap_inside_dispatch_node(
             "session_id": 1, "user_message": "spin SS",
         }
         await _collect(graph, state)
-    # Dispatcher only called 3 times — 4th was capped inside the node.
-    assert ss_dispatcher.await_count == 3
+    # Dispatcher only called `cap` times — the (cap+1)th was capped inside the node.
+    assert ss_dispatcher.await_count == cap
 
 
 # ---------------------------------------------------------------------------

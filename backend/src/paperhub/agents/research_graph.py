@@ -54,9 +54,12 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
 from paperhub.agents.research import (
+    MAX_EXTERNAL_DISCOVERY_CALLS_PER_TURN,
     MAX_TOOL_ITERATIONS,
     FinalOnlyMessage,
     _build_paper_search_messages,
+    _corrective_message,
+    _corrective_message_no_results,
     _dispatch_paper_search_tool_call,
     _extract_candidates,
     _paper_qa_map_one,
@@ -213,12 +216,60 @@ def build_paper_search_subgraph(deps: ResearchDeps) -> Any:
             next_state["ps_messages"] = messages
             next_state["ps_pending_tool_calls"] = list(tool_calls)
             next_state["ps_final_text"] = ""
-        else:
+            return next_state
+
+        # No tool calls → final response (clarification, shortlist, or
+        # hallucination). Apply the corrective-retry guard before
+        # finalizing: if the agent forgot the json:candidates block but
+        # recent_results has hits, OR if no results were surfaced but
+        # discovery budget remains, run ONE corrective re-plan.
+        final_text = str(msg.get("content") or "(no response)")
+        _, candidates = _extract_candidates(final_text, recent_results)
+        retry_used = bool(state.get("ps_corrective_retry_used", False))
+        tried_external = external_calls > 0
+        budget_left = external_calls < MAX_EXTERNAL_DISCOVERY_CALLS_PER_TURN
+
+        # Corrective-retry decision:
+        #   - Have parsed candidates → finalize.
+        #   - Retry already burned → finalize (agent got its one shot).
+        #   - Case A: recent_results non-empty but no block → retry
+        #     (agent has the paper_ids but forgot the block).
+        #   - Case B: empty recent_results AND external discovery WAS
+        #     tried AND budget remains → retry for different angles.
+        #   - Otherwise (library-only-empty, clarifying-question,
+        #     external-tried-budget-exhausted) → finalize as-is.
+        should_retry_for_block = (
+            not candidates and bool(recent_results) and not retry_used
+        )
+        should_retry_for_search = (
+            not candidates
+            and not recent_results
+            and tried_external
+            and budget_left
+            and not retry_used
+        )
+        if not (should_retry_for_block or should_retry_for_search):
             next_state["ps_pending_tool_calls"] = []
-            next_state["ps_final_text"] = str(msg.get("content") or "(no response)")
+            next_state["ps_final_text"] = final_text
+            return next_state
+
+        if should_retry_for_block:
+            corrective_text = _corrective_message(recent_results)
+        else:  # should_retry_for_search
+            corrective_text = _corrective_message_no_results()
+
+        messages.append({"role": "assistant", "content": final_text})
+        messages.append({"role": "user", "content": corrective_text})
+        next_state["ps_messages"] = messages
+        next_state["ps_pending_tool_calls"] = []
+        next_state["ps_final_text"] = ""
+        next_state["ps_corrective_retry_used"] = True
+        next_state["ps_corrective_retry_pending"] = True
         return next_state
 
     def _ps_plan_branch(state: AgentState) -> str:
+        if state.get("ps_corrective_retry_pending"):
+            return "corrective"
         pending = state.get("ps_pending_tool_calls") or []
         if not pending:
             return "done"
@@ -227,6 +278,13 @@ def build_paper_search_subgraph(deps: ResearchDeps) -> Any:
             # Skip dispatch and finalize so we don't blow past the cap.
             return "done"
         return "tool_calls"
+
+    async def _ps_corrective(state: AgentState) -> AgentState:
+        """Passthrough that clears the retry-pending flag before looping
+        back to ps_plan. The actual corrective message was already
+        appended to ps_messages by _ps_plan; this node exists purely to
+        give the topology an explicit branch destination."""
+        return {**state, "ps_corrective_retry_pending": False}
 
     async def _ps_dispatch_tools(state: AgentState) -> AgentState:
         writer = get_stream_writer()
@@ -303,14 +361,20 @@ def build_paper_search_subgraph(deps: ResearchDeps) -> Any:
     g: StateGraph[AgentState, Any] = StateGraph(AgentState)
     g.add_node("ps_plan", _ps_plan)
     g.add_node("ps_dispatch_tools", _ps_dispatch_tools)
+    g.add_node("ps_corrective", _ps_corrective)
     g.add_node("ps_finalize", _ps_finalize)
     g.add_edge(START, "ps_plan")
     g.add_conditional_edges(
         "ps_plan",
         _ps_plan_branch,
-        {"tool_calls": "ps_dispatch_tools", "done": "ps_finalize"},
+        {
+            "tool_calls": "ps_dispatch_tools",
+            "corrective": "ps_corrective",
+            "done": "ps_finalize",
+        },
     )
     g.add_edge("ps_dispatch_tools", "ps_plan")
+    g.add_edge("ps_corrective", "ps_plan")
     g.add_edge("ps_finalize", END)
     return g.compile()
 

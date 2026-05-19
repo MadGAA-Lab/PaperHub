@@ -217,54 +217,17 @@ async def test_dispatch_registry_error_is_translated(
 
 
 # ---------------------------------------------------------------------------
-# Cap: papers.search_semantic_scholar + web.* combined, capped at 3
+# Cap: papers.search_semantic_scholar + web.* combined, capped at the
+# module-level MAX_EXTERNAL_DISCOVERY_CALLS_PER_TURN (raised 3 → 10 in
+# v2.6 to support the multi-paper fan-out pipeline).
 # ---------------------------------------------------------------------------
 
 
-async def test_cap_blocks_4th_external_call_mix_ss_then_web(
+async def test_cap_blocks_past_limit_mix_ss_then_web(
     migrated_db: aiosqlite.Connection, fake_tracer: Tracer,
 ) -> None:
-    """1 papers.search_semantic_scholar + 3 web.search → 4th rejected."""
-
-    async def _fake_ss(**kwargs: Any) -> list[dict[str, Any]]:
-        return []
-
-    async def _fake_web(**kwargs: Any) -> list[dict[str, Any]]:
-        return []
-
-    reg = FakeRegistry(
-        handlers={
-            "papers.search_semantic_scholar": _fake_ss,
-            "web.search": _fake_web,
-        },
-    )
-    recent: dict[str, dict[str, Any]] = {}
-    count = 0
-    sequence = [
-        ("papers.search_semantic_scholar", "ssA"),
-        ("web.search", "w1"),
-        ("web.search", "w2"),
-        ("web.search", "w3"),
-    ]
-    for idx, (name, q) in enumerate(sequence):
-        call = _tool_call(f"c{idx}", name, {"query": q})
-        result, count = await _dispatch_paper_search_tool_call(
-            call=call, tracer=fake_tracer, conn=migrated_db, session_id=1,
-            external_discovery_calls=count,
-            recent_results=recent, registry=reg,
-        )
-        if idx < 3:
-            assert not (isinstance(result, dict) and result.get("error", "").startswith("external_discovery"))
-        else:
-            assert isinstance(result, dict)
-            assert result["error"] == "external_discovery_call_cap_reached"
-            assert result["cap"] == MAX_EXTERNAL_DISCOVERY_CALLS_PER_TURN
-
-
-async def test_cap_blocks_4th_external_call_mix_ss_heavy(
-    migrated_db: aiosqlite.Connection, fake_tracer: Tracer,
-) -> None:
-    """3 papers.search_semantic_scholar + 1 web.search → 4th rejected."""
+    """A mix of papers.search_semantic_scholar + web.search up to the cap
+    is allowed; the call past the cap is rejected with the cap error."""
 
     async def _empty(**kwargs: Any) -> list[dict[str, Any]]:
         return []
@@ -275,14 +238,15 @@ async def test_cap_blocks_4th_external_call_mix_ss_heavy(
             "web.search": _empty,
         },
     )
+    cap = MAX_EXTERNAL_DISCOVERY_CALLS_PER_TURN
+    # First cap calls: 1 SS + (cap - 1) web.search. Then one more web
+    # past the cap must be rejected.
+    sequence: list[tuple[str, str]] = [("papers.search_semantic_scholar", "ssA")]
+    sequence.extend(("web.search", f"w{i}") for i in range(1, cap))
+    sequence.append(("web.search", "wOver"))
+
     recent: dict[str, dict[str, Any]] = {}
     count = 0
-    sequence = [
-        ("papers.search_semantic_scholar", "q1"),
-        ("papers.search_semantic_scholar", "q2"),
-        ("papers.search_semantic_scholar", "q3"),
-        ("web.search", "w1"),
-    ]
     for idx, (name, q) in enumerate(sequence):
         call = _tool_call(f"c{idx}", name, {"query": q})
         result, count = await _dispatch_paper_search_tool_call(
@@ -290,8 +254,53 @@ async def test_cap_blocks_4th_external_call_mix_ss_heavy(
             external_discovery_calls=count,
             recent_results=recent, registry=reg,
         )
-        if idx < 3:
-            assert not (isinstance(result, dict) and result.get("error", "").startswith("external_discovery"))
+        if idx < cap:
+            assert not (
+                isinstance(result, dict)
+                and result.get("error", "").startswith("external_discovery")
+            )
+        else:
+            assert isinstance(result, dict)
+            assert result["error"] == "external_discovery_call_cap_reached"
+            assert result["cap"] == cap
+
+
+async def test_cap_blocks_past_limit_ss_heavy(
+    migrated_db: aiosqlite.Connection, fake_tracer: Tracer,
+) -> None:
+    """Cap-1 papers.search_semantic_scholar + 1 web.search uses the full
+    budget; the next call (whatever flavour) is rejected with the cap error."""
+
+    async def _empty(**kwargs: Any) -> list[dict[str, Any]]:
+        return []
+
+    reg = FakeRegistry(
+        handlers={
+            "papers.search_semantic_scholar": _empty,
+            "web.search": _empty,
+        },
+    )
+    cap = MAX_EXTERNAL_DISCOVERY_CALLS_PER_TURN
+    sequence: list[tuple[str, str]] = [
+        ("papers.search_semantic_scholar", f"q{i}") for i in range(cap - 1)
+    ]
+    sequence.append(("web.search", "w1"))
+    sequence.append(("web.search", "wOver"))
+
+    recent: dict[str, dict[str, Any]] = {}
+    count = 0
+    for idx, (name, q) in enumerate(sequence):
+        call = _tool_call(f"c{idx}", name, {"query": q})
+        result, count = await _dispatch_paper_search_tool_call(
+            call=call, tracer=fake_tracer, conn=migrated_db, session_id=1,
+            external_discovery_calls=count,
+            recent_results=recent, registry=reg,
+        )
+        if idx < cap:
+            assert not (
+                isinstance(result, dict)
+                and result.get("error", "").startswith("external_discovery")
+            )
         else:
             assert isinstance(result, dict)
             assert result["error"] == "external_discovery_call_cap_reached"
