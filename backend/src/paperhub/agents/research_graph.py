@@ -16,13 +16,19 @@ paper_search subgraph (linear with per-request inner kick-back loop):
     writes a json:candidates block) and runs the Synthesizer for the
     user-visible prose.
 
-paper_qa subgraph (count-branching):
+paper_qa subgraph (agentic-hierarchical, v2.10):
 
     START → pq_resolve → conditional_edges → {
-        "empty":   pq_empty       → END
-        "single":  pq_single      → END
-        "map":     pq_map         → pq_synthesize → END
+        "empty":    pq_empty       → END
+        "dispatch": pq_dispatch    → pq_finalize → END
     }
+
+  * pq_dispatch fans out ``run_paper_qa_subagent`` per enabled paper via
+    asyncio.gather; each subagent runs a bounded list_sections/read_section
+    loop and returns a PerPaperPicks with cited chunks.
+  * pq_finalize streams the finalizer LLM (flagship model) over the raw
+    chunk picks — no intermediate analyst prose (raw chunks > summaries
+    for correctness).
 
 Streaming contract (consumed by ``api/chat.py``):
 
@@ -42,13 +48,11 @@ import aiosqlite
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
+from paperhub.agents.paper_qa_subagent import PerPaperPicks, run_paper_qa_subagent
 from paperhub.agents.research import (
-    FinalOnlyMessage,
     SearchCandidate,
-    _paper_qa_map_one,
-    _paper_qa_single_stream,
-    _paper_qa_synthesize_stream,
     _resolve_enabled_papers,
+    paper_qa_finalize,
 )
 from paperhub.agents.research import (
     paper_qa_stream as _default_paper_qa_stream,
@@ -109,6 +113,9 @@ class ResearchDeps:
     # a legacy generator). Kept so test_chat_sse.py can monkeypatch
     # paper_qa_stream with a fake.
     paper_qa_stream_fn: PaperQaStreamFn = field(default=_default_paper_qa_stream)
+    # v2.10: per-paper subagent model + read budget.
+    paper_qa_subagent_model: str = "gemini/gemini-2.5-flash-lite"
+    paper_qa_max_section_reads: int = 5
 
 
 def _kwargs(deps: ResearchDeps) -> ResearchExtraKwargs:
@@ -332,21 +339,26 @@ def build_paper_search_subgraph(deps: ResearchDeps) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# paper_qa subgraph
+# paper_qa subgraph (v2.10 — agentic hierarchical)
 # ---------------------------------------------------------------------------
 
 
 def build_paper_qa_subgraph(deps: ResearchDeps) -> Any:
-    """Compile the paper_qa branching subgraph.
+    """Compile the agentic-hierarchical paper_qa subgraph (Plan C v2.10).
 
     Topology::
 
         START → pq_resolve
         pq_resolve → conditional_edges → {
-            "empty":   pq_empty       → END
-            "single":  pq_single      → END
-            "map":     pq_map         → pq_synthesize → END
+            "empty":    pq_empty       → END
+            "dispatch": pq_dispatch    → pq_finalize → END
         }
+
+    ``pq_dispatch`` fans out ``run_paper_qa_subagent`` per enabled paper via
+    asyncio.gather. ``pq_finalize`` reads each subagent's PickedChunks
+    DIRECTLY (not analyst-prose-summary) and streams the user-facing
+    answer. Raw chunks > summaries for correctness (flagship LLM + raw
+    chunks preserves [chunk:N] markers verbatim).
     """
 
     async def _pq_resolve(state: AgentState) -> AgentState:
@@ -365,11 +377,7 @@ def build_paper_qa_subgraph(deps: ResearchDeps) -> Any:
 
     def _pq_branch(state: AgentState) -> str:
         n = len(state.get("pq_papers") or [])
-        if n == 0:
-            return "empty"
-        if n == 1:
-            return "single"
-        return "map"
+        return "empty" if n == 0 else "dispatch"
 
     async def _pq_empty(state: AgentState) -> AgentState:
         return {
@@ -380,84 +388,53 @@ def build_paper_qa_subgraph(deps: ResearchDeps) -> Any:
             ),
         }
 
-    async def _pq_single(state: AgentState) -> AgentState:
-        writer = get_stream_writer()
-        paper = state["pq_papers"][0]
-        collected: list[str] = []
-        final_only: str | None = None
-        async for item in _paper_qa_single_stream(
-            paper=paper,
-            user_message=state["user_message"],
-            adapter=deps.adapter,
-            tracer=deps.tracer,
-            model=deps.paper_qa_model,
-            retriever=deps.retriever,
-            conn=deps.conn,
-            state=state,
-            **_kwargs(deps),
-        ):
-            if isinstance(item, FinalOnlyMessage):
-                final_only = item.content
-            else:
-                writer({"event": "token", "text": item})
-                collected.append(item)
-        if final_only is not None:
-            return {**state, "final_response": final_only}
-        return {**state, "final_response": "".join(collected)}
-
-    async def _pq_map(state: AgentState) -> AgentState:
+    async def _pq_dispatch(state: AgentState) -> AgentState:
+        """Fan-out: one subagent task per enabled paper, asyncio.gather."""
         writer = get_stream_writer()
         papers = list(state["pq_papers"])
         run_id: int = state["run_id"]
         last_step = int(state.get("ps_last_step_index", -1))
         lock = asyncio.Lock()
 
-        async def _one_with_emit(
-            pid: int, title: str,
-        ) -> tuple[int, str, list[Any], str]:
-            result = await _paper_qa_map_one(
-                pid=pid,
+        async def _one_with_emit(pid: int, title: str) -> PerPaperPicks:
+            picks = await run_paper_qa_subagent(
+                paper_content_id=pid,
                 title=title,
                 user_message=state["user_message"],
-                adapter=deps.adapter,
                 tracer=deps.tracer,
-                model=deps.paper_qa_model,
-                retriever=deps.retriever,
+                model=deps.paper_qa_subagent_model,
                 conn=deps.conn,
+                max_section_reads=deps.paper_qa_max_section_reads,
                 **_kwargs(deps),
             )
-            # Drain any rows written since the last emission and emit them
-            # immediately. The lock prevents two concurrent tasks from
-            # claiming the same row twice.
             async with lock:
                 nonlocal last_step
                 recs = await drain_tool_calls_since(deps.conn, run_id, last_step)
                 for rec in recs:
                     writer({"event": "tool_step", "record": rec})
                     last_step = rec["step_index"]
-            return result
+            return picks
 
-        results = list(
-            await asyncio.gather(
-                *[_one_with_emit(pid, title) for pid, title in papers],
-            ),
+        picks_list: list[PerPaperPicks] = list(
+            await asyncio.gather(*[_one_with_emit(pid, title) for pid, title in papers])
         )
-        return {**state, "pq_per_paper": results, "ps_last_step_index": last_step}
+        return {**state, "pq_per_paper_picks": picks_list, "ps_last_step_index": last_step}
 
-    async def _pq_synthesize(state: AgentState) -> AgentState:
+    async def _pq_finalize(state: AgentState) -> AgentState:
         writer = get_stream_writer()
-        per_paper = state.get("pq_per_paper") or []
-        # If every paper returned no chunks, short-circuit.
-        if all(not chunks for _, _, chunks, _ in per_paper):
+        picks: list[PerPaperPicks] = list(state.get("pq_per_paper_picks") or [])
+        if all(not p.picked_chunks for p in picks):
             return {
                 **state,
                 "final_response": (
-                    "No relevant chunks were found in the enabled references."
+                    "I checked every enabled reference but none contained "
+                    "content relevant to your question. Try a more specific "
+                    "question or add more references."
                 ),
             }
         collected: list[str] = []
-        async for tok in _paper_qa_synthesize_stream(
-            per_paper=per_paper,
+        async for tok in paper_qa_finalize(
+            per_paper_picks=picks,
             user_message=state["user_message"],
             adapter=deps.adapter,
             tracer=deps.tracer,
@@ -472,19 +449,16 @@ def build_paper_qa_subgraph(deps: ResearchDeps) -> Any:
     g: StateGraph[AgentState, Any] = StateGraph(AgentState)
     g.add_node("pq_resolve", _pq_resolve)
     g.add_node("pq_empty", _pq_empty)
-    g.add_node("pq_single", _pq_single)
-    g.add_node("pq_map", _pq_map)
-    g.add_node("pq_synthesize", _pq_synthesize)
+    g.add_node("pq_dispatch", _pq_dispatch)
+    g.add_node("pq_finalize", _pq_finalize)
     g.add_edge(START, "pq_resolve")
-    g.add_conditional_edges(
-        "pq_resolve",
-        _pq_branch,
-        {"empty": "pq_empty", "single": "pq_single", "map": "pq_map"},
-    )
+    g.add_conditional_edges("pq_resolve", _pq_branch, {
+        "empty": "pq_empty",
+        "dispatch": "pq_dispatch",
+    })
     g.add_edge("pq_empty", END)
-    g.add_edge("pq_single", END)
-    g.add_edge("pq_map", "pq_synthesize")
-    g.add_edge("pq_synthesize", END)
+    g.add_edge("pq_dispatch", "pq_finalize")
+    g.add_edge("pq_finalize", END)
     return g.compile()
 
 

@@ -329,6 +329,7 @@ async def paper_qa_stream(
     """
     pipeline = kwargs.pop("pipeline", None)
     mcp_registry = kwargs.pop("mcp_registry", None)
+    _settings = load_settings()
     deps = ResearchDeps(
         adapter=adapter,
         tracer=tracer,
@@ -338,6 +339,8 @@ async def paper_qa_stream(
         retriever=retriever,
         mcp_registry=mcp_registry if mcp_registry is not None else _NULL_REGISTRY,
         adapter_kwargs=kwargs or None,
+        paper_qa_subagent_model=_settings.paper_qa_subagent_model,
+        paper_qa_max_section_reads=_settings.paper_qa_max_section_reads,
     )
     graph = build_paper_qa_subgraph(deps)
     streamed_any = False

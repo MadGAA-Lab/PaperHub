@@ -92,11 +92,12 @@ class AgentState(TypedDict, total=False):
     ps_resolved: list[Any]          # list[ResolvedPaper]
     ps_not_found: list[Any]         # list[ParsedRequest]
     ps_last_step_index: int
-    # paper_qa branch:
+    # paper_qa branch (v2.10 — agentic hierarchical):
     #   - pq_papers: enabled (paper_content_id, title) pairs resolved by
-    #     pq_resolve and consumed by the count branch.
-    #   - pq_per_paper: per-paper analyses emitted by pq_map and consumed
-    #     by pq_synthesize. Each entry is
-    #     (paper_content_id, title, retrieved_chunks, analysis_text).
+    #     pq_resolve and fanned-out by pq_dispatch.
+    #   - pq_per_paper_picks: PerPaperPicks objects collected by pq_dispatch
+    #     via asyncio.gather over run_paper_qa_subagent. Consumed by
+    #     pq_finalize which streams the user-facing synthesis over raw chunks
+    #     rather than analyst-prose summaries.
     pq_papers: list[tuple[int, str]]
-    pq_per_paper: list[tuple[int, str, list[Any], str]]
+    pq_per_paper_picks: list[Any]  # list[PerPaperPicks]
