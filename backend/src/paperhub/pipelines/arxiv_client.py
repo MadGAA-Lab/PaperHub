@@ -10,6 +10,7 @@ import random
 import re
 import tarfile
 import time
+from datetime import UTC
 from pathlib import Path
 
 import arxiv
@@ -31,8 +32,19 @@ _USER_AGENT = "PaperHub/0.1 (https://github.com/whats2000/PaperHub)"
 # arxiv's export mirror occasionally drops large transfers mid-stream
 # (httpx.RemoteProtocolError "peer closed connection without sending
 # complete message body"). Retry with backoff before failing the ingest.
+# After a drop arxiv often returns 429 on subsequent attempts (per-IP
+# rate limit kicks in); the resume path observed this empirically on
+# arxiv:2605.02881 (~41MB tarball dropped at exactly 8MB, then 429).
 _DOWNLOAD_MAX_ATTEMPTS = 3
 _DOWNLOAD_BACKOFF_BASE_S = 2.0
+# Fallback wait when arxiv sends 429 without Retry-After. Kept short
+# (5s) because arxiv's actual per-IP cooldown is brief; long waits
+# don't help when the underlying issue is a per-connection byte cap
+# rather than a rate-limit window.
+_RATE_LIMIT_DEFAULT_BACKOFF_S = 5.0
+# HTTP status codes worth retrying. 429 = rate-limited, 5xx = server
+# trouble. Other 4xx (404, 403, 416-as-non-complete) stay non-retryable.
+_RETRYABLE_HTTP_STATUS: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 _TRANSIENT_DOWNLOAD_EXCEPTIONS: tuple[type[BaseException], ...] = (
     httpx.RemoteProtocolError,
     httpx.ReadError,
@@ -41,6 +53,30 @@ _TRANSIENT_DOWNLOAD_EXCEPTIONS: tuple[type[BaseException], ...] = (
     httpx.ConnectTimeout,
     httpx.PoolTimeout,
 )
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse the ``Retry-After`` header. Accepts an integer seconds value
+    OR an HTTP-date. Returns the wait in seconds, or None if absent /
+    unparseable / in the past."""
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        target = parsedate_to_datetime(value)
+        from datetime import datetime
+        now = datetime.now(UTC)
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=UTC)
+        delta = (target - now).total_seconds()
+        return delta if delta > 0 else None
+    except (TypeError, ValueError):
+        return None
 
 
 class TarballCorrupt(RuntimeError):
@@ -95,20 +131,35 @@ def search_arxiv(query: str, max_results: int = 10) -> list[ArxivResult]:
 
 
 def _download_with_resume(url: str, target_path: Path) -> None:
-    """Download ``url`` to ``target_path`` with byte-range resume across
-    retries. On a mid-stream disconnect, the next attempt issues
-    ``Range: bytes=<existing>-`` and appends to the partial file
-    instead of restarting from byte 0.
+    """Download ``url`` to ``target_path`` with byte-range resume +
+    fast retry for transient failures, but FAIL FAST on the file-size
+    pattern (partial bytes received then connection dropped).
 
-    Server behaviour matrix:
-      * 206 Partial Content   — server honoured the range; append to file
-      * 200 OK + Range sent   — server ignored the range; wipe and rewrite
-      * 416 Range Not Satisfiable AND existing file size matches the
-        Content-Range "*/N" tail — file is already complete; return
-      * any other 4xx/5xx     — raise (caller decides)
+    Rationale: arxiv's export mirror caps per-connection delivery for
+    large papers (observed: ~8 MB for /src/, ~1 MB for /pdf/ on
+    2605.02881 which is 41 MB / 27 MB total). When this happens, no
+    amount of resume / retry from the same byte offset will recover —
+    arxiv either returns 429 to the resume request or drops again at
+    the same boundary. The CALLER should fall back to a different
+    method (e.g. PDF instead of source tarball) rather than spin here.
 
-    On transient connection errors (RemoteProtocolError, ReadError, …)
-    the partial bytes are KEPT so the next attempt can resume.
+    Decision matrix on each attempt:
+
+      * 2xx success → return.
+      * 416 + existing bytes → file already complete, return.
+      * RemoteProtocolError WITH bytes received this attempt → SIZE
+        CAP HIT; raise immediately so the caller skips to the
+        fallback method. NO retry — every retry would hit the same
+        per-connection byte limit at the same offset.
+      * Everything else retriable (connect/read errors with zero
+        bytes received, 429, 5xx) → up to ``_DOWNLOAD_MAX_ATTEMPTS``
+        attempts with short backoff (honouring Retry-After when
+        present).
+      * 200 with existing partial bytes → server ignored Range; wipe
+        + restart from byte 0.
+
+    Partial bytes are kept on disk on every branch so the caller can
+    inspect what was received.
     """
     last_exc: BaseException | None = None
     for attempt in range(1, _DOWNLOAD_MAX_ATTEMPTS + 1):
@@ -116,6 +167,7 @@ def _download_with_resume(url: str, target_path: Path) -> None:
         headers: dict[str, str] = {"User-Agent": _USER_AGENT}
         if existing_bytes > 0:
             headers["Range"] = f"bytes={existing_bytes}-"
+        bytes_before_attempt = existing_bytes
 
         try:
             with httpx.stream(
@@ -125,18 +177,41 @@ def _download_with_resume(url: str, target_path: Path) -> None:
                 headers=headers,
             ) as resp:
                 if resp.status_code == 416 and existing_bytes > 0:
-                    # Most likely the file is already fully downloaded —
-                    # the existing bytes equal Content-Length and the
-                    # server has nothing more to give us. Treat as done.
                     logger.info(
                         "download_with_resume %s: 416 Range Not Satisfiable "
                         "with existing=%d bytes; treating as complete",
                         url, existing_bytes,
                     )
                     return
+                if resp.status_code in _RETRYABLE_HTTP_STATUS:
+                    # All 429 / 5xx get the standard 3-attempt retry
+                    # with short backoff — this is the "other pattern"
+                    # bucket. Only the bytes-then-drop transport
+                    # failure (caught below) is treated as a size cap
+                    # and skipped to fallback.
+                    if attempt >= _DOWNLOAD_MAX_ATTEMPTS:
+                        logger.warning(
+                            "download_with_resume %s: HTTP %d after %d "
+                            "attempts; giving up",
+                            url, resp.status_code, attempt,
+                        )
+                        resp.raise_for_status()
+                    retry_after = _parse_retry_after(resp.headers.get("retry-after"))
+                    backoff = (
+                        retry_after
+                        if retry_after is not None
+                        else _RATE_LIMIT_DEFAULT_BACKOFF_S
+                    )
+                    backoff += random.uniform(0, 0.5)
+                    logger.warning(
+                        "download_with_resume %s: HTTP %d attempt %d/%d "
+                        "(no partial bytes); sleeping %.1fs",
+                        url, resp.status_code, attempt,
+                        _DOWNLOAD_MAX_ATTEMPTS, backoff,
+                    )
+                    time.sleep(backoff)
+                    continue
                 if existing_bytes > 0 and resp.status_code == 200:
-                    # Server ignored our Range header (some mirrors do
-                    # this under load). Wipe and restart from byte 0.
                     logger.info(
                         "download_with_resume %s: server returned 200 "
                         "despite Range header; restarting from byte 0",
@@ -153,20 +228,34 @@ def _download_with_resume(url: str, target_path: Path) -> None:
         except _TRANSIENT_DOWNLOAD_EXCEPTIONS as exc:
             last_exc = exc
             new_bytes = target_path.stat().st_size if target_path.exists() else 0
+            bytes_this_attempt = new_bytes - bytes_before_attempt
+            # SIZE-CAP signature: we successfully received bytes this
+            # attempt before the connection dropped. Retrying from the
+            # same offset will hit the same wall — skip to fallback.
+            if bytes_this_attempt > 0:
+                logger.warning(
+                    "download_with_resume %s: connection dropped mid-"
+                    "stream after %d bytes this attempt (total=%d, %s); "
+                    "size-cap hit, skipping to fallback",
+                    url, bytes_this_attempt, new_bytes, type(exc).__name__,
+                )
+                raise
+            # Transient connection-only error (no bytes received).
+            # Fast retry.
             if attempt >= _DOWNLOAD_MAX_ATTEMPTS:
                 logger.warning(
                     "download_with_resume %s: failed after %d attempts "
-                    "(%s: %s); final partial size=%d bytes",
+                    "(%s: %s); final partial=%d bytes",
                     url, attempt, type(exc).__name__, exc, new_bytes,
                 )
                 raise
             backoff = _DOWNLOAD_BACKOFF_BASE_S * (2 ** (attempt - 1))
             backoff += random.uniform(0, 0.5)
             logger.warning(
-                "download_with_resume %s: attempt %d/%d failed "
-                "(%s: %s); partial=%d bytes, retrying in %.1fs with resume",
+                "download_with_resume %s: attempt %d/%d transient "
+                "(%s: %s); fast retry in %.1fs",
                 url, attempt, _DOWNLOAD_MAX_ATTEMPTS,
-                type(exc).__name__, exc, new_bytes, backoff,
+                type(exc).__name__, exc, backoff,
             )
             time.sleep(backoff)
     # pragma: no cover — loop exits via return or raise.

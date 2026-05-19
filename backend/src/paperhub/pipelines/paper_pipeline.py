@@ -193,8 +193,13 @@ class PaperPipeline:
         # capable downloader giving up AND a corrupt-tarball signal
         # qualify. The fallback persists with the same content_key
         # (``arxiv:<id>``) so future re-ingests still hit the cache.
+        # Fall back to PDF on any of: transient transport failure that
+        # the resume-capable downloader couldn't recover from, sustained
+        # HTTP error (after retry-after honouring — typically 429 / 5xx),
+        # or a corrupt tarball after the bytes arrived.
         _src_fallback_exc: tuple[type[BaseException], ...] = (
             *_TRANSIENT_DOWNLOAD_EXCEPTIONS, TarballCorrupt,
+            httpx.HTTPStatusError,
         )
         try:
             source_dir = download_arxiv_source(
