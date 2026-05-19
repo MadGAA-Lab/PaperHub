@@ -16,7 +16,6 @@ import asyncio
 import json
 import logging
 from collections import defaultdict
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -82,15 +81,12 @@ async def _reingest_one(
         _LOG.warning("pcid=%d: no source_path on row — skipped", pcid)
         return (0, 0)
     source_path = Path(row[0])
-    exists = await asyncio.to_thread(source_path.exists)
-    if not exists:
+    if not source_path.exists():  # noqa: ASYNC240 — sequential CLI; sync I/O is fine
         _LOG.warning(
             "pcid=%d: source file missing at %s — skipped", pcid, source_path
         )
         return (0, 0)
-    flattened = await asyncio.to_thread(
-        partial(source_path.read_text, encoding="utf-8", errors="replace")
-    )
+    flattened = source_path.read_text(encoding="utf-8", errors="replace")  # noqa: ASYNC240
 
     async with conn.execute(
         "SELECT COUNT(*) FROM chunks WHERE paper_content_id = ?", (pcid,)
@@ -112,14 +108,17 @@ async def _reingest_one(
         )
         return (before, len(chunks))
 
-    # Delete old data (chunks rows + Chroma vectors).
+    # Embed FIRST (idempotent if it fails — no mutation yet).
+    embedder = get_embedder()
+    embeddings = embedder.embed([c.text for c in chunks])
+
+    # Compute sections_json before delete too (pure function; no I/O).
+    sections_json = _build_sections_json(chunks, flattened)
+
+    # Only now do destructive deletes.
     await conn.execute("DELETE FROM chunks WHERE paper_content_id = ?", (pcid,))
     chroma.delete_paper(pcid)
     await conn.commit()
-
-    # Embed all chunk texts in one call (batched internally by ChromaStore).
-    embedder = get_embedder()
-    embeddings = embedder.embed([c.text for c in chunks])
 
     # Insert new chunks; capture auto-assigned ids.
     new_ids: list[int] = []
@@ -134,7 +133,6 @@ async def _reingest_one(
             assert r is not None
             new_ids.append(int(r[0]))
 
-    sections_json = _build_sections_json(chunks, flattened)
     await conn.execute(
         "UPDATE paper_content SET sections_json = ? WHERE id = ?",
         (sections_json, pcid),

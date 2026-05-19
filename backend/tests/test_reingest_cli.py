@@ -240,13 +240,16 @@ async def test_reingest_one_dry_run_does_not_mutate(
     pcid = await _seed_paper_content_row(test_db, str(_FIXTURE_TEX))
     await _insert_bogus_chunk(test_db, pcid)
 
+    count_before = chroma._coll.count()
     before, after = await reingest_mod._reingest_one(
         pcid, conn=test_db, chroma=chroma, dry_run=True
     )
+    count_after = chroma._coll.count()
+    assert count_after == count_before, "dry_run must not write Chroma vectors"
 
     # DB still has the original 1 bogus chunk
-    count_after = await _count_chunks(test_db, pcid)
-    assert count_after == 1, "dry_run must not delete/insert chunks"
+    db_count_after = await _count_chunks(test_db, pcid)
+    assert db_count_after == 1, "dry_run must not delete/insert chunks"
 
     # sections_json still NULL
     sj = await _get_sections_json(test_db, pcid)
@@ -255,3 +258,38 @@ async def test_reingest_one_dry_run_does_not_mutate(
     # before=1 (the bogus chunk), after>0 (what *would* be inserted)
     assert before == 1
     assert after > 0
+
+
+@pytest.mark.asyncio
+async def test_reingest_one_leaves_db_untouched_when_embed_raises(
+    test_db: aiosqlite.Connection,
+    chroma: ChromaStore,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression for Plan C v2.10-5 review: embed must run BEFORE delete so
+    a modelserver failure doesn't strand the paper with zero chunks."""
+    import paperhub.cli.reingest as reingest_mod
+
+    class _BoomEmbedder:
+        def embed(self, texts: list[str]) -> Any:
+            raise RuntimeError("modelserver unreachable")
+
+    monkeypatch.setattr(reingest_mod, "get_embedder", lambda: _BoomEmbedder())
+
+    pcid = await _seed_paper_content_row(test_db, str(_FIXTURE_TEX))
+    # Insert 3 old chunks so we have a non-trivial before-count to check.
+    await _insert_bogus_chunk(test_db, pcid)
+    await _insert_bogus_chunk(test_db, pcid)
+    await _insert_bogus_chunk(test_db, pcid)
+    before_count = await _count_chunks(test_db, pcid)
+    assert before_count == 3
+
+    with pytest.raises(RuntimeError, match="unreachable"):
+        await reingest_mod._reingest_one(
+            pcid, conn=test_db, chroma=chroma, dry_run=False
+        )
+
+    # DB must be unchanged — embed failure must not delete chunks.
+    after_count = await _count_chunks(test_db, pcid)
+    assert after_count == 3, "embed failure must not delete chunks"
