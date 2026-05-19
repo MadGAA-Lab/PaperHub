@@ -943,7 +943,10 @@ async def test_delete_library_paper_returns_404_when_missing(
 async def test_delete_library_paper_cleans_on_disk_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """source_dir_path's parent (the cache dir) is rmtreed best-effort."""
+    """The per-paper cache dir is rmtreed best-effort. Production
+    stores source_dir_path = ``<papers_cache>/<scheme>/<id>/`` (NOT
+    the source/ subdir, despite the name) — this test mirrors that
+    contract."""
     db_path = await _get_db_path(tmp_path, monkeypatch)
     cache_dir = tmp_path / "papers_cache" / "arxiv" / "2510.03293"
     source_dir = cache_dir / "source"
@@ -961,7 +964,8 @@ async def test_delete_library_paper_cleans_on_disk_cache(
             (
                 "arxiv:2510.03293", "2510.03293", "MoE Paper", 2024, "abstract",
                 str(source_dir / "main.tex"),
-                str(source_dir),
+                # Production semantics: cache_dir itself, not source/.
+                str(cache_dir),
                 str(cache_dir / "source.html"),
             ),
         )
@@ -979,3 +983,69 @@ async def test_delete_library_paper_cleans_on_disk_cache(
 
     assert r.status_code == 204
     assert not cache_dir.exists(), "cache dir should be rmtreed"
+
+
+async def test_delete_library_paper_preserves_sibling_caches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for the production bug that wiped every paper's
+    on-disk cache when deleting one: the delete endpoint did
+    `Path(source_dir_path).parent` thinking source_dir_path pointed
+    at `<cache>/source/`, lifted up to `<papers_cache>/arxiv/`, and
+    rmtree'd the lot. With production's actual contract
+    (source_dir_path IS the per-paper cache dir), `.parent` lifted
+    to the all-papers parent directory and deleted siblings too.
+
+    This test seeds TWO papers' caches and verifies that deleting
+    one leaves the other's cache untouched on disk."""
+    db_path = await _get_db_path(tmp_path, monkeypatch)
+    arxiv_root = tmp_path / "papers_cache" / "arxiv"
+    cache_a = arxiv_root / "2510.03293"
+    cache_b = arxiv_root / "1706.03762"
+    for d, marker in ((cache_a, "moe"), (cache_b, "transformer")):
+        (d / "source").mkdir(parents=True, exist_ok=True)
+        (d / "source" / "main.tex").write_text(marker, encoding="utf-8")
+
+    async with aiosqlite.connect(db_path) as conn:
+        await apply_schema(conn)
+        for cache_dir, key, aid, title in (
+            (cache_a, "arxiv:2510.03293", "2510.03293", "MoE Paper"),
+            (cache_b, "arxiv:1706.03762", "1706.03762", "Transformer"),
+        ):
+            await conn.execute(
+                "INSERT INTO paper_content "
+                "(content_key, kind, arxiv_id, title, authors_json, year, abstract, "
+                " source_path, source_dir_path, html_path) "
+                "VALUES (?, 'arxiv', ?, ?, '[]', 2024, '', ?, ?, ?)",
+                (
+                    key, aid, title,
+                    str(cache_dir / "source" / "main.tex"),
+                    str(cache_dir),
+                    str(cache_dir / "source.html"),
+                ),
+            )
+        await conn.commit()
+        async with conn.execute(
+            "SELECT id FROM paper_content WHERE content_key=?",
+            ("arxiv:2510.03293",),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        pc_a = int(row[0])
+
+    with patch.object(papers_mod, "get_chroma", return_value=MagicMock()):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.delete(f"/papers/content/{pc_a}")
+
+    assert r.status_code == 204
+    # The target paper's cache is gone.
+    assert not cache_a.exists(), "deleted paper's cache should be removed"
+    # The sibling paper's cache is INTACT — this is the regression
+    # the production bug violated.
+    assert cache_b.exists(), (
+        "sibling paper's cache must survive — production bug rmtree'd "
+        "the entire papers_cache/arxiv/ tree"
+    )
+    assert (cache_b / "source" / "main.tex").read_text(encoding="utf-8") == "transformer"

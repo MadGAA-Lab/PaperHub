@@ -2,6 +2,7 @@
 gestures; the Research Agent uses research_tools dispatchers instead."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 from pathlib import Path
@@ -380,16 +381,46 @@ async def delete_library_paper(
             paper_content_id, exc,
         )
 
-    # On-disk cache — best-effort.
+    # On-disk cache — best-effort. paper_content.source_dir_path stores
+    # the per-paper cache dir itself (e.g. workspace/papers_cache/arxiv/
+    # 2510.10274/) — NOT the source/ subdir, despite the misleading
+    # name. Earlier this code took `.parent` thinking it was at
+    # source/ level; that lifted up to workspace/papers_cache/arxiv/
+    # and rmtree wiped EVERY paper's cache in one shot (production
+    # bug: deleting one paper destroyed the whole library on disk).
+    # Now we delete exactly the per-paper dir and nothing above it.
     if source_dir_path:
-        cache_dir = Path(source_dir_path).parent  # source_dir_path points at <cache>/source/
-        if cache_dir.exists() and cache_dir.is_dir():
-            try:
-                shutil.rmtree(cache_dir)
-            except OSError as exc:
-                logger.warning(
-                    "failed to remove cache dir %s: %s", cache_dir, exc,
-                )
+        await asyncio.to_thread(_purge_paper_cache_dir, source_dir_path)
+
+
+def _purge_paper_cache_dir(source_dir_path: str) -> None:
+    """Best-effort rmtree of a single paper's cache dir.
+
+    Defence-in-depth: refuses to delete if the path doesn't look like
+    a per-paper cache dir (must contain ``papers_cache`` AND end in a
+    stem that isn't itself a parent name like ``arxiv`` / ``upload`` /
+    empty). Logs a warning and bails on anything suspicious so a
+    schema-semantics drift can't accidentally rm-tree the whole tree.
+    Runs synchronously — caller wraps in ``asyncio.to_thread`` to
+    keep the FastAPI event loop responsive.
+    """
+    cache_dir = Path(source_dir_path)
+    if not (cache_dir.exists() and cache_dir.is_dir()):
+        return
+    if "papers_cache" not in cache_dir.parts or cache_dir.name in (
+        "papers_cache", "arxiv", "upload", "",
+    ):
+        logger.warning(
+            "refusing to rmtree suspicious source_dir_path=%s "
+            "(would have wiped a parent directory)", source_dir_path,
+        )
+        return
+    try:
+        shutil.rmtree(cache_dir)
+    except OSError as exc:
+        logger.warning(
+            "failed to remove cache dir %s: %s", cache_dir, exc,
+        )
 
 
 # Re-export Pydantic models for test introspection (kept here for locality).
