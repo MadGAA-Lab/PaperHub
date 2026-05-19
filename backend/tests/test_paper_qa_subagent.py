@@ -157,6 +157,16 @@ async def test_subagent_loop_lists_sections_reads_picks_chunks_and_stops(
     assert cited_ids == {method_cid, exp_cid}
     assert picks.rationale  # non-empty
 
+    # ONE tracer step per run_paper_qa_subagent call, not one per iteration.
+    async with migrated_db.execute(
+        "SELECT COUNT(*) FROM tool_calls WHERE tool = 'paper_qa:subagent'"
+    ) as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    assert row[0] == 1, (
+        f"expected exactly 1 tracer step for paper_qa:subagent, got {row[0]}"
+    )
+
 
 async def test_subagent_loop_stops_at_max_section_reads_and_returns_what_it_read(
     migrated_db: aiosqlite.Connection,
@@ -236,3 +246,15 @@ async def test_subagent_read_section_unknown_returns_error_to_llm_not_crash(
     # No crash; LLM didn't cite anything → empty picks.
     assert picks.paper_content_id == pcid
     assert picks.picked_chunks == []
+
+    # The unknown-section error must have been relayed back to the LLM
+    # as a tool-role message so the LLM can react to it.
+    # The second LLM call receives the messages including the tool result.
+    second_call_messages = mock_completion.call_args_list[1].kwargs["messages"]
+    tool_results = [m for m in second_call_messages if m.get("role") == "tool"]
+    assert tool_results, "no tool result message was sent back to the LLM"
+    error_content = tool_results[-1]["content"].lower()
+    assert "unknown section" in error_content or "not found" in error_content, (
+        f"unknown-section error was not relayed to LLM in tool result; "
+        f"got: {tool_results[-1]['content']!r}"
+    )

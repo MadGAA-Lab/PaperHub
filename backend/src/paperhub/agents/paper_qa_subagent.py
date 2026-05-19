@@ -207,22 +207,24 @@ async def run_paper_qa_subagent(
     # Tracks every chunk the subagent has ever read (deduped by chunk_id).
     seen_chunks: dict[int, PickedChunk] = {}
     read_count: int = 0
+    final_summary: str = ""
 
-    # We allow up to (max_section_reads + 1) LLM iterations: one extra
-    # gives the LLM a chance to receive the "budget exhausted" tool result
-    # and produce its final summary. After that we force-stop.
-    for _iteration in range(max_section_reads + 2):
-        async with tracer.step(
-            agent="research",
-            tool="paper_qa:subagent",
-            model=model,
-        ) as step:
-            step.record_args({
-                "paper_content_id": paper_content_id,
-                "title": title,
-                "iteration": _iteration,
-                "read_count": read_count,
-            })
+    # ONE tracer step around the entire loop — one paper_qa:subagent row
+    # per run_paper_qa_subagent call, summarising the whole loop at exit.
+    async with tracer.step(
+        agent="research",
+        tool="paper_qa:subagent",
+        model=model,
+    ) as step:
+        step.record_args({
+            "paper_content_id": paper_content_id,
+            "title": title,
+        })
+
+        # We allow up to (max_section_reads + 1) LLM iterations: one extra
+        # gives the LLM a chance to receive the "budget exhausted" tool result
+        # and produce its final summary. After that we force-stop.
+        for _iteration in range(max_section_reads + 2):
             response = await litellm.acompletion(
                 model=model,
                 messages=messages,
@@ -232,95 +234,100 @@ async def run_paper_qa_subagent(
             )
             msg = response["choices"][0]["message"]
             tool_calls = msg.get("tool_calls") or []
-            step.record_result({
-                "content": (msg.get("content") or "")[:200],
-                "tool_calls_count": len(tool_calls),
-            })
 
-        if not tool_calls:
-            # Final summary — parse cites and return.
-            summary = str(msg.get("content") or "").strip()
-            cited_ids = _extract_cited_chunk_ids(summary)
-            if cited_ids:
-                picked = [seen_chunks[cid] for cid in cited_ids if cid in seen_chunks]
-            else:
-                # LLM forgot to cite — hand everything read to the finalizer.
-                picked = list(seen_chunks.values())
-            return PerPaperPicks(
-                paper_content_id=paper_content_id,
-                title=title,
-                picked_chunks=picked,
-                rationale=summary,
-            )
-
-        # Append assistant turn.
-        messages.append({
-            "role": "assistant",
-            "content": msg.get("content"),
-            "tool_calls": tool_calls,
-        })
-
-        # Execute each tool call.
-        for call in tool_calls:
-            name = call["function"]["name"]
-            raw_args = json.loads(call["function"]["arguments"] or "{}")
-
-            if name == "list_sections":
-                result_str = await _list_sections(
-                    paper_content_id=paper_content_id, conn=conn,
-                )
-            elif name == "read_section":
-                section_name = raw_args.get("name", "")
-                if read_count >= max_section_reads:
-                    result_str = json.dumps({
-                        "error": (
-                            f"read_section budget exhausted ({max_section_reads}). "
-                            "Stop calling tools and write your final summary now."
-                        ),
-                    })
-                else:
-                    result_str, new_picks = await _read_section(
-                        paper_content_id=paper_content_id,
-                        name=section_name,
-                        conn=conn,
-                    )
-                    for p in new_picks:
-                        seen_chunks[p.chunk_id] = p
-                    if new_picks:  # only count a successful read
-                        read_count += 1
-            else:
-                # Off-palette tool call — return a clear error.
-                result_str = json.dumps({
-                    "error": f"unknown tool {name!r}. Use list_sections or read_section.",
-                })
-
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call["id"],
-                "name": name,
-                "content": result_str,
-            })
-
-        # Force-stop: budget exhausted AND the last LLM call still had
-        # tool_calls (meaning it didn't self-terminate after receiving
-        # the exhaustion error). Break out and use the fallback.
-        if read_count >= max_section_reads and all(
-            (c["function"]["name"] == "read_section") for c in tool_calls
-        ):
-            # Check whether we just sent the exhaustion error to the LLM.
-            # If read_count is already at or past the budget when the LLM
-            # sent tool_calls, every read_section call would have received
-            # the exhaustion error — force-stop now.
-            exhausted_results = [
-                c for c in tool_calls if c["function"]["name"] == "read_section"
-            ]
-            if exhausted_results:
+            if not tool_calls:
+                # Final summary — parse cites and exit loop.
+                final_summary = str(msg.get("content") or "").strip()
                 break
 
-    # Force-stop fallback: return everything read so far.
+            # Append assistant turn.
+            messages.append({
+                "role": "assistant",
+                "content": msg.get("content"),
+                "tool_calls": tool_calls,
+            })
+
+            # Execute each tool call.
+            for call in tool_calls:
+                name = call["function"]["name"]
+                raw_args = json.loads(call["function"]["arguments"] or "{}")
+
+                if name == "list_sections":
+                    result_str = await _list_sections(
+                        paper_content_id=paper_content_id, conn=conn,
+                    )
+                elif name == "read_section":
+                    section_name = raw_args.get("name", "")
+                    if read_count >= max_section_reads:
+                        result_str = json.dumps({
+                            "error": (
+                                f"read_section budget exhausted ({max_section_reads}). "
+                                "Stop calling tools and write your final summary now."
+                            ),
+                        })
+                    else:
+                        result_str, new_picks = await _read_section(
+                            paper_content_id=paper_content_id,
+                            name=section_name,
+                            conn=conn,
+                        )
+                        for p in new_picks:
+                            seen_chunks[p.chunk_id] = p
+                        if new_picks:  # only count a successful read
+                            read_count += 1
+                else:
+                    # Off-palette tool call — return a clear error.
+                    result_str = json.dumps({
+                        "error": f"unknown tool {name!r}. Use list_sections or read_section.",
+                    })
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "name": name,
+                    "content": result_str,
+                })
+
+            # Force-stop: budget exhausted AND the last LLM call still had
+            # tool_calls (meaning it didn't self-terminate after receiving
+            # the exhaustion error). Break out and use the fallback.
+            if read_count >= max_section_reads and all(
+                (c["function"]["name"] == "read_section") for c in tool_calls
+            ):
+                # Check whether we just sent the exhaustion error to the LLM.
+                # If read_count is already at or past the budget when the LLM
+                # sent tool_calls, every read_section call would have received
+                # the exhaustion error — force-stop now.
+                exhausted_results = [
+                    c for c in tool_calls if c["function"]["name"] == "read_section"
+                ]
+                if exhausted_results:
+                    break
+
+        # Compute picks from whatever the loop produced.
+        cited_ids = _extract_cited_chunk_ids(final_summary)
+        if cited_ids:
+            picked = [seen_chunks[cid] for cid in cited_ids if cid in seen_chunks]
+        else:
+            # No citations in summary (LLM forgot, or force-stopped without summary):
+            # hand everything read to the finalizer as best-effort fallback.
+            picked = list(seen_chunks.values())
+
+        step.record_result({
+            "reads_used": read_count,
+            "chunks_read": len(seen_chunks),
+            "chunks_cited": len(picked),
+            "summary_len": len(final_summary),
+        })
+
+    rationale = (
+        final_summary
+        if final_summary
+        else "[force-stopped: read budget exhausted without final summary]"
+    )
     return PerPaperPicks(
         paper_content_id=paper_content_id,
         title=title,
-        picked_chunks=list(seen_chunks.values()),
-        rationale="[force-stopped: read budget exhausted without final summary]",
+        picked_chunks=picked,
+        rationale=rationale,
     )
