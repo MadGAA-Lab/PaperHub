@@ -196,6 +196,8 @@ def build_paperhub_papers_server() -> FastMCP:
     every other MCP server entry in ``mcp_servers.toml`` uses.
     """
     server = FastMCP(SERVER_NAME, streamable_http_path="/")
+    server.settings.json_response = True
+    server.settings.stateless_http = True
     schemas_by_name: dict[str, dict[str, Any]] = {
         s["function"]["name"]: s["function"] for s in _BASE_PAPER_TOOL_SCHEMAS
     }

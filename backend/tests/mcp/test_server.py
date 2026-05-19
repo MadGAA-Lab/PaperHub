@@ -124,6 +124,20 @@ async def test_factory_returns_fastmcp_named_papers() -> None:
     assert server.name == "papers"
 
 
+async def test_factory_pins_json_stateless_mode() -> None:
+    """Production default must be json_response + stateless_http.
+
+    Without these, FastMCP's SSE-streaming response defers body iteration
+    past BaseHTTPMiddleware.dispatch's ``async with open_db(...)`` cleanup
+    — the tool handler runs with a closed DB connection and surfaces as
+    'no active connection' to the caller. Caught during the v2.6 manual
+    smoke; pin here so the production default can't silently drift.
+    """
+    server = build_paperhub_papers_server()
+    assert server.settings.json_response is True
+    assert server.settings.stateless_http is True
+
+
 async def test_tools_list_advertises_three_tools_matching_schemas() -> None:
     """The MCP server's tools/list output matches _BASE_PAPER_TOOL_SCHEMAS for the
     three Research Agent dispatchers (names + JSON-schemas)."""
