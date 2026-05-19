@@ -32,6 +32,14 @@ class Settings:
     # disk usage when the cache miss writes the file under
     # papers_cache/. (v2.9-1)
     max_upload_mb: int
+    # Per-paper paper_qa subagent (Plan C v2.10-3).
+    # A lightweight model is used here because the subagent only needs
+    # to read section text and extract citations — it doesn't synthesise
+    # across papers. The finalizer (paper_qa_model) handles synthesis.
+    paper_qa_subagent_model: str
+    # Maximum number of read_section() tool calls the subagent is
+    # allowed per paper turn before the loop is force-stopped.
+    paper_qa_max_section_reads: int
 
 
 def load_settings() -> Settings:
@@ -60,4 +68,10 @@ def load_settings() -> Settings:
             "PAPERHUB_INPROCESS_MODELS", "0",
         ) not in ("0", "", "false", "False"),
         max_upload_mb=int(os.environ.get("PAPERHUB_MAX_UPLOAD_MB", "30")),
+        paper_qa_subagent_model=os.environ.get(
+            "PAPERHUB_PAPER_QA_SUBAGENT_MODEL", "gemini/gemini-2.5-flash-lite",
+        ),
+        paper_qa_max_section_reads=int(
+            os.environ.get("PAPERHUB_PAPER_QA_MAX_SECTION_READS", "5"),
+        ),
     )
