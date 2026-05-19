@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, model_validator
 
@@ -19,7 +20,13 @@ from paperhub.agents.research_tools import (
 from paperhub.api.deps import get_chroma
 from paperhub.config import load_settings
 from paperhub.db.connection import open_db
-from paperhub.pipelines.paper_pipeline import ArxivMetadata, PaperPipeline
+from paperhub.pipelines.paper_pipeline import (
+    ArxivMetadata,
+    IngestRequest,
+    PaperPipeline,
+)
+
+_PDF_MIME = "application/pdf"
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +172,84 @@ async def ingest_paper(body: IngestBody, request: Request) -> IngestResponse:
         ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return IngestResponse(
+        paper_content_id=result.paper_content_id,
+        papers_id=result.papers_id,
+        cache_hit=result.cache_hit,
+        title=result.title,
+    )
+
+
+@router.post("/upload", response_model=IngestResponse, status_code=201)
+async def upload_paper(
+    request: Request,
+    session_id: int = Form(..., ge=1),
+    file: UploadFile = File(...),  # noqa: B008 — FastAPI parameter declaration idiom
+) -> IngestResponse:
+    """Accept a multipart PDF upload, sha256-key it, run the pipeline.
+
+    Bypasses ``add_paper_to_session_dispatch`` because that function is
+    paper_id-string-keyed (``arxiv:`` / ``ss:`` / ``library:`` prefixes);
+    file bytes don't belong in the LLM-visible tool surface. Calls
+    ``PaperPipeline.ingest()`` directly with an upload_path IngestRequest.
+
+    Streams the request body to a tempfile in 1 MiB blocks so we never
+    materialise the full PDF in process memory, and enforces the
+    PAPERHUB_MAX_UPLOAD_MB ceiling on the byte count as we go (so a
+    pathological client that lies about Content-Length can't fill the
+    disk).
+    """
+    settings = load_settings()
+    max_bytes = settings.max_upload_mb * 1024 * 1024
+
+    if file.content_type != _PDF_MIME:
+        raise HTTPException(
+            415,
+            f"unsupported content_type={file.content_type!r}; "
+            f"expected {_PDF_MIME}",
+        )
+
+    # Stream to a tempdir, preserving the client-supplied filename so the
+    # pipeline's title fallback (``upload_path.stem``) and cache-filename
+    # derivation (``cache_dir / upload_path.name``) reflect the upload
+    # rather than an opaque ``tmpXXXX`` token. We sandbox via tempdir +
+    # Path.name to strip any path components the client might inject.
+    tmpdir = tempfile.mkdtemp(prefix="paperhub-upload-")
+    safe_name = Path(file.filename or "upload.pdf").name or "upload.pdf"
+    upload_path = Path(tmpdir) / safe_name
+    bytes_written = 0
+    try:
+        with upload_path.open("wb") as out:
+            while chunk := await file.read(1 << 20):  # 1 MiB blocks
+                bytes_written += len(chunk)
+                if bytes_written > max_bytes:
+                    raise HTTPException(
+                        413,
+                        f"file exceeds {settings.max_upload_mb} MiB ceiling",
+                    )
+                out.write(chunk)
+
+        async with open_db(settings.db_path) as conn:
+            pipeline = PaperPipeline(
+                conn,
+                papers_cache_dir=settings.papers_cache_dir,
+                chroma=get_chroma(request, settings),
+            )
+            result = await pipeline.ingest(
+                IngestRequest(
+                    session_id=session_id,
+                    upload_path=upload_path,
+                    upload_kind="pdf",
+                ),
+            )
+    finally:
+        try:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except OSError as exc:
+            logger.warning(
+                "failed to remove upload tempdir %s: %s", tmpdir, exc,
+            )
+
     return IngestResponse(
         paper_content_id=result.paper_content_id,
         papers_id=result.papers_id,

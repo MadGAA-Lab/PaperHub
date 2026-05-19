@@ -26,6 +26,12 @@ class Settings:
     # trip, no port conflicts) and for environments where the operator
     # can't spawn an extra process.
     inprocess_models: bool
+    # Maximum size (MiB) accepted by POST /papers/upload before the
+    # endpoint returns 413. The default (30 MiB) comfortably covers
+    # typical conference-paper PDFs while still bounding memory and
+    # disk usage when the cache miss writes the file under
+    # papers_cache/. (v2.9-1)
+    max_upload_mb: int
 
 
 def load_settings() -> Settings:
@@ -53,4 +59,5 @@ def load_settings() -> Settings:
         inprocess_models=os.environ.get(
             "PAPERHUB_INPROCESS_MODELS", "0",
         ) not in ("0", "", "false", "False"),
+        max_upload_mb=int(os.environ.get("PAPERHUB_MAX_UPLOAD_MB", "30")),
     )

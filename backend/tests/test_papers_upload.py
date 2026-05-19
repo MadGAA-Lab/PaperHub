@@ -1,0 +1,130 @@
+"""Tests for POST /papers/upload — multipart PDF ingest endpoint (v2.9-1).
+
+Mirrors the test_papers_api.py pattern: per-test isolated DB via tmp_path +
+PAPERHUB_WORKSPACE monkeypatch + create_app(), so no shared state across
+tests. The pipeline is exercised end-to-end with a real 1-page sample PDF
+fixture (the in-process embedder + reranker are activated by conftest's
+PAPERHUB_INPROCESS_MODELS=1 default).
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import aiosqlite
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from paperhub.app import create_app
+from paperhub.db.migrate import apply_schema
+
+
+async def _seed_session(conn: aiosqlite.Connection) -> int:
+    await conn.execute("INSERT INTO chat_sessions DEFAULT VALUES")
+    await conn.commit()
+    async with conn.execute("SELECT last_insert_rowid()") as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+async def _setup_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> int:
+    """Point PAPERHUB_WORKSPACE at tmp_path, migrate the DB, seed a session.
+
+    Returns the seeded session_id.
+    """
+    monkeypatch.setenv("PAPERHUB_WORKSPACE", str(tmp_path))
+    db_path = tmp_path / "paperhub.db"
+    async with aiosqlite.connect(db_path) as conn:
+        await apply_schema(conn)
+        return await _seed_session(conn)
+
+
+@pytest.mark.asyncio
+async def test_upload_pdf_happy_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = await _setup_workspace(tmp_path, monkeypatch)
+    sample_pdf = Path(__file__).parent / "fixtures" / "papers" / "sample.pdf"
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        with sample_pdf.open("rb") as f:
+            r = await ac.post(
+                "/papers/upload",
+                data={"session_id": str(session_id)},
+                files={"file": ("sample.pdf", f, "application/pdf")},
+            )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["cache_hit"] is False
+    assert body["paper_content_id"] >= 1
+    assert body["papers_id"] >= 1
+    assert body["title"] == "sample"  # upload_path.stem fallback per pipeline
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_non_pdf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = await _setup_workspace(tmp_path, monkeypatch)
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        r = await ac.post(
+            "/papers/upload",
+            data={"session_id": str(session_id)},
+            files={"file": ("a.txt", b"hello", "text/plain")},
+        )
+    assert r.status_code == 415
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_oversize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = await _setup_workspace(tmp_path, monkeypatch)
+    monkeypatch.setenv("PAPERHUB_MAX_UPLOAD_MB", "1")
+    app = create_app()
+    transport = ASGITransport(app=app)
+    big = b"%PDF-1.4\n" + b"\x00" * (2 * 1024 * 1024)  # 2 MiB > 1 MiB cap
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        r = await ac.post(
+            "/papers/upload",
+            data={"session_id": str(session_id)},
+            files={"file": ("big.pdf", big, "application/pdf")},
+        )
+    assert r.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_upload_same_bytes_returns_cache_hit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = await _setup_workspace(tmp_path, monkeypatch)
+    sample_pdf = Path(__file__).parent / "fixtures" / "papers" / "sample.pdf"
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        with sample_pdf.open("rb") as f:
+            first = await ac.post(
+                "/papers/upload",
+                data={"session_id": str(session_id)},
+                files={"file": ("sample.pdf", f, "application/pdf")},
+            )
+        with sample_pdf.open("rb") as f:
+            second = await ac.post(
+                "/papers/upload",
+                data={"session_id": str(session_id)},
+                files={"file": ("sample.pdf", f, "application/pdf")},
+            )
+    assert first.status_code == 201, first.text
+    assert second.status_code == 201, second.text
+    first_body: dict[str, Any] = first.json()
+    second_body: dict[str, Any] = second.json()
+    assert second_body["cache_hit"] is True
+    assert second_body["paper_content_id"] == first_body["paper_content_id"]
