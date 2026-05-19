@@ -114,13 +114,19 @@ async def _setup_workspace(
 async def test_upload_pdf_happy_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Filename-stem fallback path: PDF carries no metadata title AND no
+    extractable page-1 title, so the pipeline falls through to the
+    upload_path.stem default. Uses a synthesised blank-page PDF — the
+    on-disk ``sample.pdf`` fixture would defeat this test because its
+    page-1 text contains "A Tiny Test Paper" at large font, which the
+    v2.9 page-1-largest-font heuristic would extract."""
     session_id = await _setup_workspace(tmp_path, monkeypatch)
-    sample_pdf = Path(__file__).parent / "fixtures" / "papers" / "sample.pdf"
+    pdf_path = _build_pdf_with_metadata(tmp_path, title="")
 
     app = create_app()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        with sample_pdf.open("rb") as f:
+        with pdf_path.open("rb") as f:
             r = await ac.post(
                 "/papers/upload",
                 data={"session_id": str(session_id)},
@@ -175,14 +181,17 @@ async def test_upload_sanitises_path_traversal_filename(
     """Client-supplied ``../../../etc/passwd.pdf`` must be collapsed to
     ``passwd.pdf`` by ``Path(...).name``; the file lands inside the
     tempdir sandbox, and the pipeline's title fallback uses the
-    sanitised stem (``passwd``). Pins the existing sandbox behaviour."""
+    sanitised stem (``passwd``). Pins the existing sandbox behaviour.
+
+    Uses a blank-page PDF so the page-1-largest-font heuristic returns
+    empty and the filename-stem fallback is genuinely exercised."""
     session_id = await _setup_workspace(tmp_path, monkeypatch)
-    sample_pdf = Path(__file__).parent / "fixtures" / "papers" / "sample.pdf"
+    pdf_path = _build_pdf_with_metadata(tmp_path, title="")
 
     app = create_app()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        with sample_pdf.open("rb") as f:
+        with pdf_path.open("rb") as f:
             r = await ac.post(
                 "/papers/upload",
                 data={"session_id": str(session_id)},
@@ -208,14 +217,17 @@ async def test_upload_filename_sanitises_to_empty_falls_back_to_upload_stem(
     ``or "upload.pdf"`` second fallback must kick in, yielding a
     pipeline title stem of ``upload``. Pins the defensive fallback
     that prevents an empty-filename UploadFile from writing to the
-    tempdir root."""
+    tempdir root.
+
+    Uses a blank-page PDF so the page-1-largest-font heuristic returns
+    empty and the filename-stem fallback is genuinely exercised."""
     session_id = await _setup_workspace(tmp_path, monkeypatch)
-    sample_pdf = Path(__file__).parent / "fixtures" / "papers" / "sample.pdf"
+    pdf_path = _build_pdf_with_metadata(tmp_path, title="")
 
     app = create_app()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        with sample_pdf.open("rb") as f:
+        with pdf_path.open("rb") as f:
             r = await ac.post(
                 "/papers/upload",
                 data={"session_id": str(session_id)},
@@ -271,14 +283,17 @@ async def test_upload_pdf_blank_title_falls_back_to_filename_stem(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Whitespace-only ``title`` must NOT shadow the filename-stem fallback.
-    Empty/blank user input is treated as "no override supplied"."""
+    Empty/blank user input is treated as "no override supplied".
+
+    Uses a blank-page PDF so the page-1-largest-font heuristic returns
+    empty and the filename-stem fallback is genuinely exercised."""
     session_id = await _setup_workspace(tmp_path, monkeypatch)
-    sample_pdf = Path(__file__).parent / "fixtures" / "papers" / "sample.pdf"
+    pdf_path = _build_pdf_with_metadata(tmp_path, title="")
 
     app = create_app()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        with sample_pdf.open("rb") as f:
+        with pdf_path.open("rb") as f:
             r = await ac.post(
                 "/papers/upload",
                 data={"session_id": str(session_id), "title": "   "},
@@ -294,14 +309,17 @@ async def test_upload_pdf_no_title_field_falls_back_to_filename_stem(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Regression test: omitting the new ``title`` Form field entirely must
-    keep the existing happy-path behaviour (filename-stem fallback)."""
+    keep the existing happy-path behaviour (filename-stem fallback).
+
+    Uses a blank-page PDF so the page-1-largest-font heuristic returns
+    empty and the filename-stem fallback is genuinely exercised."""
     session_id = await _setup_workspace(tmp_path, monkeypatch)
-    sample_pdf = Path(__file__).parent / "fixtures" / "papers" / "sample.pdf"
+    pdf_path = _build_pdf_with_metadata(tmp_path, title="")
 
     app = create_app()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        with sample_pdf.open("rb") as f:
+        with pdf_path.open("rb") as f:
             r = await ac.post(
                 "/papers/upload",
                 data={"session_id": str(session_id)},
