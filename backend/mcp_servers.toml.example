@@ -78,8 +78,16 @@ timeout_seconds = 8.0
 #     unrelated to MCP. Using `serve` boots the wrong service and the
 #     registry probe of `:3000` times out.
 # Bare + `MODE=http` (or `both`) starts the MCP server on $PORT.
+#
+# Engine allowlist: bing's hardcoded `cn.bing.com` endpoint 301-redirects
+# most non-China traffic, and the daemon's bing engine ships with
+# `trustedStaticHost: true` → `maxRedirects = 0`, so axios surfaces the
+# 301 as `engine_error` and bing returns 0 results for every query.
+# Pinning `ALLOWED_SEARCH_ENGINES` keeps bing out of the engine pool
+# entirely and forces the daemon to pick a working default. Operators
+# on a Chinese network who want bing back can override this block.
 launch = ["npx", "-y", "open-websearch@latest"]
-launch_env = { PORT = "3000", MODE = "http" }
+launch_env = { PORT = "3000", MODE = "http", ALLOWED_SEARCH_ENGINES = "duckduckgo,brave,startpage", DEFAULT_SEARCH_ENGINE = "duckduckgo" }
 launch_ready_timeout = 30.0   # first run downloads the package; ~25s observed
 
 # ─── future blocks ───────────────────────────────────────────────────────
