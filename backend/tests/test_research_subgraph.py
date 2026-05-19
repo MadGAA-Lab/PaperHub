@@ -313,6 +313,4 @@ async def test_paper_qa_subgraph_all_empty_picks_yields_no_content_message(
     assert not adapter.calls, f"Adapter should not be called; got: {adapter.calls}"
     # final_response is the no-content sentinel.
     assert "final_response" in final_state
-    assert "checked every enabled reference" in final_state["final_response"].lower() or \
-           "no relevant" in final_state["final_response"].lower() or \
-           "none contained" in final_state["final_response"].lower()
+    assert "I checked every enabled reference" in final_state["final_response"]

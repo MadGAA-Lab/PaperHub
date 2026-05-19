@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import aiosqlite
@@ -53,9 +53,6 @@ from paperhub.agents.research import (
     SearchCandidate,
     _resolve_enabled_papers,
     paper_qa_finalize,
-)
-from paperhub.agents.research import (
-    paper_qa_stream as _default_paper_qa_stream,
 )
 from paperhub.agents.research_pipeline import (
     MAX_REFINEMENT_LOOPS,
@@ -77,22 +74,12 @@ from paperhub.tracing.tracer import Tracer
 
 ResearchExtraKwargs = dict[str, Any]
 PaperSearchFn = Callable[..., AsyncIterator[Any]]
-PaperQaStreamFn = Callable[..., AsyncIterator[Any]]
 
 
 @dataclass
 class ResearchDeps:
     """Per-request dependencies bound into the research subgraph at build
     time via closure. Rebuilt every chat turn (LangGraph compile is cheap).
-
-    ``paper_search_fn`` / ``paper_qa_stream_fn`` are retained for
-    backwards-compatibility with callers that want to inject a fake
-    end-to-end async generator (e.g. ``chat.py`` exposes the legacy
-    ``paper_search`` / ``paper_qa_stream`` module-level attributes so
-    ``test_chat_sse.py`` can monkeypatch them with fakes — that path
-    bypasses the subgraph entirely and feeds a fake generator straight
-    into the SSE translation loop). The subgraph nodes themselves call
-    the underlying helpers directly via the other fields.
     """
 
     adapter: LlmAdapter
@@ -109,10 +96,6 @@ class ResearchDeps:
     # affecting the Synthesizer's prose quality.
     paper_search_parser_model: str | None = None
     paper_search_synth_model: str | None = None
-    # Legacy generator hooks (paper_qa only — paper_search no longer has
-    # a legacy generator). Kept so test_chat_sse.py can monkeypatch
-    # paper_qa_stream with a fake.
-    paper_qa_stream_fn: PaperQaStreamFn = field(default=_default_paper_qa_stream)
     # v2.10: per-paper subagent model + read budget.
     paper_qa_subagent_model: str = "gemini/gemini-2.5-flash-lite"
     paper_qa_max_section_reads: int = 5
@@ -423,7 +406,7 @@ def build_paper_qa_subgraph(deps: ResearchDeps) -> Any:
     async def _pq_finalize(state: AgentState) -> AgentState:
         writer = get_stream_writer()
         picks: list[PerPaperPicks] = list(state.get("pq_per_paper_picks") or [])
-        if all(not p.picked_chunks for p in picks):
+        if not picks or all(not p.picked_chunks for p in picks):
             return {
                 **state,
                 "final_response": (
