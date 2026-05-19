@@ -179,10 +179,19 @@ class MCPRegistry:
         )
         try:
             proc = await asyncio.create_subprocess_exec(*argv, env=env)
-        except OSError as exc:
+        except (OSError, NotImplementedError) as exc:
+            # NotImplementedError surfaces on Windows when uvicorn is
+            # running on SelectorEventLoop (no subprocess support).
+            # Don't abort startup — the registry already handles
+            # "daemon not reachable" gracefully (tools just don't
+            # enter the palette). Operator can launch the daemon
+            # manually with the documented `npx -y open-websearch`
+            # incantation.
             _LOG.warning(
-                "mcp.registry %s: subprocess spawn failed (%s); skipping launch",
-                cfg.name, exc,
+                "mcp.registry %s: subprocess spawn failed (%s: %s); "
+                "skipping launch. If you need the daemon, run it "
+                "manually: %s",
+                cfg.name, type(exc).__name__, exc, " ".join(cmd),
             )
             return
         self._launched[cfg.name] = proc

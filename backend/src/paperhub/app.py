@@ -1,12 +1,22 @@
+import asyncio
 import logging
 import os
 import shutil
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# On Windows, asyncio's SelectorEventLoop doesn't support subprocess
+# spawn (NotImplementedError from `create_subprocess_exec`). The MCP
+# registry needs to spawn `npx open-websearch` on first boot, so force
+# the Proactor loop policy BEFORE uvicorn binds an event loop. No-op
+# on non-Windows (the policy doesn't exist there).
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 from paperhub.api import chat, health
 from paperhub.api import papers as papers_api
