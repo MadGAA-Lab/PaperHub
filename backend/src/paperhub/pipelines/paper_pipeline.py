@@ -23,7 +23,13 @@ from typing import Literal
 import aiosqlite
 import httpx
 
-from paperhub.pipelines.arxiv_client import download_arxiv_source, search_arxiv
+from paperhub.pipelines.arxiv_client import (
+    _TRANSIENT_DOWNLOAD_EXCEPTIONS,
+    TarballCorrupt,
+    download_arxiv_pdf,
+    download_arxiv_source,
+    search_arxiv,
+)
 from paperhub.pipelines.chunker import Chunk, chunk_text
 from paperhub.pipelines.embedder import Embedder, get_embedder
 from paperhub.pipelines.extract import extract_latex, extract_pdf
@@ -179,13 +185,26 @@ class PaperPipeline:
     ) -> tuple[int, int, str]:
         assert req.arxiv_id is not None
         arxiv_id = req.arxiv_id
-
-        # Download source tarball (sync — see module docstring).
-        source_dir = download_arxiv_source(
-            arxiv_id,
-            cache_root=self._cache_root / "arxiv",
-        )
         cache_dir = self._cache_root / "arxiv" / arxiv_id
+
+        # Prefer the e-print tarball (LaTeX → high-fidelity equations
+        # in the Citation Canvas). Fall back to PDF only when the
+        # source path is genuinely unrecoverable — both the resume-
+        # capable downloader giving up AND a corrupt-tarball signal
+        # qualify. The fallback persists with the same content_key
+        # (``arxiv:<id>``) so future re-ingests still hit the cache.
+        _src_fallback_exc: tuple[type[BaseException], ...] = (
+            *_TRANSIENT_DOWNLOAD_EXCEPTIONS, TarballCorrupt,
+        )
+        try:
+            source_dir = download_arxiv_source(
+                arxiv_id,
+                cache_root=self._cache_root / "arxiv",
+            )
+        except _src_fallback_exc as exc:
+            return await self._ingest_arxiv_via_pdf(
+                req, content_key, arxiv_id, cache_dir, reason=exc,
+            )
 
         # Extract LaTeX text.
         ext = extract_latex(source_dir)
@@ -222,6 +241,73 @@ class PaperPipeline:
             sha256=None,
             metadata=metadata,
             source_path=source_path,
+            source_dir_path=cache_dir,
+            html_path=html_path,
+            chunks=chunks,
+        )
+
+        self._chroma.add_chunks(
+            paper_content_id=paper_content_id,
+            chunk_ids=chunk_ids,
+            texts=texts,
+            embeddings=embeddings,
+        )
+
+        papers_id = await self._link_to_session(req.session_id, paper_content_id)
+        return paper_content_id, papers_id, str(metadata.get("title", ""))
+
+    async def _ingest_arxiv_via_pdf(
+        self,
+        req: IngestRequest,
+        content_key: str,
+        arxiv_id: str,
+        cache_dir: Path,
+        *,
+        reason: BaseException,
+    ) -> tuple[int, int, str]:
+        """Fallback path when the arxiv e-print tarball is unavailable.
+
+        Equation fidelity is lower than LaTeX rendering (PDF text
+        extraction collapses math to glyph soup in many cases), but the
+        paper is still ingestible end-to-end: chunked, embedded,
+        searchable, and rendered in the Citation Canvas. Persisted with
+        kind="arxiv" (the paper IS from arxiv; the kind enum reflects
+        source identifier, not rendering path) and the same content_key
+        as the LaTeX path so cache lookups stay coherent across modes.
+        """
+        import logging
+        logging.getLogger(__name__).warning(
+            "arxiv source tarball unavailable for %s (%s: %s); "
+            "falling back to PDF ingest. Equation rendering quality "
+            "will be lower than LaTeX.",
+            arxiv_id, type(reason).__name__, reason,
+        )
+
+        pdf_path = download_arxiv_pdf(
+            arxiv_id, cache_root=self._cache_root / "arxiv",
+        )
+
+        full_text = extract_pdf(pdf_path)
+        html_path = cache_dir / "source.html"
+        render_html(source=pdf_path, kind="pdf", out_path=html_path)
+
+        metadata: dict[str, object] = (
+            asdict(req.metadata_override)
+            if req.metadata_override is not None
+            else self._lookup_arxiv_metadata(arxiv_id)
+        )
+
+        chunks = chunk_text(full_text)
+        texts = [c.text for c in chunks]
+        embeddings = self._embedder.embed(texts)
+
+        paper_content_id, chunk_ids = await self._persist_paper_content_and_chunks(
+            content_key=content_key,
+            kind="arxiv",
+            arxiv_id=arxiv_id,
+            sha256=None,
+            metadata=metadata,
+            source_path=pdf_path,
             source_dir_path=cache_dir,
             html_path=html_path,
             chunks=chunks,

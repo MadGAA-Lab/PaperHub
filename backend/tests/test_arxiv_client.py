@@ -10,6 +10,8 @@ import respx
 
 from paperhub.pipelines.arxiv_client import (
     ArxivResult,
+    TarballCorrupt,
+    download_arxiv_pdf,
     download_arxiv_source,
     search_arxiv,
 )
@@ -214,6 +216,11 @@ def test_download_arxiv_source_retries_on_transient_transport_error(
     class _FakeStream:
         def __init__(self, fail_first: bool) -> None:
             self._fail_first = fail_first
+            # The resume-capable downloader reads status_code to decide
+            # whether to append (206) / restart (200) / treat-as-done
+            # (416). Stub the second-attempt response as 206 so the
+            # resume path is exercised.
+            self.status_code = 206 if not fail_first else 200
 
         def __enter__(self) -> "_FakeStream":
             return self
@@ -231,9 +238,18 @@ def test_download_arxiv_source_retries_on_transient_transport_error(
                 )
             return iter([tarball_bytes])
 
-    def _fake_httpx_stream(*_args: object, **_kwargs: object) -> _FakeStream:
+    def _fake_httpx_stream(
+        *_args: object, **kwargs: object,
+    ) -> _FakeStream:
         call_count["n"] += 1
-        return _FakeStream(fail_first=call_count["n"] == 1)
+        # The resume path passes Range: bytes=<N>- on attempt #2.
+        # When no Range header is present (attempt #1) we MUST claim
+        # 200 OK; when Range IS present (attempt #2) we MUST claim 206.
+        headers = kwargs.get("headers") or {}
+        has_range = isinstance(headers, dict) and "Range" in headers
+        stream = _FakeStream(fail_first=call_count["n"] == 1)
+        stream.status_code = 206 if has_range else 200
+        return stream
 
     monkeypatch.setattr(
         "paperhub.pipelines.arxiv_client.httpx.stream", _fake_httpx_stream,
@@ -258,6 +274,11 @@ def test_download_arxiv_source_gives_up_after_max_attempts(
     call_count = {"n": 0}
 
     class _AlwaysFailStream:
+        # Default to 200 OK so the resume-path check doesn't trip on
+        # the missing-attribute branch; iter_bytes raises before status
+        # actually matters anyway.
+        status_code = 200
+
         def __enter__(self) -> "_AlwaysFailStream":
             return self
 
@@ -285,3 +306,150 @@ def test_download_arxiv_source_gives_up_after_max_attempts(
         download_arxiv_source("2503.00002", cache_root=tmp_path / "cache")
     # 3 attempts total per _DOWNLOAD_MAX_ATTEMPTS
     assert call_count["n"] == 3
+
+
+def test_download_arxiv_source_resumes_via_range_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: when a mid-stream disconnect drops a large tarball
+    after some bytes have already been written, the second attempt
+    must issue ``Range: bytes=<existing>-`` and APPEND to the partial
+    file instead of restarting from byte 0. Critical for big papers
+    (40+ MB e-prints) where naive retry keeps tripping the same
+    timeout."""
+    src_text = r"\documentclass{article}\begin{document}Resumed\end{document}"
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo(name="main.tex")
+        info.size = len(src_text)
+        tar.addfile(info, io.BytesIO(src_text.encode("utf-8")))
+    tarball_bytes = buf.getvalue()
+    # Split the tarball at ~30% to simulate a mid-stream drop.
+    split = max(1, len(tarball_bytes) // 3)
+    first_chunk = tarball_bytes[:split]
+    rest = tarball_bytes[split:]
+
+    seen_ranges: list[str | None] = []
+
+    class _Stream:
+        def __init__(self, attempt: int, range_header: str | None) -> None:
+            self._attempt = attempt
+            self._range_header = range_header
+            self.status_code = 206 if range_header else 200
+
+        def __enter__(self) -> "_Stream":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_bytes(self) -> object:
+            if self._attempt == 1:
+                # Yield part of the tarball, then disconnect.
+                def gen() -> object:
+                    yield first_chunk
+                    raise httpx.RemoteProtocolError("mid-stream drop")
+                return gen()
+            return iter([rest])
+
+    call_count = {"n": 0}
+
+    def _fake_stream(*_args: object, **kwargs: object) -> _Stream:
+        call_count["n"] += 1
+        headers = kwargs.get("headers") or {}
+        rng = headers.get("Range") if isinstance(headers, dict) else None
+        seen_ranges.append(rng)
+        return _Stream(attempt=call_count["n"], range_header=rng)
+
+    monkeypatch.setattr(
+        "paperhub.pipelines.arxiv_client.httpx.stream", _fake_stream,
+    )
+    monkeypatch.setattr(
+        "paperhub.pipelines.arxiv_client.time.sleep", lambda _s: None,
+    )
+
+    source_dir = download_arxiv_source("2503.00099", cache_root=tmp_path / "cache")
+    assert call_count["n"] == 2, (
+        f"expected 2 attempts (drop + resume), got {call_count['n']}"
+    )
+    # First attempt: no Range header (nothing partial yet).
+    assert seen_ranges[0] is None
+    # Second attempt: Range header pointing at the partial-file end.
+    assert seen_ranges[1] == f"bytes={split}-", (
+        f"expected Range: bytes={split}-, got {seen_ranges[1]!r}"
+    )
+    # And the tarball was reconstructed correctly + extracted.
+    assert (source_dir / "main.tex").exists()
+    assert (source_dir / "main.tex").read_text(encoding="utf-8") == src_text
+
+
+def test_download_arxiv_source_raises_tarball_corrupt_on_bad_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the byte stream completes but the resulting file isn't a
+    valid gzip tarball (server returned HTML / 200 page / corrupt
+    bytes), surface ``TarballCorrupt`` so the Paper Pipeline can
+    fall back to the PDF path instead of aborting ingest."""
+    class _Stream:
+        status_code = 200
+
+        def __enter__(self) -> "_Stream":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_bytes(self) -> object:
+            return iter([b"<html>Not a tarball</html>"])
+
+    monkeypatch.setattr(
+        "paperhub.pipelines.arxiv_client.httpx.stream",
+        lambda *a, **k: _Stream(),
+    )
+    monkeypatch.setattr(
+        "paperhub.pipelines.arxiv_client.time.sleep", lambda _s: None,
+    )
+
+    with pytest.raises(TarballCorrupt):
+        download_arxiv_source("2503.00100", cache_root=tmp_path / "cache")
+
+
+def test_download_arxiv_pdf_writes_to_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PDF fallback writes ``<cache>/<arxiv_id>/source.pdf`` and returns
+    the path. Same resume-capable downloader as the source tarball."""
+    pdf_bytes = b"%PDF-1.4\n... fake pdf ...\n%%EOF\n"
+
+    class _Stream:
+        status_code = 200
+
+        def __enter__(self) -> "_Stream":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_bytes(self) -> object:
+            return iter([pdf_bytes])
+
+    monkeypatch.setattr(
+        "paperhub.pipelines.arxiv_client.httpx.stream",
+        lambda *a, **k: _Stream(),
+    )
+
+    out = download_arxiv_pdf("2510.10274", cache_root=tmp_path / "cache")
+    assert out == tmp_path / "cache" / "2510.10274" / "source.pdf"
+    assert out.read_bytes() == pdf_bytes

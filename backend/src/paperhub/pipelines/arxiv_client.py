@@ -43,6 +43,15 @@ _TRANSIENT_DOWNLOAD_EXCEPTIONS: tuple[type[BaseException], ...] = (
 )
 
 
+class TarballCorrupt(RuntimeError):
+    """Raised when arxiv's e-print tarball downloaded successfully (HTTP
+    OK, full byte count) but is structurally unreadable as a gzip+tar
+    archive. The Paper Pipeline catches this and falls back to PDF
+    ingest — equation fidelity is lower but the paper is still
+    ingestible end-to-end.
+    """
+
+
 class ArxivResult(BaseModel):
     arxiv_id: str
     title: str
@@ -85,6 +94,107 @@ def search_arxiv(query: str, max_results: int = 10) -> list[ArxivResult]:
     return results
 
 
+def _download_with_resume(url: str, target_path: Path) -> None:
+    """Download ``url`` to ``target_path`` with byte-range resume across
+    retries. On a mid-stream disconnect, the next attempt issues
+    ``Range: bytes=<existing>-`` and appends to the partial file
+    instead of restarting from byte 0.
+
+    Server behaviour matrix:
+      * 206 Partial Content   — server honoured the range; append to file
+      * 200 OK + Range sent   — server ignored the range; wipe and rewrite
+      * 416 Range Not Satisfiable AND existing file size matches the
+        Content-Range "*/N" tail — file is already complete; return
+      * any other 4xx/5xx     — raise (caller decides)
+
+    On transient connection errors (RemoteProtocolError, ReadError, …)
+    the partial bytes are KEPT so the next attempt can resume.
+    """
+    last_exc: BaseException | None = None
+    for attempt in range(1, _DOWNLOAD_MAX_ATTEMPTS + 1):
+        existing_bytes = target_path.stat().st_size if target_path.exists() else 0
+        headers: dict[str, str] = {"User-Agent": _USER_AGENT}
+        if existing_bytes > 0:
+            headers["Range"] = f"bytes={existing_bytes}-"
+
+        try:
+            with httpx.stream(
+                "GET", url,
+                timeout=_DOWNLOAD_TIMEOUT,
+                follow_redirects=True,
+                headers=headers,
+            ) as resp:
+                if resp.status_code == 416 and existing_bytes > 0:
+                    # Most likely the file is already fully downloaded —
+                    # the existing bytes equal Content-Length and the
+                    # server has nothing more to give us. Treat as done.
+                    logger.info(
+                        "download_with_resume %s: 416 Range Not Satisfiable "
+                        "with existing=%d bytes; treating as complete",
+                        url, existing_bytes,
+                    )
+                    return
+                if existing_bytes > 0 and resp.status_code == 200:
+                    # Server ignored our Range header (some mirrors do
+                    # this under load). Wipe and restart from byte 0.
+                    logger.info(
+                        "download_with_resume %s: server returned 200 "
+                        "despite Range header; restarting from byte 0",
+                        url,
+                    )
+                    target_path.unlink(missing_ok=True)
+                    existing_bytes = 0
+                resp.raise_for_status()
+                mode = "ab" if existing_bytes > 0 else "wb"
+                with target_path.open(mode) as f:
+                    for chunk in resp.iter_bytes():
+                        f.write(chunk)
+            return  # success
+        except _TRANSIENT_DOWNLOAD_EXCEPTIONS as exc:
+            last_exc = exc
+            new_bytes = target_path.stat().st_size if target_path.exists() else 0
+            if attempt >= _DOWNLOAD_MAX_ATTEMPTS:
+                logger.warning(
+                    "download_with_resume %s: failed after %d attempts "
+                    "(%s: %s); final partial size=%d bytes",
+                    url, attempt, type(exc).__name__, exc, new_bytes,
+                )
+                raise
+            backoff = _DOWNLOAD_BACKOFF_BASE_S * (2 ** (attempt - 1))
+            backoff += random.uniform(0, 0.5)
+            logger.warning(
+                "download_with_resume %s: attempt %d/%d failed "
+                "(%s: %s); partial=%d bytes, retrying in %.1fs with resume",
+                url, attempt, _DOWNLOAD_MAX_ATTEMPTS,
+                type(exc).__name__, exc, new_bytes, backoff,
+            )
+            time.sleep(backoff)
+    # pragma: no cover — loop exits via return or raise.
+    if last_exc is not None:
+        raise last_exc
+
+
+def download_arxiv_pdf(arxiv_id: str, *, cache_root: Path) -> Path:
+    """Download the rendered PDF for ``arxiv_id`` to
+    ``cache_root / arxiv_id / source.pdf`` and return the path.
+
+    Used as the fallback when ``download_arxiv_source`` exhausts its
+    retry budget on the e-print tarball — every arxiv paper publishes
+    a PDF even when the LaTeX source is missing or refuses to download.
+    Equation fidelity is lower than LaTeX rendering but the paper is
+    still ingestible end-to-end.
+
+    Resume-capable via the same byte-range path as
+    ``download_arxiv_source``.
+    """
+    target_dir = cache_root / arxiv_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = target_dir / "source.pdf"
+    pdf_url = f"https://export.arxiv.org/pdf/{arxiv_id}"
+    _download_with_resume(pdf_url, pdf_path)
+    return pdf_path
+
+
 def download_arxiv_source(arxiv_id: str, *, cache_root: Path) -> Path:
     """Download the e-print source tarball for an arxiv_id, unpack into
     cache_root / arxiv_id / source/ — preserving the tarball's directory
@@ -101,68 +211,32 @@ def download_arxiv_source(arxiv_id: str, *, cache_root: Path) -> Path:
     # (https://info.arxiv.org/help/robots.html): the export mirror is set
     # aside for programmatic harvesting so the main site stays responsive
     # for interactive readers.
-    # Previously this called _client.results() to invoke Result.source_url(),
-    # but that method just builds the same URL by substituting "/pdf/" →
-    # "/src/" in the PDF URL.  Calling the arXiv metadata API here is a
-    # redundant round-trip (and a second hit on top of the one already made
-    # by _lookup_arxiv_metadata), which triggers arXiv's per-IP rate limit
-    # (HTTP 429) when ingesting an SS-sourced paper that already resolved
-    # metadata from Semantic Scholar.
     src_url = f"https://export.arxiv.org/src/{arxiv_id}"
 
-    # Fetch the tarball. arxiv 4.0 removed Result.download_source() — see
-    # arxiv/__init__.py: source_url derives from pdf_url by swapping
-    # "/pdf/" → "/src/". We download with httpx.
-    #
-    # Retry transient transport failures (RemoteProtocolError mid-stream,
-    # ReadTimeout, etc.). export.arxiv.org occasionally drops large
-    # transfers — observed empirically with a 22 MB tarball.
+    # Resume-capable downloader: across attempts, partial bytes are KEPT
+    # and continued via Range requests rather than re-fetched from byte
+    # 0. Critical for big papers (40+ MB e-prints) where export.arxiv
+    # drops connections under load.
     tar_path = target_dir / f"{arxiv_id}.tar.gz"
-    last_exc: BaseException | None = None
-    for attempt in range(1, _DOWNLOAD_MAX_ATTEMPTS + 1):
-        # Wipe any partial bytes from a prior failed attempt.
-        tar_path.unlink(missing_ok=True)
-        try:
-            with httpx.stream(
-                "GET", src_url,
-                timeout=_DOWNLOAD_TIMEOUT,
-                follow_redirects=True,
-                headers={"User-Agent": _USER_AGENT},
-            ) as resp:
-                resp.raise_for_status()
-                with tar_path.open("wb") as f:
-                    for chunk in resp.iter_bytes():
-                        f.write(chunk)
-            break  # success
-        except _TRANSIENT_DOWNLOAD_EXCEPTIONS as exc:
-            last_exc = exc
-            if attempt >= _DOWNLOAD_MAX_ATTEMPTS:
-                logger.warning(
-                    "arxiv download failed after %d attempts for %s: %s: %s",
-                    attempt, arxiv_id, type(exc).__name__, exc,
-                )
-                tar_path.unlink(missing_ok=True)
-                raise
-            # Exponential backoff with jitter: 2s, 4s, 8s, ...
-            backoff = _DOWNLOAD_BACKOFF_BASE_S * (2 ** (attempt - 1))
-            backoff += random.uniform(0, 0.5)
-            logger.warning(
-                "arxiv download attempt %d/%d for %s failed (%s: %s); "
-                "retrying in %.1fs",
-                attempt, _DOWNLOAD_MAX_ATTEMPTS, arxiv_id,
-                type(exc).__name__, exc, backoff,
-            )
-            time.sleep(backoff)
-    else:  # pragma: no cover — loop exits via break or raise
-        if last_exc is not None:
-            raise last_exc
+    _download_with_resume(src_url, tar_path)
 
     source_dir.mkdir(parents=True, exist_ok=True)
     # Resolve once so we can sanity-check that every extracted member stays
     # inside source_dir even after symlink/`..` resolution.
     source_dir_resolved = source_dir.resolve()
     try:
-        with tarfile.open(tar_path, "r:gz") as tar:
+        # If the tarball turned out corrupt (e.g. all retries together
+        # still left a truncated gzip stream), surface a TarballCorrupt
+        # so the caller can fall back to PDF rather than aborting ingest.
+        try:
+            tar = tarfile.open(tar_path, "r:gz")  # noqa: SIM115
+        except (tarfile.ReadError, EOFError, OSError) as exc:
+            tar_path.unlink(missing_ok=True)
+            raise TarballCorrupt(
+                f"arxiv source tarball for {arxiv_id} is unreadable: "
+                f"{type(exc).__name__}: {exc}",
+            ) from exc
+        with tar:
             # Preserve directory layout.  Many arxiv papers organise their
             # LaTeX with subdirectories (sections/, figures/, etc.); flattening
             # would break `\input{sections/foo}` resolution silently.  Refuse
