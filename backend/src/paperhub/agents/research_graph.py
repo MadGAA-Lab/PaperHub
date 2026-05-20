@@ -48,7 +48,11 @@ import aiosqlite
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
-from paperhub.agents.paper_qa_subagent import PerPaperPicks, run_paper_qa_subagent
+from paperhub.agents.paper_qa_subagent import (
+    MAX_SECTION_READS,
+    PerPaperPicks,
+    run_paper_qa_subagent,
+)
 from paperhub.agents.research import (
     SearchCandidate,
     _resolve_enabled_papers,
@@ -96,9 +100,15 @@ class ResearchDeps:
     # affecting the Synthesizer's prose quality.
     paper_search_parser_model: str | None = None
     paper_search_synth_model: str | None = None
-    # v2.10: per-paper subagent model + read budget.
-    paper_qa_subagent_model: str = "gemini/gemini-2.5-flash-lite"
-    paper_qa_max_section_reads: int = 5
+    # v2.10: per-paper subagent model + read budget. Optional with None
+    # default — same shape as paper_search_parser_model / synth_model
+    # above. Consumer (_pq_dispatch) falls back to deps.paper_qa_model
+    # for the model and the module-level MAX_SECTION_READS for the
+    # budget when None. Avoids a hardcoded model literal here that
+    # would silently shadow Settings overrides if a caller forgot to
+    # thread the field through (run-89 failure pattern).
+    paper_qa_subagent_model: str | None = None
+    paper_qa_max_section_reads: int | None = None
 
 
 def _kwargs(deps: ResearchDeps) -> ResearchExtraKwargs:
@@ -391,15 +401,25 @@ def build_paper_qa_subgraph(deps: ResearchDeps) -> Any:
         emitted_indices: set[int] = set()
         lock = asyncio.Lock()
 
+        # Fall back to the flagship paper_qa_model when no subagent-specific
+        # model was wired in, matching the paper_search_parser_model /
+        # paper_search_synth_model pattern at the top of this file.
+        subagent_model = deps.paper_qa_subagent_model or deps.paper_qa_model
+        max_reads = (
+            deps.paper_qa_max_section_reads
+            if deps.paper_qa_max_section_reads is not None
+            else MAX_SECTION_READS
+        )
+
         async def _one_with_emit(pid: int, title: str) -> PerPaperPicks:
             picks = await run_paper_qa_subagent(
                 paper_content_id=pid,
                 title=title,
                 user_message=state["user_message"],
                 tracer=deps.tracer,
-                model=deps.paper_qa_subagent_model,
+                model=subagent_model,
                 conn=deps.conn,
-                max_section_reads=deps.paper_qa_max_section_reads,
+                max_section_reads=max_reads,
                 **_kwargs(deps),
             )
             async with lock:
