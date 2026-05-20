@@ -264,8 +264,8 @@ def build_paper_search_subgraph(deps: ResearchDeps) -> Any:
         # Emit search_results event DETERMINISTICALLY from the resolved
         # set. Block emission is architectural, not LLM-driven — the
         # Synthesizer cannot accidentally drop it.
+        candidates: list[SearchCandidate] = []
         if resolved:
-            candidates: list[SearchCandidate] = []
             for r in resolved:
                 meta = r.meta if isinstance(r.meta, dict) else {}
                 year_val = meta.get("year")
@@ -304,6 +304,26 @@ def build_paper_search_subgraph(deps: ResearchDeps) -> Any:
                     ),
                 )
             writer({"event": "search_results", "candidates": candidates})
+
+        # Observability (harness eval): record the candidates emitted to the
+        # user + the resolved/not_found breakdown in a dedicated tracer row.
+        # The SSE search_results event is ephemeral; this row makes the
+        # final paper_search output reconstruct-able from tool_calls alone.
+        async with deps.tracer.step(
+            agent="research", tool="paper_search:finalize", model=None,
+        ) as fin_step:
+            fin_step.record_args({
+                "resolved_count": len(resolved),
+                "not_found_count": len(not_found),
+            })
+            fin_step.record_result({
+                "emitted_candidates": [
+                    {"paper_id": c.paper_id, "title": c.title, "finalize": c.finalize}
+                    for c in candidates
+                ],
+                "resolved_count": len(resolved),
+                "not_found": [req.hint for req in not_found],
+            })
 
         prose = await synthesize_prose(
             resolved,

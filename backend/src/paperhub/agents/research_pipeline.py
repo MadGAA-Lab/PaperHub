@@ -233,7 +233,13 @@ async def parse_user_message(
             seen.add(key)
             merged.append(r)
         step.record_result(
-            {"requests": [{"hint": r.hint, "kind": r.kind} for r in merged]},
+            {
+                "requests": [{"hint": r.hint, "kind": r.kind} for r in merged],
+                # Raw LLM output (the Parser's reasoning) — recorded for
+                # harness-eval reconstruction so a post-hoc reviewer sees
+                # what the model emitted vs what was parsed/deduped out.
+                "llm_content": content,
+            },
         )
     return merged
 
@@ -776,5 +782,22 @@ async def synthesize_prose(
             model=model, messages=messages, **litellm_kwargs,
         )
         content = str(response["choices"][0]["message"].get("content") or "").strip()
-        step.record_result({"content": content})
+        # Record the actual resolved paper_ids + titles and not_found
+        # hints (not just counts) so a harness eval can score resolve
+        # accuracy from the trace alone.
+        step.record_result({
+            "resolved": [
+                {
+                    "paper_id": r.paper_id,
+                    "title": str(
+                        (r.meta.get("title") if isinstance(r.meta, dict) else None)
+                        or r.identity.title
+                        or "",
+                    ),
+                }
+                for r in resolved
+            ],
+            "not_found": [req.hint for req in not_found],
+            "content": content,
+        })
     return content

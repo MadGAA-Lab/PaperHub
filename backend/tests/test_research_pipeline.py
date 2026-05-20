@@ -154,6 +154,77 @@ async def test_parse_natural_language_single_paper(
     assert out[0] == ParsedRequest(hint="mamba paper", kind="natural_language")
 
 
+async def test_parse_trace_records_raw_llm_content(
+    fake_tracer: Tracer,
+    migrated_db: aiosqlite.Connection,
+) -> None:
+    """Harness-eval observability: the paper_search:parse row must record
+    the raw LLM content (the Parser's reasoning) alongside the parsed
+    requests, so a post-hoc eval can see what the model actually emitted
+    vs what was parsed out — not just the deduped result."""
+    raw = '[{"hint": "mamba paper", "kind": "natural_language"}]'
+    comp = _async_completion_mock([_msg(content=raw)])
+    with patch("paperhub.agents.research_pipeline.litellm.acompletion", new=comp):
+        await parse_user_message(
+            "find the mamba paper", tracer=fake_tracer, model="m",
+        )
+    async with migrated_db.execute(
+        "SELECT result_summary_json FROM tool_calls "
+        "WHERE run_id=1 AND tool='paper_search:parse'",
+    ) as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    result = json.loads(row[0] or "{}")
+    assert result.get("requests") == [
+        {"hint": "mamba paper", "kind": "natural_language"},
+    ]
+    assert result.get("llm_content") == raw, (
+        "parse step must record the raw LLM content for eval reconstruction"
+    )
+
+
+async def test_synthesize_trace_records_resolved_and_not_found_ids(
+    fake_tracer: Tracer,
+    migrated_db: aiosqlite.Connection,
+) -> None:
+    """Harness-eval observability: the paper_search:synthesize row must
+    record the actual resolved paper_ids + not_found hints (not just
+    counts), so an eval can score resolve accuracy from the trace alone."""
+    resolved = [
+        ResolvedPaper(
+            request=ParsedRequest(hint="mamba paper", kind="natural_language"),
+            identity=CanonicalIdentity(
+                title="Mamba", author_surname="Gu", year=2023,
+                confidence="high", arxiv_id="2312.00752", rationale="top hit",
+            ),
+            paper_id="arxiv:2312.00752",
+            meta={"title": "Mamba"},
+        ),
+    ]
+    not_found = [ParsedRequest(hint="some imaginary paper", kind="natural_language")]
+    comp = _async_completion_mock([_msg(content="Here is what I found...")])
+    with patch("paperhub.agents.research_pipeline.litellm.acompletion", new=comp):
+        await synthesize_prose(
+            resolved, not_found,
+            user_message="find mamba and an imaginary paper",
+            tracer=fake_tracer, model="m",
+        )
+    async with migrated_db.execute(
+        "SELECT result_summary_json FROM tool_calls "
+        "WHERE run_id=1 AND tool='paper_search:synthesize'",
+    ) as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    result = json.loads(row[0] or "{}")
+    assert result.get("resolved") == [
+        {"paper_id": "arxiv:2312.00752", "title": "Mamba"},
+    ], "synthesize must record resolved paper_ids + titles, not just a count"
+    assert result.get("not_found") == ["some imaginary paper"], (
+        "synthesize must record the not_found hints for eval"
+    )
+    assert result.get("content") == "Here is what I found..."
+
+
 async def test_parse_multi_paper_fanout(
     fake_tracer: Tracer,
 ) -> None:
@@ -642,6 +713,73 @@ async def test_synthesizer_handles_all_not_found(
         )
     assert "couldn't find" in prose.lower()
     assert "?" in prose  # clarifying question
+
+
+# ──────────────────────── Finalize-step observability ───────────────────
+
+
+async def test_paper_search_finalize_records_emitted_candidates(
+    fake_tracer: Tracer,
+    migrated_db: aiosqlite.Connection,
+) -> None:
+    """Harness-eval observability: running the full paper_search subgraph
+    must leave a ``paper_search:finalize`` tracer row recording the
+    candidates emitted to the user (paper_id + title + finalize) plus the
+    resolved / not_found breakdown — so an eval can score the final
+    output from the trace alone, not from the ephemeral SSE event."""
+    from unittest.mock import MagicMock
+
+    from paperhub.agents.research_graph import (
+        ResearchDeps,
+        build_paper_search_subgraph,
+    )
+    from paperhub.pipelines.paper_pipeline import PaperPipeline
+    from paperhub.rag.retriever import Retriever
+
+    # arxiv_id path: parse is deterministic (no LLM), discover short-
+    # circuits (no LLM), resolve queries SS once, finalize builds the
+    # candidate + calls synthesize (the single LLM turn).
+    reg = _StubRegistry(ss_hits=[
+        {"paper_id": "arxiv:2312.00752", "title": "Mamba",
+         "year": 2023, "arxiv_id": "2312.00752"},
+    ])
+    comp = _async_completion_mock([_msg(content="Found Mamba.")])
+
+    deps = ResearchDeps(
+        adapter=MagicMock(),
+        tracer=fake_tracer,
+        paper_qa_model="m",
+        conn=migrated_db,
+        pipeline=MagicMock(spec=PaperPipeline),
+        retriever=MagicMock(spec=Retriever),
+        mcp_registry=reg,  # type: ignore[arg-type]
+    )
+    graph = build_paper_search_subgraph(deps)
+    state: dict[str, Any] = {
+        "run_id": 1,
+        "branch": "",
+        "session_id": 1,
+        "user_message": "2312.00752",
+        "history": [],
+    }
+    with patch("paperhub.agents.research_pipeline.litellm.acompletion", new=comp):
+        async for _mode, _payload in graph.astream(
+            state, stream_mode=["custom", "values"],
+        ):
+            pass
+
+    async with migrated_db.execute(
+        "SELECT result_summary_json FROM tool_calls "
+        "WHERE run_id=1 AND tool='paper_search:finalize'",
+    ) as cur:
+        row = await cur.fetchone()
+    assert row is not None, "paper_search:finalize must open a tracer step"
+    result = json.loads(row[0] or "{}")
+    assert result.get("emitted_candidates") == [
+        {"paper_id": "arxiv:2312.00752", "title": "Mamba", "finalize": True},
+    ], "finalize must record the emitted candidate paper_ids + titles + flag"
+    assert result.get("not_found") == []
+    assert result.get("resolved_count") == 1
 
 
 # ──────────────────────── Public-API dataclass smoke ────────────────────
