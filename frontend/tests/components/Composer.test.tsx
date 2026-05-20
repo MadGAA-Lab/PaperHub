@@ -60,9 +60,13 @@ describe("Composer", () => {
     expect(textbox.value).toBe("");
   });
 
-  it("renders 4 disabled capability action bar buttons with correct labels", () => {
+  it("renders the AttachPaperMenu trigger and 3 disabled capability buttons", () => {
     render(<Composer onSubmit={() => {}} disabled={false} />);
-    const labels = ["Attach paper", "References", "Slides", "Compare"];
+    // The paperclip is now an enabled AttachPaperMenu popover trigger.
+    const attach = screen.getByRole("button", { name: /attach paper/i });
+    expect(attach).not.toBeDisabled();
+    // The other three placeholder capabilities stay disabled.
+    const labels = ["References", "Slides", "Compare"];
     for (const label of labels) {
       const btn = screen.getByRole("button", { name: label });
       expect(btn).toBeDisabled();

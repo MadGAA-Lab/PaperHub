@@ -18,6 +18,7 @@ class _StepBuffer:
     result: dict[str, Any] | None = None
     token_in: int | None = None
     token_out: int | None = None
+    forced_error: str | None = None
 
     def record_args(self, args: dict[str, Any]) -> None:
         self.args = args
@@ -29,6 +30,13 @@ class _StepBuffer:
         self.token_in = token_in
         self.token_out = token_out
 
+    def mark_error(self, message: str) -> None:
+        """Record that the step is logically failed even if no exception
+        propagates out of the ``with`` block. Used by callers that catch
+        exceptions from a dispatched tool but still want the trace to
+        show the failure."""
+        self.forced_error = message
+
 
 class Tracer:
     def __init__(self, conn: aiosqlite.Connection, *, run_id: int, branch: Branch) -> None:
@@ -36,6 +44,11 @@ class Tracer:
         self._run_id = run_id
         self._branch = branch
         self._next_index = 0
+
+    @property
+    def connection(self) -> aiosqlite.Connection:
+        """Public accessor for the underlying DB connection."""
+        return self._conn
 
     @asynccontextmanager
     async def step(
@@ -65,6 +78,8 @@ class Tracer:
                               started, status, error)
             raise
         else:
+            if buf.forced_error is not None:
+                status, error = "error", buf.forced_error
             await self._write(buf, index, agent, tool, model, parent_step,
                               started, status, error)
 
@@ -87,9 +102,24 @@ class Tracer:
             "INSERT INTO tool_calls (run_id, branch, step_index, parent_step, "
             "agent, tool, model, args_redacted_json, result_summary_json, "
             "latency_ms, token_in, token_out, status, error) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (self._run_id, self._branch, index, parent_step,
-             agent, tool, model, args_json, result_json,
-             latency_ms, buf.token_in, buf.token_out, status, error),
+            "VALUES (:run_id, :branch, :step_index, :parent_step, "
+            ":agent, :tool, :model, :args_redacted_json, :result_summary_json, "
+            ":latency_ms, :token_in, :token_out, :status, :error)",
+            {
+                "run_id": self._run_id,
+                "branch": self._branch,
+                "step_index": index,
+                "parent_step": parent_step,
+                "agent": agent,
+                "tool": tool,
+                "model": model,
+                "args_redacted_json": args_json,
+                "result_summary_json": result_json,
+                "latency_ms": latency_ms,
+                "token_in": buf.token_in,
+                "token_out": buf.token_out,
+                "status": status,
+                "error": error,
+            },
         )
         await self._conn.commit()

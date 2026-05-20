@@ -15,7 +15,7 @@ async def test_structured_output_parses_into_model() -> None:
     adapter: LlmAdapter = LiteLlmAdapter()
     decision = await adapter.structured(
         slot="router/v1",
-        variables={"user_message": "Find recent papers on MoE routing"},
+        variables={"user_message": "Find recent papers on MoE routing", "enabled_refs_count": 0},
         response_model=RoutingDecision,
         model="gpt-4o-mini",
         mock_response='{"intent":"paper_search","model_tier":"small",'
@@ -62,7 +62,7 @@ async def test_structured_with_history_builds_correct_messages() -> None:
 
     await adapter.structured(
         slot="router/v1",
-        variables={"user_message": "So what did I ask?"},
+        variables={"user_message": "So what did I ask?", "enabled_refs_count": 0},
         response_model=RoutingDecision,
         model="gpt-4o-mini",
         history=history,

@@ -5,13 +5,16 @@ import { toast } from "sonner";
 
 import type { ChatMessage } from "@/types/domain";
 import { Button } from "@/components/ui/button";
+import { LoadingDots } from "@/components/states/LoadingDots";
+import { SearchResultList } from "@/components/chat/SearchResultList";
 
 interface Props {
   message: ChatMessage;
   onRetry?: () => void;
+  backendSessionId?: number | null;
 }
 
-export function MessageBubble({ message, onRetry }: Props) {
+export function MessageBubble({ message, onRetry, backendSessionId }: Props) {
   const isUser = message.role === "user";
   const isAssistant = message.role === "assistant";
   const isOk = message.status === "ok" || (isAssistant && message.status === undefined);
@@ -20,6 +23,10 @@ export function MessageBubble({ message, onRetry }: Props) {
   const isStreamingEmpty = isStreaming && !message.content;
   const isStreamingWithContent = isStreaming && !!message.content;
   const showCopy = isAssistant && isOk && !isStreaming;
+  const hasSearchResults =
+    isAssistant &&
+    message.search_results !== undefined &&
+    message.search_results.length > 0;
 
   return (
     <article
@@ -52,15 +59,7 @@ export function MessageBubble({ message, onRetry }: Props) {
           ) : isStreamingEmpty ? (
             // Pre-token waiting state — tight three-dot cluster so it reads
             // as a real "…" typing indicator, not stretched apart.
-            <div
-              role="status"
-              aria-label="streaming"
-              className="flex items-center gap-1 py-1"
-            >
-              <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground motion-safe:animate-pulse" />
-              <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground motion-safe:animate-pulse [animation-delay:200ms]" />
-              <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground motion-safe:animate-pulse [animation-delay:400ms]" />
-            </div>
+            <LoadingDots ariaLabel="streaming" />
           ) : (
             // react-markdown renders to React elements (no dangerouslySetInnerHTML).
             // Raw HTML in source is not rendered as HTML by default — exactly what
@@ -78,6 +77,18 @@ export function MessageBubble({ message, onRetry }: Props) {
             />
           )}
         </div>
+
+        {/* Search results — rendered below the bubble body.
+            sessionId may be transiently null in the race window between
+            the assistant placeholder render and the `session` SSE event
+            populating backend_session_id; SearchResultList handles that
+            by disabling the Add button until the id arrives. */}
+        {hasSearchResults && (
+          <SearchResultList
+            candidates={message.search_results!}
+            sessionId={backendSessionId ?? null}
+          />
+        )}
 
         {/* Copy button — hover-revealed on completed assistant messages */}
         {showCopy && (

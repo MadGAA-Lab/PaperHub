@@ -53,6 +53,12 @@ node_modules/
 .env.*
 !.env.example
 
+# ===== local debug / scratch scripts =====
+# Operator-facing live-API harnesses for diagnosing the research pipeline
+# against real Gemini + Semantic Scholar + open-webSearch. Per-developer
+# scratch files; not part of the project surface area.
+backend/scripts/debug_*.py
+
 # ===== OS + editor noise =====
 .DS_Store
 Thumbs.db
@@ -71,6 +77,15 @@ desktop.ini
 
 # workspace files
 .*workspace
+workspace*/
 
 # local configuration files
 *.local.json
+
+# MCP server registry — operator-edited, may reference local-only daemons.
+# Checked-in template lives at backend/mcp_servers.toml.example (SRS v2.5,
+# §III-6.1).
+/backend/mcp_servers.toml
+
+# temporary files
+tmp*/

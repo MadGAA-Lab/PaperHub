@@ -5,10 +5,45 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Settings:
+    # ── 2. Workspace + storage ──────────────────────────────────────────
     workspace_dir: Path
     db_path: Path
+    papers_cache_dir: Path
+    chroma_dir: Path
+    max_upload_mb: int
+
+    # ── 3. LLM model selection ──────────────────────────────────────────
+    # Router intent classifier.
     router_model: str
+    # Chitchat agent.
     chitchat_model: str
+    # paper_qa finalizer (cross-paper synthesis; streams to user).
+    paper_qa_model: str
+    # paper_qa per-paper subagent (section navigation + chunk picking).
+    paper_qa_subagent_model: str
+
+    # ── 4. Local embedding + rerank (hosted in the modelserver process) ─
+    embedding_model: str
+    reranker_model: str
+
+    # ── 5. Model server ─────────────────────────────────────────────────
+    # The sentence-transformers + cross-encoder live in a SEPARATE process
+    # so uvicorn --reload on backend code doesn't reset the ~110 MB
+    # embedder + ~80 MB reranker weights. Auto-spawned by the backend's
+    # lifespan and reused across reload cycles.
+    model_server_host: str
+    model_server_port: int
+    # When True, skip the HTTP client + auto-spawn and load models in the
+    # worker process directly. Used by tests and by hosts that can't run
+    # an extra process.
+    inprocess_models: bool
+
+    # ── 6. Agent tunables ───────────────────────────────────────────────
+    # Maximum number of read_section() calls the subagent makes per paper
+    # turn before the loop is force-stopped.
+    paper_qa_max_section_reads: int
+
+    # ── 8. Logging ──────────────────────────────────────────────────────
     log_level: str
 
 
@@ -16,9 +51,51 @@ def load_settings() -> Settings:
     workspace = Path(os.environ.get("PAPERHUB_WORKSPACE", "./workspace")).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     return Settings(
+        # 2. Workspace + storage.
         workspace_dir=workspace,
         db_path=workspace / "paperhub.db",
-        router_model=os.environ.get("PAPERHUB_ROUTER_MODEL", "gemini/gemini-2.5-flash"),
-        chitchat_model=os.environ.get("PAPERHUB_CHITCHAT_MODEL", "gemini/gemini-2.5-flash"),
+        papers_cache_dir=workspace / "papers_cache",
+        chroma_dir=workspace / "chroma",
+        max_upload_mb=int(os.environ.get("PAPERHUB_MAX_UPLOAD_MB", "30")),
+
+        # 3. LLM model selection.
+        router_model=os.environ.get(
+            "PAPERHUB_ROUTER_MODEL", "gemini/gemini-3.1-flash-lite",
+        ),
+        chitchat_model=os.environ.get(
+            "PAPERHUB_CHITCHAT_MODEL", "gemini/gemini-3.1-flash-lite",
+        ),
+        paper_qa_model=os.environ.get(
+            "PAPERHUB_PAPER_QA_MODEL", "gemini/gemini-2.5-pro",
+        ),
+        paper_qa_subagent_model=os.environ.get(
+            "PAPERHUB_PAPER_QA_SUBAGENT_MODEL", "gemini/gemini-3.1-flash-lite",
+        ),
+
+        # 4. Local embedding + rerank.
+        embedding_model=os.environ.get(
+            "PAPERHUB_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5",
+        ),
+        reranker_model=os.environ.get(
+            "PAPERHUB_RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        ),
+
+        # 5. Model server.
+        model_server_host=os.environ.get(
+            "PAPERHUB_MODEL_SERVER_HOST", "127.0.0.1",
+        ),
+        model_server_port=int(
+            os.environ.get("PAPERHUB_MODEL_SERVER_PORT", "8001"),
+        ),
+        inprocess_models=os.environ.get(
+            "PAPERHUB_INPROCESS_MODELS", "0",
+        ) not in ("0", "", "false", "False"),
+
+        # 6. Agent tunables.
+        paper_qa_max_section_reads=int(
+            os.environ.get("PAPERHUB_PAPER_QA_MAX_SECTION_READS", "5"),
+        ),
+
+        # 8. Logging.
         log_level=os.environ.get("PAPERHUB_LOG_LEVEL", "INFO"),
     )

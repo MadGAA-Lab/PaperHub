@@ -1,13 +1,23 @@
 import { useCallback, useRef } from "react";
-import type { RoutingDecision, ToolCallRecord } from "@/types/domain";
+import type {
+  RoutingDecision,
+  SearchResultCandidate,
+  ToolCallRecord,
+} from "@/types/domain";
 import { streamChat } from "@/lib/sse";
+import { listSessionReferences } from "@/lib/api";
 import { useChatStore } from "@/store/chat";
 
+interface SessionData { run_id: number; session_id: number; }
 interface ToolStepData { record: ToolCallRecord; }
 interface RoutingData { run_id: number; branch: string; decision: RoutingDecision; }
 interface TokenData { run_id: number; branch: string; text: string; }
 interface FinalData { run_id: number; branch: string; message_id: number; content: string; }
 interface ErrorData { run_id: number; branch: string; message: string; }
+interface SearchResultsData {
+  run_id: number;
+  candidates: SearchResultCandidate[];
+}
 
 export function useChatStream() {
   const abortRef = useRef<AbortController | null>(null);
@@ -18,7 +28,9 @@ export function useChatStream() {
     abortRef.current = new AbortController();
 
     // Snapshot prior turns BEFORE we append the new user + assistant placeholder.
-    const priorMessages = store.getState().sessions.find((s) => s.id === sessionId)?.messages ?? [];
+    const currentSession = store.getState().sessions.find((s) => s.id === sessionId);
+    const priorMessages = currentSession?.messages ?? [];
+    const backendSessionId = currentSession?.backend_session_id ?? null;
     const history = priorMessages
       .filter((m) => m.status !== "error" && m.status !== "streaming")
       .filter((m) => m.content.length > 0)
@@ -39,10 +51,17 @@ export function useChatStream() {
 
     try {
       await streamChat(
-        { session_id: null, user_message: userMessage, history },
+        { session_id: backendSessionId, user_message: userMessage, history },
         {
           onEvent: (event, data) => {
-            if (event === "tool_step") {
+            if (event === "session") {
+              const s = data as SessionData;
+              store.getState().patchSessionBackendId(sessionId, s.session_id);
+              if (runId === null) {
+                runId = s.run_id;
+                store.getState().patchAssistantRunId(sessionId, runId);
+              }
+            } else if (event === "tool_step") {
               const rec = (data as ToolStepData).record;
               if (runId === null) {
                 runId = rec.run_id;
@@ -59,6 +78,35 @@ export function useChatStream() {
             } else if (event === "token") {
               const t = data as TokenData;
               store.getState().appendToken(sessionId, t.run_id, t.text);
+            } else if (event === "search_results") {
+              const s = data as SearchResultsData;
+              if (runId === null) {
+                runId = s.run_id;
+                store.getState().patchAssistantRunId(sessionId, runId);
+              }
+              store
+                .getState()
+                .setSearchResults(sessionId, s.run_id, s.candidates);
+              // If the agent auto-added any candidates, refresh the
+              // Reference Sources panel — the chat-stream wrote rows
+              // server-side, but the panel only pulls on
+              // backend_session_id changes, so it would otherwise
+              // stay empty until reload. Use the latest backend
+              // session id from the store, since the session event
+              // may have arrived earlier this stream and updated it.
+              if (s.candidates.some((c) => c.auto_added)) {
+                const latest = store
+                  .getState()
+                  .sessions.find((sess) => sess.id === sessionId)
+                  ?.backend_session_id;
+                if (latest != null) {
+                  void listSessionReferences(latest)
+                    .then((refs) =>
+                      store.getState().setReferences(latest, refs),
+                    )
+                    .catch(() => undefined);
+                }
+              }
             } else if (event === "final") {
               const f = data as FinalData;
               store.getState().finaliseMessage(sessionId, f.run_id, f.content);

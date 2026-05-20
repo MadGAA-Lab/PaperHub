@@ -8,6 +8,16 @@ system: |
     - library_stats   user asks a count/stat over their saved papers/sessions
     - chitchat        anything else (greeting, meta-question, off-topic)
 
+  IMPORTANT — session-aware override:
+    The user turn includes `enabled_refs_count` (integer). If the user's
+    question would naturally be `paper_qa` (asks about, compares, summarises,
+    or wants to "discuss" specific named papers / architectures / methods)
+    BUT `enabled_refs_count == 0`, classify as `paper_search` instead.
+    Reasoning: the user wants to discuss specific papers but has none
+    attached yet — the natural next step is to find + add them, not to
+    answer with no source material. Surface this in `reasoning`, e.g.
+    "user named papers X / Y but session has 0 refs — search first".
+
   Pick `model_tier`:
     - small     for chitchat, library_stats, and most paper_search
     - flagship  for paper_qa and slides
@@ -21,5 +31,7 @@ system: |
     }
   No prose, no markdown, no code fences. JSON only.
 user: |
+  enabled_refs_count: {enabled_refs_count}
+
   User message:
   {user_message}

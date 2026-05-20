@@ -199,4 +199,168 @@ describe("useChatStream", () => {
       { role: "assistant", content: "A reply" },
     ]);
   });
+
+  it("stores backend_session_id from session event and sends it on subsequent turns", async () => {
+    // Capture the session_id the client sends on each request
+    const capturedSessionIds: (number | null)[] = [];
+
+    let requestCount = 0;
+    server.resetHandlers(
+      http.post(`${API_BASE_URL}/chat`, async ({ request }) => {
+        requestCount += 1;
+        const body = await request.json() as { session_id: number | null };
+        capturedSessionIds.push(body.session_id);
+
+        const enc2 = new TextEncoder();
+        function sseChunk2(event: string, data: unknown): Uint8Array {
+          return enc2.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        }
+        const runId = requestCount;
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              sseChunk2("session", { run_id: runId, session_id: 42 }),
+            );
+            controller.enqueue(
+              sseChunk2("routing_decision", {
+                run_id: runId, branch: "",
+                decision: { intent: "chitchat", model_tier: "small", confidence: 0.9, reasoning: "x" },
+              }),
+            );
+            controller.enqueue(sseChunk2("token", { run_id: runId, branch: "", text: "Reply" }));
+            controller.enqueue(
+              sseChunk2("final", { run_id: runId, branch: "", message_id: runId, content: "Reply" }),
+            );
+            controller.close();
+          },
+        });
+        return new HttpResponse(stream, { headers: { "Content-Type": "text/event-stream" } });
+      }),
+    );
+
+    const sessionId = useChatStore.getState().newSession();
+    const { result } = renderHook(() => useChatStream());
+
+    // First turn: session_id should be null (no backend session yet)
+    await act(async () => {
+      await result.current.send(sessionId, "first");
+    });
+
+    await waitFor(() => {
+      const session = useChatStore.getState().sessions.find((s) => s.id === sessionId);
+      expect(session?.backend_session_id).toBe(42);
+    });
+
+    // Second turn: session_id should be 42 (learned from first session event)
+    await act(async () => {
+      await result.current.send(sessionId, "second");
+    });
+
+    await waitFor(() => {
+      const session = useChatStore.getState().sessions.find((s) => s.id === sessionId);
+      const messages = session!.messages.filter((m) => m.role === "assistant");
+      expect(messages.every((m) => m.status === "ok")).toBe(true);
+    });
+
+    expect(capturedSessionIds[0]).toBeNull();
+    expect(capturedSessionIds[1]).toBe(42);
+    // backend_session_id must stay 42 (idempotent — not overwritten on second turn)
+    const finalSession = useChatStore.getState().sessions.find((s) => s.id === sessionId);
+    expect(finalSession?.backend_session_id).toBe(42);
+  });
+
+  it("dispatches search_results SSE event into the chat store", async () => {
+    const candidates = [
+      {
+        paper_id: "ss:abcd",
+        title: "Mamba",
+        authors: ["Alice"],
+        year: 2024,
+        abstract: "state-space",
+        arxiv_id: "2312.00752",
+        has_open_pdf: true,
+        reason: "headline 2024 work",
+        finalize: true,
+        auto_added: true,
+        papers_id: 7,
+        error: null,
+        already_in_session: false,
+      },
+      {
+        paper_id: "ss:efgh",
+        title: "Another",
+        authors: [],
+        year: 2024,
+        abstract: "abs",
+        arxiv_id: null,
+        has_open_pdf: false,
+        reason: "tangential",
+        finalize: false,
+        auto_added: false,
+        papers_id: null,
+        error: null,
+        already_in_session: false,
+      },
+    ];
+    server.resetHandlers(
+      http.post(`${API_BASE_URL}/chat`, () => {
+        const enc2 = new TextEncoder();
+        function sseChunk(event: string, data: unknown): Uint8Array {
+          return enc2.encode(
+            `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`,
+          );
+        }
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              sseChunk("session", { run_id: 1, session_id: 11 }),
+            );
+            controller.enqueue(
+              sseChunk("routing_decision", {
+                run_id: 1, branch: "",
+                decision: {
+                  intent: "paper_search", model_tier: "flagship",
+                  confidence: 0.95, reasoning: "find papers",
+                },
+              }),
+            );
+            controller.enqueue(
+              sseChunk("search_results", { run_id: 1, candidates }),
+            );
+            controller.enqueue(
+              sseChunk("final", {
+                run_id: 1, branch: "", message_id: 1,
+                content: "Here are picks.",
+              }),
+            );
+            controller.close();
+          },
+        });
+        return new HttpResponse(stream, {
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }),
+    );
+
+    const sessionId = useChatStore.getState().newSession();
+    const { result } = renderHook(() => useChatStream());
+
+    await act(async () => {
+      await result.current.send(sessionId, "find papers");
+    });
+
+    await waitFor(() => {
+      const session = useChatStore
+        .getState()
+        .sessions.find((s) => s.id === sessionId);
+      const assistant = session!.messages.find((m) => m.role === "assistant")!;
+      expect(assistant.status).toBe("ok");
+      const results = assistant.search_results;
+      expect(results).toBeDefined();
+      expect(results).toHaveLength(2);
+      expect(results![0]!.auto_added).toBe(true);
+      expect(results![0]!.papers_id).toBe(7);
+      expect(results![1]!.finalize).toBe(false);
+    });
+  });
 });

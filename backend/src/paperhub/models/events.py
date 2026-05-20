@@ -6,6 +6,40 @@ from pydantic import BaseModel
 from paperhub.models.domain import Branch, RoutingDecision, ToolCallRecord
 
 
+class SearchCandidateModel(BaseModel):
+    """Pydantic mirror of agents.research.SearchCandidate for SSE emission.
+
+    Lives in models/events.py (not models/domain.py) because it's only
+    surfaced through the ``search_results`` SSE event — there's no SQLite
+    schema row backing it."""
+
+    paper_id: str
+    title: str
+    authors: list[str]
+    year: int | None
+    abstract: str | None
+    arxiv_id: str | None
+    has_open_pdf: bool
+    reason: str
+    finalize: bool
+    auto_added: bool
+    papers_id: int | None
+    error: str | None
+    already_in_session: bool
+
+
+class SearchResultsEvent(BaseModel):
+    type: Literal["search_results"] = "search_results"
+    run_id: int
+    candidates: list[SearchCandidateModel]
+
+
+class SessionEvent(BaseModel):
+    type: Literal["session"] = "session"
+    run_id: int
+    session_id: int
+
+
 class RoutingDecisionEvent(BaseModel):
     type: Literal["routing_decision"] = "routing_decision"
     run_id: int
@@ -40,7 +74,15 @@ class ErrorEvent(BaseModel):
     message: str
 
 
-SseEvent = RoutingDecisionEvent | ToolStepEvent | TokenEvent | FinalEvent | ErrorEvent
+SseEvent = (
+    SessionEvent
+    | RoutingDecisionEvent
+    | ToolStepEvent
+    | TokenEvent
+    | SearchResultsEvent
+    | FinalEvent
+    | ErrorEvent
+)
 
 
 def sse_format(event: SseEvent) -> str:

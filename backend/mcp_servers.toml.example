@@ -1,0 +1,114 @@
+# PaperHub MCP server registry (SRS v2.5, §III-6.1).
+#
+# Copy to `mcp_servers.toml` (gitignored) and edit. The real file is loaded
+# by `MCPRegistry` at FastAPI startup; unreachable servers log WARN and are
+# skipped, so leaving a daemon down is non-fatal — its tools simply don't
+# enter the agent palette.
+#
+# IMPORTANT: the `papers` server below is REQUIRED. The Research Agent
+# (Task v2.5-4) has no in-process fallback — without `papers.*` in the
+# registry, paper_search turns will fail with an empty tool palette.
+# Do not delete or comment out the `[[server]] name = "papers"` block.
+#
+# Each [[server]] block produces one `MCPServerConfig` (see
+# `paperhub.mcp.config`). Fields:
+#
+#   name              namespace prefix on aggregated tool names ("web.search")
+#   transport         "streamable_http" or "stdio"
+#                     (stdio dispatch ships in Plan E; the schema is accepted)
+#   url               streamable_http only — server endpoint
+#   command, args     stdio only — process launch
+#   expose            allowlist of upstream tool names; anything not listed
+#                     is hidden from the LiteLLM tool palette
+#   aliases           optional rename map (upstream → exposed) applied after
+#                     the allowlist filter (e.g. fetchWebContent → fetch)
+#   timeout_seconds   per-call timeout enforced by MCPClient.call_tool
+#                     (a timeout raises MCPUnavailableError, so the agent
+#                     treats it like any transport failure)
+#
+# ─── paperhub-papers (Plan C v2.6 — in-process FastMCP) ──────────────────
+# The Research Agent's own three tools, re-exposed over MCP via the FastMCP
+# sub-app mounted on the backend at /mcp. No extra process, no second port:
+# this server lives inside the FastAPI app and reaches the same SQLite +
+# Chroma + Semantic Scholar HTTP client the in-process dispatchers use.
+# External MCP clients (Claude Desktop, Cursor) reach the same URL.
+#
+# The MCP registry connects LAZILY on first tool use (see SRS v2.6) so the
+# loopback URL pointing at the backend's own port does NOT deadlock uvicorn
+# startup. Hardcoded port `8000` matches the FastAPI default; override via
+# editing this file or running uvicorn on the same port.
+
+[[server]]
+name = "papers"
+transport = "streamable_http"
+url = "http://localhost:8000/mcp"
+expose = ["search_library", "search_semantic_scholar", "find_related_papers"]
+timeout_seconds = 8.0
+
+# ─── open-webSearch (Plan C v2.5) ────────────────────────────────────────
+# v2.6 follow-up: the `launch` field auto-spawns the daemon if it isn't
+# already running on the configured port — fresh-clone developers don't
+# need to pre-install anything (npx -y fetches the package the first
+# time, ~10s of one-time download). Operators who manage their own
+# daemon can delete the `launch` / `launch_env` lines below to opt out;
+# the registry will still try to connect to the configured URL.
+#
+# When the daemon is reachable, paper_search loads the v2 prompt and the
+# Research Agent gains a no-key multi-engine discovery step before
+# Semantic Scholar lookup. When the daemon is unreachable (no Node on
+# PATH, npm registry blocked, …), paper_search/v1 loads and behaviour
+# reverts to v2.4 exactly — no errors surfaced to the user.
+#
+# The registry tracks the spawned subprocess and terminates it on
+# FastAPI shutdown, so killing the backend kills the daemon.
+
+[[server]]
+name = "web"
+transport = "streamable_http"
+url = "http://localhost:3000/mcp"
+expose = ["search", "fetchWebContent"]
+aliases = { "fetchWebContent" = "fetch" }
+timeout_seconds = 8.0
+# Auto-spawn when not reachable; first arg must resolve via PATH
+# (resolved with shutil.which — works for `.cmd` shims on Windows).
+# IMPORTANT: use the BARE `open-websearch` entrypoint, NOT `serve`.
+# Per the open-webSearch README "Choose the Right Path" section:
+#   - bare entrypoint = MCP transport (what the agent talks to).
+#   - `serve` subcommand = a separate local REST daemon on port 3210,
+#     unrelated to MCP. Using `serve` boots the wrong service and the
+#     registry probe of `:3000` times out.
+# Bare + `MODE=http` (or `both`) starts the MCP server on $PORT.
+#
+# Engine allowlist: bing's hardcoded `cn.bing.com` endpoint 301-redirects
+# most non-China traffic, and the daemon's bing engine ships with
+# `trustedStaticHost: true` → `maxRedirects = 0`, so axios surfaces the
+# 301 as `engine_error` and bing returns 0 results for every query.
+# Pinning `ALLOWED_SEARCH_ENGINES` keeps bing out of the engine pool
+# entirely and forces the daemon to pick a working default. Operators
+# on a Chinese network who want bing back can override this block.
+launch = ["npx", "-y", "open-websearch@latest"]
+launch_env = { PORT = "3000", MODE = "http", ALLOWED_SEARCH_ENGINES = "duckduckgo,brave,startpage", DEFAULT_SEARCH_ENGINE = "duckduckgo" }
+launch_ready_timeout = 30.0   # first run downloads the package; ~25s observed
+
+# ─── future blocks ───────────────────────────────────────────────────────
+# Plan E will add a sqlite block:
+#   [[server]]
+#   name = "sql"
+#   transport = "stdio"
+#   command = "uv"
+#   args = ["run", "paperhub-sqlite-mcp"]
+#   expose = ["query"]
+#
+# Plan G will add filesystem + paperhub.*:
+#   [[server]]
+#   name = "fs"
+#   transport = "stdio"
+#   command = "npx"
+#   args = ["-y", "@modelcontextprotocol/server-filesystem", "./workspace"]
+#   expose = ["read_file", "list_directory"]
+#
+#   [[server]]
+#   name = "paperhub"
+#   transport = "streamable_http"
+#   url = "http://localhost:8001/mcp"
+#   expose = ["get_paper", "search_library", "list_runs", "get_trace"]

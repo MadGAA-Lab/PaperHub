@@ -90,6 +90,24 @@ async def test_step_index_monotonic(migrated_db: aiosqlite.Connection) -> None:
     assert [r[0] for r in rows] == [0, 1, 2]
 
 
+async def test_mark_error_overrides_clean_exit_status(
+    migrated_db: aiosqlite.Connection,
+) -> None:
+    """A caller can mark a step as failed even if no exception propagates."""
+    run_id = await _new_run(migrated_db)
+    tracer = Tracer(migrated_db, run_id=run_id, branch="")
+    async with tracer.step(agent="research", tool="paper_search:some_tool", model=None) as step:
+        step.record_args({"x": 1})
+        step.mark_error("dispatcher swallowed an error")
+    async with migrated_db.execute(
+        "SELECT status, error FROM tool_calls"
+    ) as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    assert row[0] == "error"
+    assert row[1] == "dispatcher swallowed an error"
+
+
 async def test_branch_isolation(migrated_db: aiosqlite.Connection) -> None:
     run_id = await _new_run(migrated_db)
     ta = Tracer(migrated_db, run_id=run_id, branch="A")

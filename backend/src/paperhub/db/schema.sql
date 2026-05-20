@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS paper_content (
     title TEXT NOT NULL,
     authors_json TEXT NOT NULL DEFAULT '[]',
     year INTEGER,
+    abstract TEXT NOT NULL DEFAULT '',
+    sections_json TEXT,
     source_path TEXT NOT NULL,
     source_dir_path TEXT NOT NULL,
     html_path TEXT NOT NULL,
@@ -25,7 +27,7 @@ CREATE TABLE IF NOT EXISTS paper_content (
 CREATE TABLE IF NOT EXISTS papers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
-    paper_content_id INTEGER NOT NULL REFERENCES paper_content(id),
+    paper_content_id INTEGER NOT NULL REFERENCES paper_content(id) ON DELETE RESTRICT,
     enabled INTEGER NOT NULL DEFAULT 1,
     added_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (session_id, paper_content_id)
@@ -45,7 +47,7 @@ CREATE TABLE IF NOT EXISTS messages (
     session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
     role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
     content TEXT NOT NULL,
-    run_id INTEGER,
+    run_id INTEGER REFERENCES runs(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -76,3 +78,31 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     error TEXT,
     PRIMARY KEY (run_id, branch, step_index)
 );
+
+CREATE VIRTUAL TABLE IF NOT EXISTS paper_content_fts USING fts5(
+    title,
+    abstract,
+    content='paper_content',
+    content_rowid='id',
+    tokenize='porter unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS paper_content_ai_fts
+AFTER INSERT ON paper_content BEGIN
+    INSERT INTO paper_content_fts(rowid, title, abstract)
+    VALUES (new.id, new.title, new.abstract);
+END;
+
+CREATE TRIGGER IF NOT EXISTS paper_content_ad_fts
+AFTER DELETE ON paper_content BEGIN
+    INSERT INTO paper_content_fts(paper_content_fts, rowid, title, abstract)
+    VALUES ('delete', old.id, old.title, old.abstract);
+END;
+
+CREATE TRIGGER IF NOT EXISTS paper_content_au_fts
+AFTER UPDATE ON paper_content BEGIN
+    INSERT INTO paper_content_fts(paper_content_fts, rowid, title, abstract)
+    VALUES ('delete', old.id, old.title, old.abstract);
+    INSERT INTO paper_content_fts(rowid, title, abstract)
+    VALUES (new.id, new.title, new.abstract);
+END;

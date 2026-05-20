@@ -1,6 +1,5 @@
 import { KeyboardEvent, useRef } from "react";
 import {
-  Paperclip,
   BookOpen,
   Presentation,
   Columns2,
@@ -14,6 +13,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { AttachPaperMenu } from "@/components/chat/AttachPaperMenu";
 import { useChatStore } from "@/store/chat";
 
 interface Props {
@@ -22,17 +22,12 @@ interface Props {
 }
 
 interface Capability {
-  icon: typeof Paperclip;
+  icon: typeof BookOpen;
   label: string;
   tooltip: string;
 }
 
 const CAPABILITIES: Capability[] = [
-  {
-    icon: Paperclip,
-    label: "Attach paper",
-    tooltip: "Coming in Plan C — upload PDF or paste arXiv ID",
-  },
   {
     icon: BookOpen,
     label: "References",
@@ -101,6 +96,7 @@ export function Composer({ onSubmit, disabled }: Props) {
           <div className="flex items-center justify-between gap-1 px-2 pb-2">
             <TooltipProvider>
               <div className="flex items-center gap-0.5">
+                <AttachPaperMenu />
                 {CAPABILITIES.map(({ icon: Icon, label, tooltip }) => (
                   <Tooltip key={label}>
                     <TooltipTrigger

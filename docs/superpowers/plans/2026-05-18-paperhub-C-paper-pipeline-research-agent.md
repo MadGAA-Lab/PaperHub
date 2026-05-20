@@ -44,6 +44,30 @@ Plan C is verifiable end-to-end via CLI (`scripts/ingest_paper.ps1` + `scripts/q
 
 ---
 
+## Reconciliation log (Task 14)
+
+The implementation diverged from the plan as written in these specific places. Each was a spec defect or a misalignment with what existing code actually exposed:
+
+1. **`IngestResult.title`** — added by Task 10 (commit 44d899c). The plan's Task 8 dataclass omitted it but Task 10's `add_paper_to_session_dispatch` read it. `IngestResult` now has 4 fields, not 3.
+2. **`paper_content.abstract` column** — added by Task 10 (commit 2cab8a1) because `search_library_dispatch` SQL selects `pc.abstract`. The plan listed neither the column nor the migration. (See follow-up #4.)
+3. **`PaperPipeline` is NOT an `app.state` singleton.** It takes a positional `conn` arg, which is per-request. The plan's Task 11 sketch tried to construct one at lifespan time; the shipped implementation constructs `PaperPipeline` per-request inside `chat.py` and `papers.py`, using the shared `app.state.chroma` ChromaStore.
+4. **`ChromaStore.aclose()` does not exist** — the plan's lifespan called it. The shipped lifespan does not.
+5. **`get_renderer()` / `renderer=` kwarg does not exist** — renderer is module-level `render_html()` functions. Plan Task 11's PaperPipeline construction sketch incorrectly included `renderer=get_renderer()`; shipped code drops it.
+6. **`settings.research_model` does not exist** — shipped code uses `settings.paper_qa_model` for both `paper_search` and `paper_qa` flows.
+7. **`chunker.target` parameter is declared but unused** in the shipped impl — faithful to the plan's literal code, but the parameter is dead. (See follow-up #1.)
+8. **`Chunk` char offsets aligned with stripped text** — the plan's chunker code stored `piece.strip()` as `text` while using raw cursor positions for `char_start`/`char_end`. Fixed in Task 4 commit `4e62b83`.
+9. **Pandoc subprocess `cwd=tex_path.parent`** — the plan's renderer didn't set cwd; multi-file LaTeX `\input{...}` resolution would have broken in production. Fixed in commit `67a47cf`.
+10. **Tarball unlink in finally** — Task 2's plan code would have leaked a tarball on extraction error. Fixed in commit `f4b0073`.
+11. **Test fixtures: `fake_tracer`, `fake_pipeline`, `seed_library`** — the plan listed test cases but not fixture definitions. Added in `tests/conftest.py` by Task 10.
+12. **`paper_qa_stream` was defined twice** in the plan's Task 10 code block (partial stub + full version). Shipped code has one definition (the full version).
+13. **`%`-strip in `search_library_dispatch` LIKE escape** — the plan's escape `\%` was incorrect SQLite syntax. Shipped code strips `%` from the query as a Plan F follow-up.
+14. **`respx` dev-dep added** in Task 10 for `test_semantic_scholar.py` HTTP mocking.
+15. **`_FakeEmbedder` duplicate `embed()` method** — the plan's test fixture for `test_retriever.py` silently shadowed the first `embed()` with the second (Python method resolution). Fixed in commit `813da21` by merging into one definition with call tracking.
+16. **PATCH/DELETE commit-before-rowcheck bug** — the plan's `papers.py` sketch committed the transaction before checking `rowcount`, meaning a 404 response would still commit a no-op write. Fixed in commit `ba9b2fe`. A 410 Gone path for missing `html_path` files was also added in the same fix.
+17. **`ignore_errors = true` redundancy in mypy chromadb override** — the plan's `pyproject.toml` sketch included both `ignore_errors` and `ignore_missing_imports` for chromadb. `ignore_errors` was dropped in commit `00f1107` as redundant.
+
+---
+
 ## File Structure
 
 ```
@@ -2927,3 +2951,2923 @@ Plan complete and saved to `docs/superpowers/plans/2026-05-18-paperhub-C-paper-p
 2. **Inline Execution** — batch with checkpoints in this session.
 
 Which approach?
+
+---
+
+## Plan C v2.4 Follow-up Tasks (post-merge revision)
+
+> **Status:** Plan C as originally scoped shipped and merged. Real-API verification (4 review rounds) + manual browser testing surfaced four operational gaps **and two design re-prioritisations** — the second design call (browser-test follow-up) reverts the v2.3 "default-add top 1-2" behavior to **suggest-only**: the agent never downloads, the user is the sole ingestion trigger. These five tasks are the **v2.4 patch round** — they ship to the same branch / PR cadence Plan C used. SRS v2.4 entry captures the design intent; this section is the executor-facing decomposition.
+>
+> **Full feedback brief** for the dispatching code agent: [docs/superpowers/feedback/2026-05-18-plan-c-v2.4-feedback.md](../feedback/2026-05-18-plan-c-v2.4-feedback.md).
+>
+> **v2.4 design summary** (the agent — read-only loop): the agent has three read tools (`search_library`, `search_semantic_scholar`, `find_related_papers`) and **no write tool**. It shortlists 3-5 candidates per turn with one-line reasons. The chat endpoint emits a new `search_results` SSE event before `final` carrying the structured candidate list. The frontend renders these as a `SearchResultList` with per-row Add buttons. Clicking Add calls `POST /papers` with a prefix-discriminated `paper_id` (`arxiv:<id>` / `ss:<paperId>` / `library:<paper_content_id>`) — that's the only path that triggers ingestion. Reference Sources panel manages already-attached papers.
+
+### Task v2.4-1 — Frontend session_id roundtrip (CRITICAL)
+
+**Symptom:** demo broke during phase-B testing — user clicked Add on a candidate card → paper attached to backend session N → next `paper_qa` turn returns *"No references are enabled for this session"* because that turn opened backend session N+1. (In the v2.3 timeline the symptom showed via the agent's auto-add; in v2.4 the symptom shows via the user's manual Add click — same root cause.)
+
+**Root cause:** [`frontend/src/hooks/useChatStream.ts:42`](../../../frontend/src/hooks/useChatStream.ts#L42) hardcodes `session_id: null` on every POST `/chat`. The backend `_ensure_session` creates a fresh `chat_sessions` row each time. Papers attached (by user click or library browser) belong to backend session N; subsequent turn queries backend session N+1.
+
+**Also impacts** `POST /papers` and `POST /papers/from-library` from the frontend Add-button flows — they need to send the user's *current backend* `session_id`, which means the frontend must learn and persist it on the first SSE event.
+
+**Files:**
+- Modify: `backend/src/paperhub/models/events.py` — extend `RoutingDecisionEvent` (or add a new `SessionEvent`) to carry `session_id: int` so the frontend learns the backend session ID on the first turn.
+- Modify: `backend/src/paperhub/api/chat.py` — emit the `session_id` on the first event of every run.
+- Modify: `frontend/src/types/domain.ts` — `ChatSession` gains `backend_session_id: number | null`.
+- Modify: `frontend/src/store/chat.ts` — add `patchSessionBackendId(sessionId, backendId)` action.
+- Modify: `frontend/src/hooks/useChatStream.ts` — read `backend_session_id` from the active frontend session before posting; thread it through `session_id` in the POST body.
+
+**Test:** new `tests/test_chat_sse.py::test_chat_emits_session_id_on_first_event` asserts the SSE stream emits `session_id` in the first event. Frontend `tests/hooks/useChatStream.test.ts` adds a multi-turn assertion: send turn 1 → store the `backend_session_id` → send turn 2 → MSW handler must receive the same `session_id` in the second POST body.
+
+### Task v2.4-2 — Stream `tool_step` events during `paper_search` (CRITICAL)
+
+**Symptom:** trace panel sits empty for 60-90s during a paper_search turn (during arXiv download + extract + chunk + embed), then all 6-10 rows appear at once at the end.
+
+**Root cause:** [`backend/src/paperhub/api/chat.py:182-189`](../../../backend/src/paperhub/api/chat.py#L182-L189) awaits `paper_search()` (returns `str`) before draining `tool_calls`. The agent's whole tool-calling loop runs synchronously before chat.py gets a chance to emit any `tool_step` events.
+
+**Files:**
+- Modify: `backend/src/paperhub/agents/research.py` — convert `paper_search` from `async def -> str` to `async def -> AsyncIterator[ToolStepRecord | FinalOnlyMessage]`. After each `tracer.step()` context closes, the agent yields the just-written tool_calls row(s); after the loop concludes, yield a `FinalOnlyMessage(content=...)`.
+- Modify: `backend/src/paperhub/api/chat.py` — switch the `paper_search` branch to iterate the async generator, forwarding `ToolStepRecord` as `tool_step` SSE events in real time (matches the `paper_qa_stream` pattern).
+- Optional: a small helper `_emit_steps_since(tracer, after_step)` to dedupe the drain-tool_calls logic that lives in both branches now.
+
+**Test:** `tests/test_chat_sse.py::test_paper_search_streams_tool_step_events_incrementally` — set `PAPERHUB_ROUTER_MOCK` to force paper_search, monkey-patch `litellm.acompletion` with a side_effect sequence that yields canned tool_calls, and time-track the SSE events: each `tool_step` must arrive *before* the next `paper_search:plan` step finishes (i.e., consume events as they arrive, not buffer to end).
+
+### Task v2.4-3 — TraceInline expand-on-click with args/result/reason (CRITICAL)
+
+**Symptom:** trace panel shows only `[main#5] research · paper_search:search_arxiv (-) 2577ms ok` per row — no `query`, no `reason`, no `result_summary`. The "tool selection logic" demo is reduced to opaque latency numbers.
+
+**Root cause:** [`frontend/src/components/chat/TraceInline.tsx:35-37`](../../../frontend/src/components/chat/TraceInline.tsx#L35-L37) renders only the headline. The `ToolCallRecord` payload includes `args_redacted_json` and `result_summary_json` but the component discards them. SRS §III-2 FR-02 specifies *"Click a row to expand `args_redacted` + `result_summary`"* — never implemented.
+
+**Files:**
+- Modify: `frontend/src/components/chat/TraceInline.tsx` — each `<li>` becomes its own collapsible. On expand, render two `<dl>` blocks (Args / Result) with structured rendering for the known keys: `reason` rendered prominently in italics (it's the LLM's *why*); `query` / `paper_id` / `arxiv_id` / `mode` shown as labelled rows; `count` / `title` / `cache_hit` / `papers_id` shown in the result; everything else falls through to a pretty-printed JSON block. Keep the outer "Trace · N steps" toggle for the collapsed default.
+- Add: `frontend/tests/components/TraceInline.test.tsx` — three new cases: expand reveals reason; expand reveals query+count for a search_library call; error status renders error field in red.
+
+**Test:** `npm test -- TraceInline` — all existing assertions plus the three new ones.
+
+### Task v2.4-4 — Reference Sources panel + Library Browser + **SearchResultList** (IMPORTANT)
+
+**Symptom:** three missing UI surfaces:
+1. User can't see what's attached to the current session, can't toggle, can't remove.
+2. User can't browse + attach already-indexed papers from prior sessions.
+3. **User can't add papers from a paper_search result** — the agent shortlists candidates (v2.4 suggest-only), but the frontend has nowhere to render them as actionable cards. Without SearchResultList, the agent's shortlist is just text in the assistant message and the user has no path to ingest anything.
+
+**Scope:** originally a Plan D surface; SearchResultList in particular is now Plan-C-critical because v2.4's suggest-only flow makes the cards the only attach surface in a paper_search turn. Citation Canvas + Compare view stay deferred to Plan D / G.
+
+**Files (three components, two API endpoints, one store slice):**
+
+**Backend:**
+- Modify: `backend/src/paperhub/api/papers.py` —
+  - Add `GET /papers?session_id=N` (list this session's references joined to `paper_content`).
+  - Extend `POST /papers` to accept `paper_id: str` (prefix-discriminated) in addition to the legacy `arxiv_id: str` (for backwards compat with existing scripts). Body now `{session_id: int, paper_id?: str, arxiv_id?: str}` — at least one of `paper_id` or `arxiv_id` required. If `paper_id` is given, dispatches via the new `add_paper_to_session_dispatch` paper_id router (see Task v2.4-5). If `arxiv_id` is given, internally constructs `paper_id=f"arxiv:{arxiv_id}"` so the dispatch path is unified.
+
+**Frontend — three new components:**
+- Create: `frontend/src/components/references/ReferenceSourcesDrawer.tsx` — **collapsible right-edge drawer** (NOT a fixed sidebar panel; user-requested in v2.4 design notes). Uses shadcn `Sheet` primitive. Trigger button stays fixed in the viewport with a count badge. Drawer body lists `GET /papers?session_id={current_backend_session_id}` results. Each row: title, year, arxiv_id linked, enable/disable Switch (→ PATCH), trash icon (→ DELETE). Auto-refreshes on `search_results` (when `auto_added` candidates land) and on user-initiated Add success. On `auto_added` arrival, flash the trigger button's count badge — do not auto-open the drawer (disrupts reading flow).
+- Create: `frontend/src/components/references/LibraryBrowserModal.tsx` — opened by an "Add from library" button at the top of the drawer. Searches `GET /papers/library?session_id={current}&q=...` (300ms debounce); each row has an Attach button → `POST /papers/from-library`.
+- Create: `frontend/src/components/chat/SearchResultList.tsx` — **renders inline below an assistant message** whose corresponding run produced a `search_results` event. Each candidate card shows title, authors (truncated), year, abstract (clamped to 3 lines), source-badge (`arXiv` / `Semantic Scholar` / `Already in library`), the agent's `reason` in muted italics, and a state-dependent action area (see Task v2.4-5 architecture diagram for the full matrix):
+  - `auto_added=true` → "Added by agent ✓" badge, no Add button (paper is already in the session via finalize auto-attach).
+  - `error="no_ingestible_source"` → "Source unavailable" badge, greyed action.
+  - Otherwise → "Add as reference" button → `POST /papers` with `{session_id, paper_id}`. On 200, button transitions to "Added ✓"; drawer auto-refreshes; the `paper_id` enters a frontend `addedPaperIds` set so re-renders show the added state.
+
+**Frontend — wiring:**
+- Modify: `frontend/src/types/domain.ts` — add `SearchResultCandidate` shape (mirrors backend `SearchResultsEvent` payload). Add a new field on `ChatMessage`: `search_results?: SearchResultCandidate[]` populated from the `search_results` SSE event.
+- Modify: `frontend/src/hooks/useChatStream.ts` — handle the new `search_results` event: parse + call store `setSearchResults(sessionId, runId, candidates)`.
+- Modify: `frontend/src/store/chat.ts` — new state slices: (a) `referencesBySession: Record<number, ReferenceItem[]>` with `setReferences`, `patchReferenceEnabled`, `removeReferenceLocal`; (b) `setSearchResults(sessionId, runId, candidates)` that finds the assistant message with matching `run_id` and patches its `search_results` field. Also add a frontend-only `addedPaperIds: Set<string>` updated whenever a POST /papers returns 200, so SearchResultList can render the per-card "already added" state across re-renders.
+- Modify: `frontend/src/lib/api.ts` — typed wrappers: `listSessionReferences(sessionId)`, `toggleReference(papersId, enabled)`, `removeReference(papersId)`, `listLibrary(sessionId, q, limit, offset)`, `attachFromLibrary(sessionId, paperContentId)`, `ingestPaper(sessionId, paperId)` (new — POST /papers with prefix-discriminated paper_id).
+- Modify: `frontend/src/components/chat/MessageBubble.tsx` (or `ChatPage.tsx` if the layout is owned there) — render `<SearchResultList candidates={message.search_results} />` directly below the assistant message bubble whenever `message.search_results` is populated.
+- Modify: `frontend/src/components/layout/Sidebar.tsx` — mount `<ReferenceSourcesPanel />` below the existing sessions section. Show only when the active frontend session has a `backend_session_id`.
+
+**Tests:**
+- Backend `tests/test_papers_api.py`:
+  - `test_list_session_references_returns_joined_paper_content_fields`
+  - `test_post_papers_accepts_paper_id_arxiv_prefix`
+  - `test_post_papers_accepts_paper_id_ss_prefix_with_arxiv_externalId` (mocks SS metadata fetch)
+  - `test_post_papers_accepts_paper_id_library_prefix_is_idempotent`
+  - `test_post_papers_legacy_arxiv_id_field_still_works`
+- Frontend `tests/components/SearchResultList.test.tsx`:
+  - `test_renders_candidates_with_title_authors_year_abstract`
+  - `test_add_button_calls_post_papers_with_prefix_discriminated_paper_id`
+  - `test_add_button_disabled_for_library_candidate_already_in_session`
+  - `test_no_ingestible_source_badge_disables_add_button`
+  - `test_after_add_success_button_shows_added_state`
+- Frontend `tests/components/ReferenceSourcesPanel.test.tsx` — load / toggle / remove (MSW catches PATCH / DELETE).
+- Frontend `tests/components/LibraryBrowserModal.test.tsx` — search debounce + attach.
+
+### Task v2.4-5 — Shortlist-with-finalize agent + SS-primary palette + PDF ingestion fallback (DESIGN CHANGE)
+
+**Symptom drives three coupled shifts:**
+1. **Browser test:** "the download source not use at all… the agent picks up a lot of references, but make just pick up some related" — research naturally surfaces many candidates; auto-downloading them all wastes resources for papers the user didn't choose. **Tames v2.3 "default-add top 1-2" into "shortlist 3-5 with optional `finalize: true` marker on 1-2 most-confident picks".**
+2. **Three attach sources defined**: agent-finalize (auto-attach with server cap 2), user clicks Add on SearchResultList card, user attaches from Library Browser. Suggested-only candidates are never downloaded.
+3. **Plan C v2.4 design:** Semantic Scholar broader coverage (~200M vs arXiv subset) + better metadata; arXiv reserved for raw-source downloading.
+
+**Design:** see SRS v2.4 entry + FR-07 + FR-08 + §III-3 Research Agent row + UC-1 + UC-2 paragraph 3.
+
+**Architectural shape (read this first):**
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  paper_search turn                                                   │
+│                                                                      │
+│  Agent (read-only loop, no write tool):                              │
+│    tool palette = {search_library, search_semantic_scholar,          │
+│                    find_related_papers}                              │
+│    Final assistant message ends with ```json:candidates``` block:    │
+│      [{paper_id, reason, finalize?:bool}, ...]                       │
+│    Yields ToolStepYield per step + SearchResultsYield(candidates)    │
+│           + FinalOnlyMessage(prose_text)                             │
+│                                                                      │
+│  chat.py (paper_search branch):                                      │
+│    forwards ToolStepYield → SSE tool_step                            │
+│    on SearchResultsYield:                                            │
+│       1. Cap finalize-flagged candidates to MAX=2 (truncate rest     │
+│          to suggested-only).                                         │
+│       2. For each finalize-flagged candidate, call                   │
+│          add_paper_to_session_dispatch(paper_id) → records           │
+│          papers_id on the candidate. On NoIngestibleSourceError,     │
+│          set candidate.error="no_ingestible_source", auto_added=false│
+│       3. Emit SSE search_results with the enriched candidate list    │
+│          (finalize, auto_added, papers_id, error all populated).     │
+│    forwards FinalOnlyMessage → SSE final                             │
+│                                                                      │
+│  Three attach paths (all → add_paper_to_session_dispatch):           │
+│    A. Agent-finalized: chat.py auto-calls during paper_search turn   │
+│    B. POST /papers {session_id, paper_id}: user clicks Add card      │
+│    C. POST /papers/from-library: user attaches from Library Browser  │
+│                                                                      │
+│  Frontend (Task v2.4-4):                                             │
+│    handles search_results event → stores candidates on the           │
+│    assistant message → SearchResultList renders cards:               │
+│      finalize-flagged + auto_added=true → "Added by agent ✓"         │
+│      finalize=false → Add button (calls POST /papers)                │
+│      error="no_ingestible_source" → greyed-out "Source unavailable"  │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Suggested-only candidates are never downloaded** — they exist as metadata in the `search_results` SSE payload only. Cache semantics for the three attach paths are identical because they all go through the same dispatcher: same paper picked via finalize / Add card / Library Browser resolves to the same `paper_content` row.
+
+**Files:**
+
+**Semantic Scholar layer:**
+- Modify: `backend/src/paperhub/pipelines/semantic_scholar.py`
+  - Add `search_papers(query, max_results) -> list[SemanticScholarHit]` (free-text search via `/graph/v1/paper/search?fields=title,abstract,year,authors,externalIds,openAccessPdf`).
+  - Add `fetch_paper_metadata(paper_id) -> SemanticScholarMetadata` (single-paper fetch, same field set).
+  - Both helpers send `x-api-key` header from `PAPERHUB_SEMANTIC_SCHOLAR_API_KEY` env when present. Module-level `httpx.AsyncClient` singleton, 10s timeout, User-Agent matching `arxiv_client.py`. Raise typed exceptions on 429.
+
+**Pipeline PDF ingestion:**
+- Modify: `backend/src/paperhub/pipelines/paper_pipeline.py`
+  - Add `_ingest_pdf_from_url(req, pdf_url, *, title, abstract, authors, year)` — download via httpx → compute `sha256:<hex>` from bytes → cache lookup (short-circuit if hit) → write `cache_root/<sha256>/source.pdf` → run `_render_pdf` → chunk → embed → persist `paper_content(kind='pdf_upload')` + chunks in single transaction → insert papers row → return `IngestResult`.
+  - `ingest()` dispatch: dispatch on `req.paper_id` prefix (`arxiv:` / `ss:` / `library:`). Cache lookup at the top must handle both `arxiv:<id>` and `sha256:<hex>` content keys.
+
+**Research tools — read-only palette:**
+- Modify: `backend/src/paperhub/agents/research_tools.py`
+  - **Remove `search_arxiv` from `TOOL_SCHEMAS`.** Keep dispatcher as internal Python helper (Plan F may reuse it via direct call). Ensure no LLM-callable schema references it.
+  - **Remove `add_paper_to_session` from `TOOL_SCHEMAS`.** Keep dispatcher as `add_paper_to_session_dispatch` — but it is now invoked **only by the `POST /papers` endpoint**, never by the agent loop. Update its signature to take `paper_id` (prefix-discriminated). Existing `library:` / `arxiv:` branches stay; add the `ss:` branch (SS metadata fetch → branch on `externalIds.ArXiv` → recurse into `arxiv:<id>` path; else `openAccessPdf.url` → `_ingest_pdf_from_url`; else raise typed `NoIngestibleSourceError` → HTTP 422 in the API layer).
+  - Add `search_semantic_scholar(query, max_results)` schema + dispatcher.
+  - Update `find_related_papers(paper_id, mode, max_results)` dispatcher — `paper_id` accepts `arxiv:<id>` or `ss:<paperId>`. Internal logic unchanged.
+
+**Agent loop (read-only + emit candidates):**
+- Modify: `backend/src/paperhub/agents/research.py`
+  - Drop `add_paper_to_session` from the prompt + tool dispatch.
+  - After the LLM's final no-tool-calls response, **build the shortlist** from the most recent `search_library` / `search_semantic_scholar` / `find_related_papers` tool results that the agent surfaced in its message. Cleanest implementation: have the agent emit a structured JSON block in its final message (e.g., a fenced ```json:candidates``` block listing `[{paper_id, reason}, ...]` for the picks), then the agent function parses that out, looks up the full metadata from the prior tool-call results cache, and yields a `SearchResultsYield(candidates=...)` event. Strip the JSON block from the assistant message before yielding the `FinalOnlyMessage`.
+  - Update prompt to require the agent to end with a `json:candidates` block (described below).
+  - Rename `MAX_ARXIV_CALLS_PER_TURN` → `MAX_EXTERNAL_SEARCH_CALLS_PER_TURN`, apply to `search_semantic_scholar`. `find_related_papers` is uncapped.
+  - Yield types updated: `paper_search` now `-> AsyncIterator[ToolStepYield | SearchResultsYield | FinalOnlyMessage]` (Task v2.4-2 introduced the first two).
+
+**Prompt update:**
+- Modify: `backend/src/paperhub/llm/prompts/paper_search_v1.yaml`
+  - Drop all mentions of `search_arxiv` and `add_paper_to_session`.
+  - Describe the read-only palette + the shortlist-via-json-block contract:
+
+    ```
+    After you've gathered enough information, compose your final assistant
+    message in two parts:
+      1. A short human-readable summary of the picks (3-5 papers max) with
+         a one-line reason per pick.
+      2. A fenced code block tagged ```json:candidates``` containing a JSON
+         array of {paper_id, reason} objects, one per pick. Use the exact
+         paper_id from the tool result (library:<id>, arxiv:<id>, or
+         ss:<paperId>). Reason should be the same one-line text shown in
+         the prose summary.
+
+    The system parses the json:candidates block to render Add buttons; the
+    prose summary is what the user reads. DO NOT include other tool calls
+    in the final turn — pick your shortlist and stop.
+    ```
+
+**New SSE event:**
+- Modify: `backend/src/paperhub/models/events.py`
+  - Add `SearchResultsEvent(type="search_results", run_id, candidates: list[SearchCandidate])` where `SearchCandidate` has `paper_id: str`, `title: str`, `authors: list[str]`, `year: int | None`, `abstract: str | None`, `arxiv_id: str | None`, `has_open_pdf: bool`, `reason: str`, `already_in_session: bool`. Frontend uses `has_open_pdf` + `arxiv_id` to decide button-enabled state pre-emptively (no need to ping the backend).
+
+**Chat endpoint:**
+- Modify: `backend/src/paperhub/api/chat.py`
+  - The `paper_search` branch (after Task v2.4-2's async-generator refactor) now also handles `SearchResultsYield` items, emitting them as `search_results` SSE events before the `final` event.
+
+**API endpoint (extends Task v2.4-4's POST /papers change):**
+- Modify: `backend/src/paperhub/api/papers.py`
+  - The `POST /papers` body accepts `paper_id` (or legacy `arxiv_id`). For `paper_id="ss:<id>"`, the dispatcher's `NoIngestibleSourceError` translates to **HTTP 422** with body `{"detail": "no_ingestible_source", "title": "...", "paper_id": "..."}` so the frontend can grey out the button rather than crash.
+
+**Env:**
+- Modify: `backend/.env.example` — confirm `PAPERHUB_SEMANTIC_SCHOLAR_API_KEY` line is present.
+
+**Tests:**
+- `tests/test_semantic_scholar.py` — `test_search_papers_extracts_externalIds_and_pdf_url` (respx-mocked). `test_fetch_paper_metadata_handles_429`.
+- `tests/test_research_tools.py`:
+  - `test_search_arxiv_not_in_tool_schemas`
+  - `test_add_paper_to_session_not_in_tool_schemas`
+  - `test_search_semantic_scholar_in_tool_schemas`
+  - `test_add_paper_to_session_dispatch_ss_prefers_arxiv` (still tested as a Python function — endpoint calls it)
+  - `test_add_paper_to_session_dispatch_ss_falls_back_to_pdf`
+  - `test_add_paper_to_session_dispatch_ss_raises_no_ingestible_source_when_neither_available`
+- `tests/test_research_paper_search.py` — update the 5 existing test cases:
+  - Drop the `add_paper_to_session` tool-call assertions.
+  - Add `test_paper_search_emits_search_results_yield_with_top_3to5_candidates` — mock LLM to emit a final message with a `json:candidates` block; assert the function yields a `SearchResultsYield` with parsed candidates.
+  - Add `test_paper_search_search_results_includes_metadata_for_rendering` — verify the yield carries title / abstract / has_open_pdf so the frontend doesn't need to re-fetch.
+- `tests/test_chat_sse.py` — `test_paper_search_emits_search_results_event_before_final`.
+- `tests/test_paper_pipeline.py` — `test_ingest_pdf_from_url_persists_pdf_upload_kind` with the existing PDF fixture.
+- Update `scripts/research_turn.ps1` — sub-test 3 now asserts (a) `paper_search:search_semantic_scholar` tool_step appears, (b) a `search_results` SSE event arrives with ≥ 1 candidate, (c) **no `papers` row is created during the turn** (zero auto-add). Sub-test 4 (new): POST `/papers` with one of the surfaced `paper_id`s → assert the paper attaches and `paper_content.kind` matches the discovery source.
+
+**Cross-check with Task v2.4-4:** the `SearchResultList` component consumes the `search_results` SSE event's payload directly; the structural contract is defined here in Task 5 and consumed there in Task 4. Same `SearchCandidate` shape on both sides — keep them in sync via `frontend/src/types/domain.ts`.
+
+### Quality gates after the v2.4 round
+
+From `backend/`:
+
+```powershell
+uv run pytest -v          # +5-8 new tests across 4 files
+uv run ruff check src tests
+uv run mypy src
+.\scripts\smoke_chat_real.ps1     # regression
+.\scripts\ingest_paper.ps1 1706.03762   # I-8 #2
+.\scripts\query_papers.ps1        # I-8 #3
+.\scripts\research_turn.ps1       # I-8 #8 + #9 + SS primary
+```
+
+From `frontend/`:
+
+```powershell
+npm test          # +3-5 new tests across ReferenceSourcesPanel, LibraryBrowserModal, TraceInline
+npm run typecheck
+npm run lint
+npm run build
+```
+
+Browser verification (manual):
+- Turn 1: paper_search → trace events arrive incrementally as the loop runs; expand a row → reason + query visible; final message names what was added.
+- Turn 2 in same session: paper_qa → cites both newly-added paper AND any existing references; **no "No references enabled" regression**.
+- Sidebar: Reference Sources panel populates; toggle a paper off → paper_qa no longer cites it.
+- Library Browser: open, search, attach an existing paper → appears in Reference Sources without re-download.
+
+---
+
+## Plan C v2.5 Follow-up Tasks (MCP client layer + open-webSearch + paperhub-papers FastMCP)
+
+> **Status:** v2.4 shipped. Manual paper-search testing on short / vague queries (e.g. "that diffusion paper everyone cites", "Mamba 的後續工作") surfaced **a UX failure inside the v2.4 read-only loop** — Semantic Scholar's lexical match consistently misses on indirect references; the agent burns its 3-call external-search budget on slight rephrasings and surrenders a thin shortlist. v2.5 fixes this by **shipping the MCP client layer** Plan C's original SRS intent expected and integrating `Aas-ee/open-webSearch` as a no-key multi-engine discovery step. **SRS v2.6 update**: the `paperhub-papers` FastMCP server originally deferred to Plan E is **pulled into v2.5 scope** — keeping a dual dispatch path (in-process `papers.*`, MCP `web.*`) re-introduces the exact "manual tool" violation the course-correction set out to eliminate. The same client layer is reused unchanged by Plan E (sqlite MCP) and Plan G (filesystem MCP).
+>
+> **SRS reference**: [v2.6 entry](../specs/2026-05-17-paperhub-srs.md) + [v2.5 entry](../specs/2026-05-17-paperhub-srs.md) + §III-6 (open-webSearch + paperhub-papers rows + §III-6.1 MCP client layer subsection) + FR-07 v2.5 paragraph + §III-3 Research Agent v2.5 paragraph.
+>
+> **Design summary**: every tool the Research Agent has — `papers.*` (the three local dispatchers, now exposed via FastMCP at `/mcp` on the same FastAPI app) + `web.*` (open-webSearch over HTTP at `http://localhost:3000/mcp`) — flows through **one** MCPClient dispatch path. **Discovery-only** tools (`web.search`, `web.fetch`) enter the palette only when the registry has a reachable `web` server; their results carry no `paper_id` and cannot enter `json:candidates`. The 3-call external-search cap broadens to cover `papers.search_semantic_scholar` + `web.search` + `web.fetch` combined. open-webSearch-down case: registry has no `web` server, web tools don't enter the palette, `paper_search/v1` loads instead of `paper_search/v2`, behaviour reverts to v2.4 exactly. open-webSearch is an **optional external dependency** (operator runs `npm install -g open-websearch && open-websearch serve`); `paperhub-papers` is **always available** (mounted in-process by the backend itself).
+>
+> **Task sequencing**: 1 → 2 → **3 (NEW — paperhub-papers FastMCP server)** → 4 → 5 → 6. Tasks 4–6 below were numbered v2.5-3 through v2.5-5 before the v2.6 update; they have been renumbered.
+
+### Task v2.5-1 — MCP client core (`paperhub.mcp.{config,errors,client}`)
+
+**Goal:** establish the per-server connector that talks to any MCP server reachable via streamable HTTP (or stdio later). Reused by Plan E + Plan G with zero code changes.
+
+**Files:**
+- New: `backend/src/paperhub/mcp/__init__.py` — module root, exports `MCPClient`, `MCPRegistry`, `MCPServerConfig`, `MCPUnavailableError`, `MCPToolError`.
+- New: `backend/src/paperhub/mcp/config.py` — `MCPServerConfig` dataclass (`name`, `transport`, `url` or `command`+`args`, `expose: list[str]`, `aliases: dict[str, str]`, `timeout_seconds: float`). Loader `load_mcp_servers(path: Path) -> list[MCPServerConfig]` reads `mcp_servers.toml` and validates each block.
+- New: `backend/src/paperhub/mcp/errors.py` — `MCPUnavailableError` (transport/connection failure), `MCPToolError` (upstream tool returned an error).
+- New: `backend/src/paperhub/mcp/client.py` — `MCPClient` wrapping `mcp.client.streamable_http.streamablehttp_client` + `mcp.ClientSession`. Methods: `connect()`, `disconnect()`, `list_tools() -> list[ToolSchema]` (returns LiteLLM-shaped JSON-schema dicts, namespaced `<server_name>.<tool>`, allowlist + alias applied), `call_tool(name: str, args: dict) -> Any` (where `name` is the un-namespaced tool name). Idempotent connect; reconnect-with-backoff on a stale-session error (cap 4 attempts).
+- New: `backend/pyproject.toml` — add `mcp>=1.0.0` to `[project] dependencies`.
+- New: `backend/mcp_servers.toml.example` — checked-in template with the `web` server block commented in; real `mcp_servers.toml` is gitignored.
+- Modify: `backend/.gitignore` — add `mcp_servers.toml`.
+
+**Tests:** new `tests/mcp/__init__.py`, `tests/mcp/test_config.py` (valid TOML, missing fields, alias validation), `tests/mcp/test_client.py` (stub `streamablehttp_client` with `asynccontextmanager` → fake server returning canned `tools/list` + `tools/call`; assert connect → list → call round-trip; assert namespacing; assert timeout; assert `MCPUnavailableError` on transport failure).
+
+**Acceptance:** `uv run pytest tests/mcp/` passes; `uv run mypy src/paperhub/mcp` strict-clean.
+
+### Task v2.5-2 — Registry + FastAPI lifespan wiring (`paperhub.mcp.registry`) **[v2.6 UPDATE: lazy connect]**
+
+**Goal:** stand up a process-wide MCP registry that loads `mcp_servers.toml` at FastAPI startup and exposes `aggregate_tool_schemas()` + `call(namespaced_name, args)` to consumers. Connection to each server is **lazy on first tool use** (not eager at startup) — required because the `papers` server (added in v2.5-3) points at the backend's own port over loopback, and uvicorn isn't accepting connections during lifespan startup. Lazy connect is simpler than special-casing loopback servers and applies the same rule uniformly to every configured server.
+
+**Files:**
+- New: `backend/src/paperhub/mcp/registry.py` — `MCPRegistry` class:
+  - `startup(config_path: Path) -> None` — loads `mcp_servers.toml` via `load_mcp_servers(...)`, **constructs** `MCPClient` instances for each block (but does NOT call `connect()` yet), stashes them in `self._clients: dict[str, MCPClient]` keyed by server name. Missing `mcp_servers.toml` → log INFO and continue with an empty registry (fresh-clone-friendly).
+  - `shutdown() -> None` — calls `await client.disconnect()` on every client that ever connected; idempotent disconnects.
+  - `aggregate_tool_schemas() -> list[dict]` — **on first call**, this triggers connection to all configured servers (lazy connect; failures log WARN and skip), then returns the union of per-server `list_tools()` results. Subsequent calls return a cached list (invalidate-on-failure).
+  - `call(namespaced_name: str, args: dict) -> Any` — splits `<server>.<tool>`, ensures the server's client is connected (lazy-connecting if not), dispatches. If the server is unreachable, raises `MCPUnavailableError`.
+  - `has_tool(namespaced_name: str) -> bool` — peeks into the cached aggregated schema list (triggering lazy connect if not yet done).
+- Modify: `backend/src/paperhub/api/main.py` (or wherever FastAPI's lifespan is defined — verify location) — attach the registry: `app.state.mcp_registry = MCPRegistry()` + `await app.state.mcp_registry.startup(mcp_servers_toml_path)` in lifespan startup, `await app.state.mcp_registry.shutdown()` in shutdown.
+
+**Tests:** `tests/mcp/test_registry.py` — load a TOML fixture with two servers (one reachable, one unreachable, both stubbed); assert `startup()` does NOT connect either client; assert `aggregate_tool_schemas()` triggers connection to both, returns the reachable one's tools, and logs WARN for the unreachable one; `call("web.search", {...})` routes correctly; `call("unknown.tool", {...})` raises a clear error. Also: `startup(path_to_nonexistent_toml)` succeeds and yields an empty registry.
+
+**Acceptance:** existing `uv run pytest -v` runs unchanged (registry initialised but no MCP servers exposed by default in test env); add `tests/api/test_lifespan_mcp.py` asserting `app.state.mcp_registry` exists after startup and does not block on unreachable loopback servers (test the boot path with `mcp_servers.toml` pointing at the backend itself — must not deadlock).
+
+### Task v2.5-3 — `paperhub-papers` FastMCP server (mount on FastAPI at `/mcp`) **[v2.6 ADDITION]**
+
+**Goal:** stand up an in-process FastMCP server that re-exposes the three existing Research Agent tool dispatchers (`search_library`, `search_semantic_scholar`, `find_related_papers`) over the MCP wire protocol. Mounted on the existing FastAPI app at `/mcp` (no extra process, no second port). External MCP clients (Claude Desktop, Cursor) and the backend's own Research Agent reach the same URL — uniform interface.
+
+**Architectural notes:**
+- **No subprocess.** FastMCP supports being mounted as an ASGI sub-app on FastAPI. The MCP HTTP transport listens on the backend's own port at `/mcp`.
+- **Same code path.** The FastMCP tool handlers call the *exact same* dispatcher functions in `agents/research_tools.py` (`search_library_dispatch`, `search_semantic_scholar_dispatch`, `find_related_papers_dispatch`). Zero behaviour change at the SQL / HTTP / Chroma layer — only the surface in front of them changes.
+- **Same tracer-step contract.** Tracer step name remains `paper_search:papers.<tool>` (the namespace prefix comes from the MCP server name `papers`). The dispatcher functions write `tool_calls` rows themselves via the existing `Tracer` instance the agent passes in — the FastMCP layer must thread the live `Tracer` + `aiosqlite.Connection` + `session_id` through tool-call invocations. Pattern: per-request FastMCP context populated from the parent FastAPI request scope so the tool handler can reach `request.app.state` + the active run's tracer.
+- **`add_paper_to_session_dispatch` stays in-process.** It is not in the LLM palette (v2.4) and is called by FastAPI endpoints (`POST /papers`, `POST /papers/from-library`). Do NOT expose it via MCP in this task.
+
+**Files:**
+- New: `backend/src/paperhub/mcp/server.py` — `build_paperhub_papers_server() -> FastMCP` factory. Defines three tools matching the LiteLLM JSON-schemas already in `research_tools.TOOL_SCHEMAS`. Each tool handler resolves its per-call context (live `Tracer`, `aiosqlite.Connection`, `session_id`) from the FastMCP request scope (set via `paperhub_papers_request_context()` middleware below) and delegates to the existing `*_dispatch` function. Tool return shape matches today's structured-return dataclasses, JSON-serialised by FastMCP.
+- New: `backend/src/paperhub/mcp/server_context.py` — `PaperhubPapersRequestContext` dataclass + `set_request_context(ctx) -> token` / `current_request_context() -> PaperhubPapersRequestContext` using `contextvars.ContextVar`. The HTTP request handling middleware sets the context per-MCP-request from the parent FastAPI request, tool handlers read it.
+- Modify: [`backend/src/paperhub/api/main.py`](../../../backend/src/paperhub/api/main.py) (or wherever the FastAPI app is constructed — verify location) — instantiate the FastMCP server during app startup; mount it: `app.mount("/mcp", paperhub_papers.streamable_http_app())` (verify the exact mount API against the installed FastMCP version). Add a small middleware on the mounted sub-app that captures the parent request scope (session_id from header / cookie / query string — pick the same path used by `/chat` for consistency) and populates `PaperhubPapersRequestContext`.
+- Modify: [`backend/mcp_servers.toml.example`](../../../backend/mcp_servers.toml.example) — add a *commented-in* `papers` server block at the top of the file showing the loopback URL pattern:
+  ```toml
+  [[server]]
+  name = "papers"
+  transport = "streamable_http"
+  url = "http://localhost:${PAPERHUB_BACKEND_PORT:-8000}/mcp"
+  expose = ["search_library", "search_semantic_scholar", "find_related_papers"]
+  timeout_seconds = 8.0
+  ```
+  Keep the `web` block below it as a separate `[[server]]` entry. (Env-var-interpolation syntax depends on what `load_mcp_servers` supports — Task v2.5-1 may have implemented it; if not, hardcode a port + add an `env` flag in v2.5-6 cleanup.)
+- New: `backend/pyproject.toml` — verify `mcp>=1.0.0` from v2.5-1 already bundles `FastMCP`; if it's a separate package (e.g. `fastmcp`), add it.
+
+**Tests:** new `tests/mcp/test_server.py`:
+- Build the FastMCP server via the factory; spin up a test FastAPI app with it mounted at `/mcp`; use `httpx.AsyncClient` against the in-process app to:
+  - Call MCP `tools/list` → assert all three tools are advertised with correct names + JSON-schemas (matching the existing `TOOL_SCHEMAS`).
+  - Call `tools/call` for `search_library` against a seeded in-memory SQLite → assert the same rows that `search_library_dispatch` would return.
+  - Call `tools/call` for `search_semantic_scholar` with `respx` stubbing the Semantic Scholar HTTP API → assert the dispatcher's structured-return shape round-trips through FastMCP serialization unchanged.
+  - Call `tools/call` for `find_related_papers` similarly.
+- Assert that every tool call writes a `tool_calls` row through the threaded `Tracer` (use a real `Tracer` against a temp DB; query the table after each call).
+- Assert that an MCP call with an out-of-context (no `session_id`) returns a clean error rather than crashing.
+
+Additional regression coverage in `tests/test_research_tools.py` — the existing tests must still pass (the dispatcher functions are unchanged; we're only adding a new surface in front of them).
+
+**Acceptance:**
+- `uv run pytest tests/mcp/ -v` passes (Task v2.5-1's 24 tests + new v2.5-3 tests).
+- `uv run pytest tests/test_research_tools.py -v` passes unchanged.
+- `uv run ruff check src tests` clean.
+- `uv run mypy src/paperhub/mcp src/paperhub/api` strict-clean.
+
+**Out of scope for this task** (handled in v2.5-4 + v2.5-5):
+- Switching the agent to call via `MCPClient` instead of in-process dispatch. This task only stands up the MCP surface; v2.5-4 migrates the agent.
+- Adding `papers.*` to the `paper_search/v2` prompt's tool description (v2.5-5).
+- Removing the now-redundant `TOOL_SCHEMAS` module-level constant. The agent still uses it directly in v2.5-3 — v2.5-4 is the cutover.
+
+### Task v2.5-4 — Research Agent migration to uniform MCP dispatch **[v2.6 RESHAPE]**
+
+**Goal:** make every Research Agent tool call flow through `MCPRegistry.call(...)` — eliminate the in-process `papers.*` dispatch branch entirely. After this task there is exactly one dispatch path, and the SRS-original "every tool via MCP, no manual tools" architecture holds end-to-end.
+
+**Files:**
+- Modify: [`backend/src/paperhub/agents/research_tools.py`](../../../backend/src/paperhub/agents/research_tools.py) — replace the module-level `TOOL_SCHEMAS` constant with a builder `build_tool_schemas(mcp_registry: MCPRegistry) -> list[dict]` that returns `mcp_registry.aggregate_tool_schemas()`. **The base three schemas are no longer hardcoded here** — they come from the `papers.*` MCP server registered in `mcp_servers.toml`. The `*_dispatch` Python functions stay in this module (the FastMCP server from v2.5-3 imports them); they are no longer called by the agent directly.
+- Modify: [`backend/src/paperhub/agents/research.py`](../../../backend/src/paperhub/agents/research.py) — `_dispatch_paper_search_tool_call` reduces to a single branch: `result = await mcp_registry.call(tool_name, args)`. All tool names are now namespaced (`papers.search_library`, `web.search`, etc.). Tracer step name format: `paper_search:<namespaced_name>` (e.g. `paper_search:papers.search_library`, `paper_search:web.search`). Web hits remain not-indexed into `recent_results`; papers hits ARE indexed (they were before — that part keeps working). Errors caught and translated to `{"error": str(exc), "tool": name}`.
+- Modify: `MAX_EXTERNAL_SEARCH_CALLS_PER_TURN = 3` — rename to `MAX_EXTERNAL_DISCOVERY_CALLS_PER_TURN`; cap counter increments on `papers.search_semantic_scholar` + `web.*` calls (NOT on `papers.search_library` or `papers.find_related_papers` — those remain cheap / uncapped, matching v2.4 semantics).
+- Modify: [`backend/src/paperhub/api/chat.py`](../../../backend/src/paperhub/api/chat.py) and [`backend/src/paperhub/agents/research_graph.py`](../../../backend/src/paperhub/agents/research_graph.py) — thread `app.state.mcp_registry` through to the paper_search subgraph; the agent now requires the registry (no fallback to in-process dispatch).
+- Modify: [`backend/mcp_servers.toml.example`](../../../backend/mcp_servers.toml.example) — uncomment the `papers` block from v2.5-3 (it must be active by default for the agent to work). Document at the top of the file: "the `papers` server is required; do not disable it."
+
+**Tests:**
+- Update `tests/test_research_tools.py` — existing tests assert the dispatcher functions' behaviour against SQLite + respx mocks. These remain valid (the dispatcher functions are unchanged). Add: assert `build_tool_schemas(registry)` returns the registry's schemas verbatim (no in-process fallback).
+- New `tests/test_research_tools_mcp.py`:
+  - Stub the registry with a fake `papers.search_library` + `web.search`; assert dispatch routes through the registry, tracer step is named `paper_search:papers.search_library` / `paper_search:web.search`.
+  - Assert the renamed cap blocks a 4th external call regardless of mix (1 papers.search_semantic_scholar + 3 web → 4th rejected; 3 papers.search_semantic_scholar + 1 web → 4th rejected).
+  - Assert `papers.search_library` / `papers.find_related_papers` are NOT capped (uncapped, matching v2.4 semantics).
+- Update `tests/test_research_paper_search.py` — the 5 existing cases need the registry threaded in. Stub it to route `papers.*` calls back into the in-process dispatchers under the hood (cheapest path that keeps the test surface in shape).
+- Update `tests/test_chat_sse.py` — same: stub `app.state.mcp_registry` in the test app builder.
+
+**Acceptance:**
+- `uv run pytest -v` clean across the board (no regression in any existing test).
+- `uv run mypy src` strict-clean (the `TOOL_SCHEMAS = build_tool_schemas(None)` transitional shim from the original v2.5-3 plan is **not** present — there is no longer an in-process fallback).
+- Manual smoke (operator): start backend, ensure `papers` MCP server is reachable at `/mcp`, run `scripts/research_turn.ps1` — every tool_step row in the trace now carries a namespaced tool name.
+
+**Migration safety:** since the dispatcher functions themselves are unchanged, the only failure modes introduced by this cutover are (a) FastMCP serialization round-trip bugs (caught by v2.5-3's tests) and (b) the agent failing to find the `papers` server in the registry (manifests as a clean error at startup). Both are detectable before merge.
+
+### Task v2.5-5 — `paper_search/v2` prompt + conditional dispatch
+
+**Goal:** rewrite the paper_search prompt to (a) use the new namespaced tool names (`papers.search_library`, `papers.search_semantic_scholar`, `papers.find_related_papers`) — required by v2.5-4's MCP-only dispatch — and (b) teach the agent the discover-then-refine pattern when `web.*` is available. Load v2 only when the MCP registry exposes `web.search`; otherwise load v1 — but **v1 must also be updated** to use namespaced names since v2.5-4 cut the in-process path entirely.
+
+**Files:**
+- Modify: `backend/src/paperhub/llm/prompts/paper_search_v1.yaml` — rename tool references from `search_library` / `search_semantic_scholar` / `find_related_papers` to `papers.search_library` / `papers.search_semantic_scholar` / `papers.find_related_papers`. This is a mechanical rename matching v2.5-4's namespacing. No discovery / `web.*` tools mentioned (this is the daemon-down prompt).
+- New: `backend/src/paperhub/llm/prompts/paper_search_v2.yaml` — copy the (updated) v1, add `web.search` + `web.fetch` to the tool catalogue with descriptions emphasising **discovery-only** and the "must round-trip through `papers.search_semantic_scholar` (or `papers.search_library`) for a citable hit" rule. Insert a worked-example trajectory in the canonical-flow section: vague user query → `web.search` → `papers.search_semantic_scholar` (refined) → `json:candidates`. Update the call-budget note: the combined cap covers `papers.search_semantic_scholar` + `web.search` + `web.fetch` (not `papers.search_library` or `papers.find_related_papers` — those stay uncapped).
+- Modify: [`backend/src/paperhub/llm/prompts/registry.py`](../../../backend/src/paperhub/llm/prompts/registry.py) — add a helper `get_paper_search_slot(mcp_registry: MCPRegistry) -> str` that returns `"paper_search/v2"` if the registry has `web.search`, else `"paper_search/v1"`. (Registry is now always non-None per v2.5-4.)
+- Modify: `backend/src/paperhub/agents/research.py` — `_build_paper_search_messages` calls the helper instead of hardcoding `"paper_search/v1"`.
+
+**Tests:** new `tests/test_paper_search_prompt_selection.py` — assert v2 loads when the fake registry advertises `web.search`; assert v1 loads otherwise. New `tests/llm/test_prompts_paper_search_v2.py` — assert the v2 YAML parses, uses namespaced tool names, mentions both `web.search` and `web.fetch`, and includes the discovery-only rule. New `tests/llm/test_prompts_paper_search_v1.py` — assert v1 YAML parses and uses namespaced tool names (regression coverage for the v2.6 rename).
+
+**Acceptance:** both v1 and v2 use namespaced tool names matching what `MCPRegistry.aggregate_tool_schemas()` actually advertises; v2 only loads when warranted. No regression in existing `test_research_paper_search.py` (the 5 cases now exercise the namespaced names end-to-end).
+
+### Task v2.5-6 — Operator surface (smoke scripts, docs)
+
+**Goal:** make this usable by an operator from a clean clone. Add smoke scripts for both MCP surfaces (`papers.*` always-on, `web.*` daemon-up), and document the optional external dependency.
+
+**Files:**
+- New: `backend/scripts/smoke_mcp_papers.ps1` — operator-facing smoke: hits `http://localhost:8000/mcp` directly via the Python `MCPClient`, calls `papers.search_library` against the live workspace DB. Verifies the in-process FastMCP server is mounted correctly. Always runnable (no external dep).
+- New: `backend/scripts/smoke_mcp_web.ps1` — operator-facing smoke: curl `http://localhost:3000/health`, then run a single `web.search` via `MCPClient`, print the first 3 hits. Skipped in CI (no daemon). Documented in `CLAUDE.md` alongside the other smoke scripts.
+- Modify: `CLAUDE.md` (project) — add `open-websearch` to the optional-external-dependency block next to `pandoc`. Document `open-websearch serve` as the prerequisite for v2 paper_search behaviour. Note that `paperhub-papers` MCP is mounted in-process and requires no external install. Update the `backend/scripts/` smoke-script list.
+- Modify: `backend/scripts/smoke_chat_real.ps1` — when the operator has the daemon running (`scripts/smoke_mcp_web.ps1` succeeded), add an assertion that a vague-query turn routes through `paper_search:web.search` → `paper_search:papers.search_semantic_scholar` → `search_results` SSE event with ≥ 1 candidate. When the daemon is down, assert the turn still completes (papers.* only) with a clean trace.
+- Modify: `README.md` (if any) — add a "Web search (optional)" subsection pointing at the open-websearch install + serve commands; mention `paperhub-papers` is bundled.
+
+**Tests:** none new — this is documentation + operator-facing scripts.
+
+**Acceptance:** an operator following only CLAUDE.md + README.md can clone the repo, start the backend, run `scripts/smoke_mcp_papers.ps1` and see it pass; install open-webSearch + run `open-websearch serve`, then run `scripts/smoke_mcp_web.ps1` and see it pass; restart the backend and observe v2 paper_search behaviour without reading any other docs.
+
+### Task v2.5-7 — MCPClient header forwarding for loopback session/run context **[ADDED MID-EXECUTION]**
+
+**Why this task exists:** v2.5-6 implementer surfaced a production bug — `MCPClient` did not forward custom HTTP headers, so the agent's loopback dispatch to `papers.search_library` was being rejected with HTTP 400 by the FastMCP middleware (which requires `X-Paperhub-Session-Id`). The bug was masked by `_FakeRegistry` test stubs that bypass the MCP wire.
+
+**Goal:** propagate per-request `session_id` + `run_id` from the chat endpoint through `MCPRegistry.call(...)` → `MCPClient.call_tool(...)` into outbound HTTP headers, using a ContextVar pattern symmetric to the existing inbound `server_context.py`.
+
+**Files:**
+- New: `backend/src/paperhub/mcp/client_context.py` — `ClientHeadersContext` frozen dataclass + `set_/reset_/current_client_headers_context()` over a `ContextVar`. Returns `None` on unset (smoke-script friendly).
+- Modify: `backend/src/paperhub/mcp/client.py` — `_open_session` reads contextvar + passes `headers=` to `streamablehttp_client`. New `_refresh_session_headers_if_drifted` reconnects when contextvar diverges from cached connection's bound headers (under `asyncio.Lock` for concurrent-request safety, with double-checked locking).
+- Modify: `backend/src/paperhub/mcp/__init__.py` — re-export new symbols.
+- Modify: `backend/src/paperhub/api/chat.py` — set/reset contextvar around the agent invocation.
+
+**Tests:**
+- `tests/mcp/test_client_context.py` — unit tests (frozen, isolation across `asyncio.gather`, None-on-unset).
+- `tests/mcp/test_client_headers.py` — integration: fake stub captures request headers, asserts forwarding + drift-reconnect + concurrent-lock semantics.
+- `tests/api/test_chat_mcp_headers.py` — chat endpoint sets contextvar with live session/run ids; resets on error.
+- `tests/api/test_chat_mcp_loopback.py` — **load-bearing end-to-end test**: real uvicorn server, real httpx, real FastMCP middleware, asserts `tool_calls` row written under matching session_id. This is the test that would have caught the bug originally.
+
+**Acceptance:** `uv run pytest -v` clean (282 passing). Loopback test proves the production path works.
+
+### Quality gates after the v2.5 round
+
+From `backend/`:
+
+```powershell
+uv run pytest -v          # +30-40 new tests across tests/mcp/{test_config,test_client,test_server,test_registry}.py, tests/test_research_tools_mcp.py, tests/test_paper_search_prompt_selection.py
+uv run ruff check src tests
+uv run mypy src           # strict-clean over the new paperhub.mcp package
+.\scripts\smoke_mcp_papers.ps1    # NEW (v2.5-6) — papers.* in-process MCP path
+.\scripts\smoke_mcp_web.ps1       # NEW (v2.5-6) — daemon-up path verification (skipped if no daemon)
+.\scripts\smoke_chat_real.ps1     # regression; daemon-down path uses papers.* only
+.\scripts\research_turn.ps1       # regression
+```
+
+Browser verification (manual, both daemons up):
+- Turn 1 with a vague query ("that diffusion paper everyone cites") → trace shows `paper_search:web.search` → optional `paper_search:web.fetch` → `paper_search:papers.search_semantic_scholar` → `search_results` SSE event surfaces the actual paper. **Every tool_step row carries a namespaced tool name** (no bare `search_semantic_scholar` — confirms the v2.6 cutover).
+- Turn 2 in same session: regular paper_qa works unchanged.
+
+Browser verification (manual, open-webSearch daemon down):
+- Same vague-query turn: trace shows only `paper_search:papers.search_library` + `paper_search:papers.search_semantic_scholar` calls (no `web.*`), agent surfaces a thinner shortlist or asks a clarifying question. **No errors, no broken UX** — v2.4 behaviour exactly, but every tool call still flows through MCP (papers.* is in-process and always available).
+
+Browser verification (negative — `papers.*` server unreachable for any reason):
+- The Research Agent fails cleanly at the first tool call with an `MCPUnavailableError` surfaced as a red trace row; FR-09's "no silent failure" property holds. (Should never happen in practice — the FastMCP sub-app is mounted on the same process, so failure here implies the backend itself is broken.)
+
+---
+
+## Plan C v2.6 stabilisation log (post-v2.5-7, pre-decomposition)
+
+> **Status:** v2.5 (MCP client + paperhub-papers FastMCP + open-webSearch) shipped via tasks v2.5-1 … v2.5-7. Live UI testing in the same week surfaced a cluster of operational defects that were closed as a stabilisation patch round before the v2.7 decomposition. None of these were "SRS gap" — they were "the code shipped and the wire was right but the runtime fell over." Captured here so a future reader doing a Plan C archaeology dig can find them without crawling git.
+>
+> **Closed in this round** (one fix-commit each; the commit subject + scope tells the story):
+
+| Area | Symptom → fix |
+| --- | --- |
+| **arxiv ingest** | Source archive exceeds arxiv's undocumented per-connection size cap → daemon returns 503 with empty body → retry loop spins forever. Detect the size-cap signature and **fail fast into PDF fallback** (`fix(pipelines): fail fast on arxiv per-connection size cap`). Companion: **byte-range `Range:` resume** on transient mid-download drops so partial downloads don't restart from zero (`fix(pipelines): byte-range resume + PDF fallback`). |
+| **MCP registry** | Failed-at-startup MCP server was dead for the process lifetime, even if the operator started the daemon mid-session. **30-second cooldown + retry** so `open-websearch serve` started after the backend re-enters the palette without a restart (`fix(mcp): registry retries failed servers after 30s cooldown`). Companion: **registry connect path serialised under `asyncio.Lock`** to close an `asyncio.gather` race during lazy first-connect (`fix(mcp): serialise registry connect path`). |
+| **Windows event loop** | MCP stdio subprocess auto-spawn (open-websearch's npm flavour) failed on the default Windows Selector event loop because it doesn't support subprocesses. **Force `WindowsProactorEventLoopPolicy`** in `app.py` + the MCP spawn path (`fix(app,mcp): force Proactor event loop on Windows`). |
+| **Frontend session sync** | Agent-finalized candidates auto-attached at the backend but the Reference Sources drawer didn't refresh. **`search_results` SSE event now triggers a drawer refresh** + the resolved papers auto-add hook (`fix(agent,frontend): auto-add resolved papers to session + refresh references panel`). Companion: **graceful Add-button disable** when `backend_session_id` is still null on first paint (`fix(frontend): graceful Add-button disable`). |
+| **MCP subprocess autostart** | An operator-started backend with no daemon couldn't get `web.*` into the palette without a separate npm process. **Config-driven subprocess autostart** in `mcp_servers.toml`: registry can spawn its own open-websearch daemon as a managed child process with readable connect-error messages (`feat(mcp): config-driven subprocess autostart`). Companions: **exclude `bing` from the auto-spawn engine pool** (it returns 401s in the no-key flow — `fix(mcp): exclude bing`), **use the bare `open-websearch` entrypoint with `MODE=http`** rather than the `serve` subcommand which no longer exists in current builds (`fix(mcp): use bare open-websearch entrypoint`), **IPv4 probe fallback** when Windows `::1` resolution fails (`fix(mcp,pipelines): IPv4 probe fallback`). |
+| **FastMCP wire** | open-websearch's MCP transport needed pinning to **JSON + stateless mode** (`fix(mcp): pin paperhub-papers FastMCP to json+stateless mode`). Loopback handler tracer wrap was double-wrapping calls — **dropped** (`fix(mcp): drop loopback handler tracer wrap; auto-seed mcp_servers.toml`). |
+| **Trace fidelity** | paper_search trace recorded tool-call boundaries but not the LLM payload that triggered them. **Full LLM + web.search payloads now recorded** so a trace replay can reconstruct why the Discoverer picked a given query (`fix(agent): record full LLM + web.search payloads in paper_search trace`). |
+
+Quality gates after this round: `uv run pytest -v` still clean (test count grew by ~15 — additional `tests/mcp/test_registry_cooldown.py`, `tests/mcp/test_subprocess_autostart.py`, `tests/pipelines/test_arxiv_size_cap.py`); `uv run ruff check src tests` clean; `uv run mypy src` strict-clean. No SRS contract change; no DB schema change.
+
+---
+
+## Plan C v2.7 Follow-up Tasks (paper_search decomposition + operational hardening)
+
+> **Status:** Live UI testing after the v2.6 stabilisation patch round (above) showed the **v2 mega-agent's intrinsic failure mode** — one LLM turn juggling 5 tools (`papers.search_library`, `papers.search_semantic_scholar`, `papers.find_related_papers`, `web.search`, `web.fetch`) plus ~200 lines of HARD-REQUIREMENT prompt blocks for multi-paper fan-out + `json:candidates` emission + corrective retry + honest-stop reasoning. The traces showed Semantic Scholar getting hammered with re-queries and the `json:candidates` block silently dropped under load. Adding more prompt rules diluted attention on the existing ones; the prompt was at its capacity. The fix is architectural: decompose paper_search so each LLM call has a single responsibility and a focused tool palette. This section captures the decomposition + a coupled operational-hardening round (opt-in CUDA, device auto-detect) that landed alongside it.
+>
+> **SRS reference**: [v2.7 entry](../specs/2026-05-17-paperhub-srs.md) + the **§III-3 Research Agent row** (rewritten to describe the four-stage subgraph) + the **FR-07 v2.7 paragraph** + **§III-5.1 / §III-5.2 device-aware embedder + reranker notes**.
+>
+> **Design summary**: paper_search is replaced by a four-stage LangGraph subgraph — Parser → Processor [Discover→Resolve inner loop, fan-out per request] → Finalizer → Synthesizer. Each stage has its own ~30-line prompt and a focused tool palette. The Finalizer is **Python, not LLM** — `SearchResultsYield` is built deterministically from `ResolvedPaper`s, so the `json:candidates` block is structurally guaranteed (LLM can no longer drop it). The read-only contract, the 3-call combined cap, the finalize semantics, the SSE shape, and the three-attach-paths model are all preserved from v2.4-v2.6. No DB schema change. No LLM-visible tool palette change.
+
+### Task v2.7-1 — Decompose `paper_search` into Parser / Processor / Finalizer / Synthesizer
+
+**Symptom (live UI):** the v2 mega-agent (v2.5-5 `paper_search/v2` prompt) repeatedly miscalibrated on multi-paper user messages — Semantic Scholar called 4-6× on slight rephrasings of the same canonical title, then the agent ran out of cap and surrendered a thin shortlist; the `json:candidates` block dropped silently when the LLM ran long; vague queries fell back to "ask a clarifying question" instead of using `web.search` because the LLM couldn't keep all the rules straight.
+
+**Architectural fix:** stop asking one LLM call to do everything. Four single-responsibility stages.
+
+**Files:**
+- New: [`backend/src/paperhub/agents/research_pipeline.py`](../../../backend/src/paperhub/agents/research_pipeline.py) — module-level stages:
+  - `parse_user_message(user_message, current_refs, tracer, ...) -> list[ParsedRequest]` — small-model LLM. Deterministic arxiv-ID + DOI pre-scan runs first; only natural-language fragments hit the LLM. Output is `list[ParsedRequest]` where each request carries `kind: arxiv_id | doi | quoted_title | natural_language` + the raw hint.
+  - `discover_canonical(request, mcp_registry, tracer, ...) -> CanonicalIdentity | NotFound` — small-model LLM bound to the structured-output `paperhub.search_web(paper_hint, extra_terms)` tool (NOT raw `web.search`; the wrapper hides the free-text `query` field so the LLM cannot author quoted single-token hints that would kill DuckDuckGo recall). Bounded to `MAX_WEB_SEARCHES_PER_DISCOVER = 2`. Extracts `arxiv_id` from web hits when present so the Resolver can short-circuit SS.
+  - `resolve_via_ss(canonical, mcp_registry, tracer, ...) -> ResolvedPaper | NotFound` — **no LLM**. Calls `papers.search_semantic_scholar(...)` exactly once with the canonical title. On SS miss, if the Discoverer surfaced an `arxiv_id`, synthesise a `ResolvedPaper` directly from the arxiv hit (don't loop back to Discoverer for a near-duplicate query).
+  - `synthesize_prose(parsed, resolved_set, not_found_set, ...) -> str` — small-model LLM, ~30-line prompt. Generates the user-facing summary prose only. The `json:candidates` block is **not** an LLM responsibility.
+- New: prompts under `backend/src/paperhub/llm/prompts/`:
+  - `paper_search_parse_v1.yaml` — Parser prompt (~50 lines incl. example).
+  - `paper_search_discover_v1.yaml` — Discoverer prompt (~40 lines).
+  - `paper_search_synthesize_v1.yaml` — Synthesizer prompt (~30 lines).
+- Modify: [`backend/src/paperhub/agents/research_graph.py`](../../../backend/src/paperhub/agents/research_graph.py) — `build_paper_search_subgraph` becomes a LangGraph topology: `ps_parse` → `ps_process` (fan-out node that runs `discover_canonical` + `resolve_via_ss` per `ParsedRequest` via `asyncio.gather`, with kick-back-on-NotFound inside the inner loop capped at `MAX_REFINEMENT_LOOPS = 1`) → `ps_finalize` (Python-only: builds `SearchCandidate`s + applies the finalize cap + auto-attaches via the chat layer's dispatcher hook) → `Synthesizer`. Each node drains `drain_tool_calls_since` before closing so `tool_step` SSE events stream per-stage, not batched at end.
+- Modify: [`backend/src/paperhub/agents/research.py`](../../../backend/src/paperhub/agents/research.py) — **remove** the v2/v2.6 `paper_search` async-generator entirely (628 lines → ~30 lines of subgraph entry-point). The `paper_qa` flow is unchanged.
+- Modify: [`backend/src/paperhub/models/domain.py`](../../../backend/src/paperhub/models/domain.py) — add `ParsedRequest`, `CanonicalIdentity`, `ResolvedPaper`, `NotFound` Pydantic models. Extend `AgentState` with subgraph control-flow fields (`ps_parsed_requests`, `ps_resolved`, `ps_not_found`); remove `ps_any_tools_called` (no longer meaningful with disjoint per-stage palettes).
+- Modify: [`backend/src/paperhub/llm/prompts/registry.py`](../../../backend/src/paperhub/llm/prompts/registry.py) — drop `get_paper_search_slot` (v2.5-5's conditional v1/v2 picker); the four new slot names are loaded directly by the pipeline functions. No more single `paper_search` prompt — the four sub-prompts are the contract.
+
+**Removals (clean break, no parallel paths):**
+- `backend/src/paperhub/llm/prompts/paper_search_v1.yaml` (102 lines)
+- `backend/src/paperhub/llm/prompts/paper_search_v2.yaml` (303 lines)
+- 6 test files for the v1/v2 surface: `test_research_paper_search.py` (633 lines), `test_research_subgraph.py` (808 lines), `test_research_tools_mcp.py` (454 lines), `test_paper_search_prompt_selection.py` (124 lines), `test_prompts_paper_search_v1.py` (61 lines), `test_prompts_paper_search_v2.py` (77 lines). All tested behaviour that no longer exists.
+
+Net diff: **+834 / −3489 lines**. The agent shrunk by ~80% by responsibility-splitting.
+
+**Tests (new):**
+- `tests/agents/test_research_pipeline_parse.py` — Parser splits multi-paper user messages; deterministic arxiv-ID + DOI pre-scan short-circuits; single natural-language hint passes through unchanged.
+- `tests/agents/test_research_pipeline_discover.py` — Discoverer cannot author quoted free-text queries (the JSON-schema doesn't have a `query` field); bounded to `MAX_WEB_SEARCHES_PER_DISCOVER = 2`; extracts `arxiv_id` from web hits.
+- `tests/agents/test_research_pipeline_resolve.py` — Resolver calls SS exactly once; on miss-with-arxiv-from-Discoverer, synthesises a `ResolvedPaper` rather than looping back.
+- `tests/agents/test_research_pipeline_synthesize.py` — Synthesizer generates prose only; never emits a `json:candidates` block.
+- `tests/agents/test_research_graph_paper_search.py` — end-to-end subgraph: vague query → Parser ID + DOI pre-scan misses → Discoverer surfaces canonical title → Resolver hits SS → Finalizer emits `SearchResultsYield` deterministically → Synthesizer prose. Tool-step events drain per-stage (assert ordering against `drain_tool_calls_since` calls).
+
+**Acceptance:** 249/250 backend tests pass after the cutover (1 pre-existing flaky parallel-timing test in `test_paper_qa_map_reduce`, unrelated). `uv run mypy src` strict-clean. `uv run ruff check src tests` clean. Live UI smoke: vague query *"that diffusion paper everyone cites"* surfaces a usable shortlist; multi-paper query *"compare the Mamba paper and the original transformer"* fan-outs into two `ps_process` branches that each resolve correctly.
+
+### Task v2.7-2 — Discoverer hardening (structured-output wrapper + arxiv-ID extraction + multi-query)
+
+**Symptom (Discoverer-specific):** even after the decomposition, the Discoverer LLM had a strong habit of wrapping single-token paper hints in double quotes (`"MolmoACT2"`), which empirically kills DuckDuckGo recall — bare `MolmoACT2` returns 10 hits including arxiv URLs while `"MolmoACT2"` returns 0. Prompt rules against quoting were unreliable across model providers (Gemini-2.5-flash ignored them under load). Same loop: prompt-side rules can't be load-bearing for a property that should be structural.
+
+**Fix:** hide raw `web.search(query)` from the LLM and expose a structured-output wrapper `paperhub.search_web(paper_hint, extra_terms)`. The JSON-schema literally has no field that accepts a free-form query string — the LLM passes `paper_hint: str` (the user's name, verbatim) + `extra_terms: list[str]` (additional bare keywords), and Python builds the underlying `web.search` query deterministically with `_BOOLEAN_OPERATORS` stripped. Quotes that sneak into field values are stripped server-side.
+
+**Files:**
+- Modify: [`backend/src/paperhub/agents/research_pipeline.py`](../../../backend/src/paperhub/agents/research_pipeline.py) — `_DISCOVER_TOOL_SCHEMA` defines `paperhub.search_web(paper_hint, extra_terms)`. `_dispatch_discover_tool_call` builds the underlying `web.search` query deterministically and calls `mcp_registry.call("web.search", {...})`. Boolean operators stripped from `extra_terms` before query assembly.
+- Multi-query: when the first `paperhub.search_web` returns 0 paper-shaped hits, the Discoverer is allowed one alternate phrasing (counted against `MAX_WEB_SEARCHES_PER_DISCOVER = 2`). The prompt frames this as "you have two shots — make the second one different from the first."
+- Modify: `paper_search_discover_v1.yaml` — drop all "do not use quotes" / "do not use OR" rules from the prompt (they were the unreliable load-bearing layer). The schema enforces it now.
+- Modify: [`backend/src/paperhub/agents/research_pipeline.py`](../../../backend/src/paperhub/agents/research_pipeline.py) — when a `web.search` hit has an arxiv URL, extract the `arxiv_id` and attach it to the `CanonicalIdentity` so the Resolver can synthesise a `ResolvedPaper` on SS miss.
+
+**Tests:** `tests/agents/test_paperhub_search_web_wrapper.py` — schema rejects `query` field; quoted `paper_hint` values are stripped; boolean operators stripped from `extra_terms`. `tests/agents/test_discover_arxiv_id_extraction.py` — Discoverer attaches arxiv_id from web hit when present.
+
+**Acceptance:** browser test that previously failed on `"MolmoACT2"` → 0 hits now succeeds with `MolmoACT2` → arxiv hit → resolved paper. No prompt-rule changes are load-bearing for the quoting property.
+
+### Task v2.7-3 — Opt-in CUDA wheels + device-aware embedder/reranker
+
+**Symptom:** GPU operators got silent CPU inference because the HF stack defaults to CPU when no `device=` is passed. The fix on the operator side was painful: install a CUDA torch wheel manually, then re-run uv. Default install also pulled the CPU torch wheel (~200 MB) which is wasted for GPU operators.
+
+**Fix:**
+- **uv extras for CUDA wheels:** `pyproject.toml` declares `cu124` / `cu126` / `cu130` extras, each pinning the matching `torch` wheel from the PyTorch CUDA index. Default install stays CPU-only. Operator workflow: `uv sync --extra cu126` for CUDA 12.6 box, otherwise `uv sync`.
+- **Device auto-detect:** new `backend/src/paperhub/pipelines/_device.py:resolve_device()` walks `PAPERHUB_DEVICE` override → CUDA → MPS → CPU. CPU fallback distinguishes *CPU-only-wheel* from *CUDA-wheel-no-GPU* in the warning text so the operator knows whether to reinstall torch or check `nvidia-smi`.
+- **SentenceTransformer + CrossEncoder singletons pass `device=` explicitly:** `paperhub.pipelines.embedder.Embedder.__init__` and `paperhub.rag.reranker.Reranker.__init__` both call `resolve_device()` and pass it through. Lazy-singleton interface unchanged externally — only the constructor is device-aware now.
+
+**Files:**
+- New: [`backend/src/paperhub/pipelines/_device.py`](../../../backend/src/paperhub/pipelines/_device.py) — `resolve_device()` (the file we wrote above).
+- Modify: `backend/src/paperhub/pipelines/embedder.py` — `self._device = resolve_device()` in `__init__`; pass `device=self._device` to `SentenceTransformer(...)`.
+- Modify: `backend/src/paperhub/rag/reranker.py` — same shape; `CrossEncoder(device=self._device)`.
+- Modify: `backend/pyproject.toml` — declare `[project.optional-dependencies] cu124 = ["torch==2.x.x+cu124", ...]` / `cu126` / `cu130`; add the PyTorch index as an `[[tool.uv.index]]` entry.
+- Modify: `backend/.env.example` — document `PAPERHUB_DEVICE=auto|cpu|cuda|cuda:1|mps`.
+- Modify: `CLAUDE.md` (project) — add a "GPU operators" subsection pointing at `uv sync --extra cu126`.
+
+**Tests:** `tests/pipelines/test_device_resolution.py` — `PAPERHUB_DEVICE` override honoured; auto-detect picks CUDA when `torch.cuda.is_available()` is mocked true; falls back to MPS then CPU; CPU-only-wheel warning text differs from CUDA-wheel-no-GPU.
+
+**Acceptance:** clean clone + `uv sync` boots with CPU torch (small wheel); `uv sync --extra cu126` swaps to CUDA torch; embedder logs `paperhub.device auto-detected=cuda` instead of the silent CPU default; backend cold-boot time on a GPU box drops from ~12s (CPU load) to ~3s (CUDA load).
+
+### Forward-looking: remote inference server (NOT scoped to Plan C)
+
+**Status:** in flight at the time of this writing. Goal: pull `Embedder` + `Reranker` out of the backend process into a **separate inference server** so:
+- The backend doesn't bear the model cold-start cost on every restart (~3-12s depending on device).
+- A single GPU pool serves multiple backend instances (the local-dev demo doesn't need it, but the same code wants to scale to a class deployment).
+- The backend process becomes CPU-only at the Python-deps layer — `torch` + `sentence-transformers` + `cross-encoder` move to the inference server's deps.
+
+The lazy-singleton-with-`device=` shape in v2.7 is the seam. Once the migration lands, the singletons become thin HTTP/gRPC clients; `resolve_device()` reports "remote" and the singletons report the remote's device in the trace. This is being scoped as a separate plan (working name: **Plan I — Inference Server Extraction**) and is not part of Plan C as-shipped. Mentioned here so a future archaeology dig hits the breadcrumb.
+
+### Quality gates after the v2.7 round
+
+From `backend/`:
+
+```powershell
+uv run pytest -v          # 249/250 (1 pre-existing flaky parallel-timing test, unrelated)
+uv run ruff check src tests
+uv run mypy src           # strict-clean across the new research_pipeline + _device modules
+.\scripts\smoke_mcp_papers.ps1
+.\scripts\smoke_mcp_web.ps1
+.\scripts\smoke_chat_real.ps1     # regression — vague-query path goes through new subgraph
+.\scripts\research_turn.ps1       # regression
+```
+
+Browser verification (manual, both daemons up):
+- Vague query *"that diffusion paper everyone cites"* → trace shows `paper_search:ps_parse` → `paper_search:ps_process:discover` (via `paperhub.search_web`, NOT `web.search` raw) → `paper_search:ps_process:resolve` (`papers.search_semantic_scholar` exactly once) → `paper_search:ps_finalize` (Python; no LLM call) → `paper_search:ps_synthesize` (prose). `json:candidates` block always present. Reference Sources drawer auto-refreshes with the resolved paper.
+- Multi-paper query *"compare the Mamba paper and the original transformer"* → Parser splits into 2 `ParsedRequest`s → 2 parallel `ps_process` branches via `asyncio.gather` → both resolve → Finalizer emits 2 candidates → Synthesizer prose names both.
+- Single-token cap-violating query (the v2.6 regression case): `MolmoACT2` → Discoverer's structured-output wrapper passes `paper_hint="MolmoACT2"` (no quotes possible) → DuckDuckGo returns the arxiv URL → Resolver gets a hit. No quoting failure.
+
+Browser verification (negative — Discoverer NotFound):
+- Made-up paper title → Parser parses → Discoverer 2 attempts → both NotFound → Resolver returns NotFound → Finalizer emits 0 candidates → Synthesizer prose explains "I couldn't find this. Try an arxiv ID or DOI." No silent failure, no crash.
+
+---
+
+## Plan C v2.8 — Model server isolation (cleanup pass)
+
+The v2.7 "Forward-looking: remote inference server" note has been folded back into Plan C rather than spun out as a separate Plan I, because the actual delivered surface area turned out to be much smaller than the original speculation (one new package, two changed files, no schema change, no new endpoints). SRS §III-5.1 + §III-5.2 + §III-6 updated to match; SRS Revision History v2.8 entry covers the architecture-level changes. This section documents the implementation specifics.
+
+### Symptom that forced the fix
+
+Live MolmoACT2 testing showed a 10-minute hang on the first ingest after any backend edit, followed by `RemoteProtocolError: peer closed connection without sending complete message body`. Root cause: the embedder (`SentenceTransformer ~110 MB`) and reranker (`CrossEncoder ~80 MB`) were module-level singletons inside the uvicorn worker. Every `uvicorn --reload` (triggered by any save under `src/paperhub/`) re-imported the module graph and reset both singletons. The next ingest paid the full reload tax, and if another reload fired mid-load the worker died with the arxiv download still streaming. The user observed this as "the embed reranker got hot reload" — exactly the v2.7 forward-looking diagnosis, just not yet fixed.
+
+### Architecture
+
+Three pieces, all under `backend/src/paperhub/modelserver/`:
+
+| File | Role |
+| --- | --- |
+| `server.py` | FastAPI app exposing `GET /health`, `POST /embed {texts}` → `{vectors}`, `POST /rerank {query, texts, top_k}` → `{indices, scores}`. Models lazy-load on first non-empty request (empty inputs short-circuit without touching the model — cheap pre-warm probes). Lazy load uses `paperhub.config.load_settings()` and `paperhub.pipelines._device.resolve_device()`, so device-detect + CUDA wheel support inherited from v2.7 apply unchanged. |
+| `__main__.py` | `python -m paperhub.modelserver` (and `paperhub-modelserver` script entry in `pyproject.toml`). Reads `PAPERHUB_MODEL_SERVER_HOST` / `PAPERHUB_MODEL_SERVER_PORT`, launches uvicorn against the FastAPI app with `reload=False`, `workers=1`. NOT subject to `--reload` — its whole reason to exist is to survive backend reloads. |
+| `spawn.py` | `ensure_running(host, port)` TCP-probes `/health` first; reachable → returns `None` (reuse path); not reachable → spawns ONE detached `subprocess.Popen` with `stdout=DEVNULL` and a platform-specific detach flag (Windows `CREATE_NEW_PROCESS_GROUP`, Unix `start_new_session=True`). Polls `/health` until ready or timeout (30s default), then returns the process handle. Caller (lifespan) deliberately discards the handle so shutdown can't cascade-kill the modelserver. `terminate_subprocess()` is also exported but only used by tests and `scripts/start.ps1`. |
+
+Backend pipelines become thin HTTP clients:
+
+| File | v2.7 shape | v2.8 shape |
+| --- | --- | --- |
+| `pipelines/embedder.py` | One impl: `_SentenceTransformersEmbedder(model_name)` loading via `device=resolve_device()`. | Two impls behind the `Embedder` Protocol: `_HttpEmbedder(base_url)` over httpx.Client (default), `_SentenceTransformersEmbedder` retained for `PAPERHUB_INPROCESS_MODELS=1` (tests, low-resource hosts). Factory `get_embedder()` dispatches on `Settings.inprocess_models`. New `reset_singleton()` test helper. |
+| `rag/reranker.py` | One impl: `_CrossEncoderReranker(model_name)`. | Mirror of the embedder shape: `_HttpReranker`, `_CrossEncoderReranker`, factory + reset helper. |
+| `config.py` | `Settings` has `embedding_model`, `reranker_model`. | Adds `model_server_host`, `model_server_port`, `inprocess_models`. `PAPERHUB_INPROCESS_MODELS` accepts `1` / `true` / `yes` as truthy. |
+
+### Lifespan integration (`app.py`)
+
+```python
+# Detect-or-spawn. If a modelserver is already reachable, reuse it.
+# Otherwise spawn ONE detached subprocess that outlives this worker.
+# We DON'T track the proc on app.state and DON'T terminate at shutdown —
+# that's exactly what was killing the modelserver on every reload before.
+if not settings.inprocess_models:
+    await _modelserver_ensure_running(
+        host=settings.model_server_host,
+        port=settings.model_server_port,
+    )
+```
+
+Pre-warm became fire-and-forget. The previous synchronous `get_embedder().embed([""])` call inside lifespan blocked startup for the entire HF Hub cold-cache download (observed: 10+ minutes). Now:
+
+```python
+app.state.prewarm_task = asyncio.create_task(_prewarm_models(), name="paperhub-prewarm")
+```
+
+`_prewarm_models()` runs the blocking HTTP calls via `asyncio.to_thread` so the event loop stays responsive. Cancelled cleanly at shutdown.
+
+### Operator workflow
+
+Three paths, in order of operator friction:
+
+1. **Auto-spawn** (default): `uv run uvicorn paperhub.app:app --reload --reload-dir src`. First boot spawns the modelserver; every subsequent `--reload` of the worker reuses it via the `/health` probe. The leaked modelserver process is cleaned up at OS reboot or via manual `taskkill /f /im python.exe` / `pkill -f paperhub-modelserver`. Trade-off: modelserver stdout is `DEVNULL` (detachment requirement), so its logs aren't visible.
+2. **Explicit orchestration** (`scripts/start.ps1`): runs `paperhub-modelserver` as a tracked background process with visible stdout, polls `/health`, starts uvicorn with `--reload-dir src` in the foreground, terminates the modelserver in the script's finally block. Use when you need to see modelserver logs or want clean Ctrl+C cleanup.
+3. **In-process fallback** (`PAPERHUB_INPROCESS_MODELS=1`): loads models in the worker as before v2.8. Used by tests (conftest sets it at module import) and by hosts that can't run a second process.
+
+### Tests
+
+- `tests/conftest.py` sets `PAPERHUB_INPROCESS_MODELS=1` via `os.environ.setdefault` at module import time so no test ever dials a non-running modelserver. Autouse fixture `_reset_model_singletons` brackets every test, clearing the embedder + reranker singleton caches before and after.
+- New `tests/test_modelserver.py` covers the server's wire contract (FastAPI TestClient with stub `_embed_model` / `_rerank_model` fixtures), HTTP-client serialisation (`httpx.MockTransport` — no port binding needed), empty-input short-circuit on both client and server side, and factory dispatch on `Settings.inprocess_models`.
+- All 287 existing tests still green under in-process mode.
+
+### Quality gates
+
+```powershell
+uv run pytest -q                  # 287 passed
+uv run ruff check src tests       # clean
+uv run mypy src                   # 61 files, clean
+.\scripts\smoke_mcp_papers.ps1    # unchanged behaviour
+```
+
+Manual smoke verifying detach: spawn modelserver via `ensure_running`, exit the parent Python script without calling terminate, run `tasklist /FI "PID eq <pid>"` — process still listed, `/health` still 200. After manual `Stop-Process -Force` it's gone. Confirms `CREATE_NEW_PROCESS_GROUP` correctly insulates the child from parent-group kills.
+
+### Files touched
+
+- New: [`backend/src/paperhub/modelserver/__init__.py`](../../../backend/src/paperhub/modelserver/__init__.py), [`server.py`](../../../backend/src/paperhub/modelserver/server.py), [`__main__.py`](../../../backend/src/paperhub/modelserver/__main__.py), [`spawn.py`](../../../backend/src/paperhub/modelserver/spawn.py).
+- New: [`backend/tests/test_modelserver.py`](../../../backend/tests/test_modelserver.py).
+- New: [`backend/scripts/start.ps1`](../../../backend/scripts/start.ps1) — optional orchestrator.
+- Modify: [`backend/src/paperhub/config.py`](../../../backend/src/paperhub/config.py) — `model_server_host` / `model_server_port` / `inprocess_models`.
+- Modify: [`backend/src/paperhub/pipelines/embedder.py`](../../../backend/src/paperhub/pipelines/embedder.py) — add `_HttpEmbedder`, factory dispatch, `reset_singleton`.
+- Modify: [`backend/src/paperhub/rag/reranker.py`](../../../backend/src/paperhub/rag/reranker.py) — mirror.
+- Modify: [`backend/src/paperhub/app.py`](../../../backend/src/paperhub/app.py) — `ensure_running` call (no termination), fire-and-forget pre-warm task.
+- Modify: [`backend/pyproject.toml`](../../../backend/pyproject.toml) — `paperhub-modelserver` script entry.
+- Modify: [`backend/tests/conftest.py`](../../../backend/tests/conftest.py) — `PAPERHUB_INPROCESS_MODELS=1` + autouse singleton-reset fixture.
+
+---
+
+## Plan C v2.9 — Frontend PDF upload + arXiv-ID manual import (follow-up round)
+
+**Why this is still a Plan C item, not a Plan D bullet.** The "Attach paper" affordance was scoped into Plan C in two of the SRS use cases (UC-2 v2.3: "Add-as-reference … manual"; I-8 #2: "re-ingest hits the cache"), and the Paper Pipeline already supports PDF ingestion end-to-end via `IngestRequest(upload_path=..., upload_kind="pdf")` → `sha256:<hex>` content_key → `kind="pdf_upload"` row → chunks + Chroma vectors + rendered HTML. What is missing is purely a transport gap (no multipart HTTP endpoint) and a UI gap (the Composer's paperclip icon ships as a disabled placeholder with tooltip "Coming in Plan C — upload PDF or paste arXiv ID"). Closing that gap is a single round, not a plan-sized surface — it does not need a new package, a schema change, or any agent-side logic. Plan D's reference-panel/canvas work is unblocked either way; this round just finishes the user-facing entry point that Plan C promised.
+
+### What the backend already does (no change needed for these)
+
+- `PaperPipeline._ingest_upload(req, content_key)` — full pipeline path for `kind="pdf" | "latex"` uploads. Hashes the file content, writes it under `workspace/papers_cache/upload/<sha>/`, extracts text via `pymupdf` for PDFs (or LaTeX flattener for `.tex` trees), chunks + embeds + renders HTML, and writes one `paper_content` row + `chunks` rows + Chroma vectors in a single transaction.
+- `compute_content_key(upload_path=...)` — streams the file in 1 MiB blocks; same `sha256:<hex>` produces a cache hit on re-upload of the same bytes. The cache hit short-circuits before extract/chunk/embed.
+- arXiv-ID manual entry is already a no-op on the backend: `POST /papers {paper_id: "arxiv:<id>"}` routes through `add_paper_to_session_dispatch` → `_ingest_arxiv` (LaTeX path, with the v2.7 size-cap PDF fallback already in place from commit 3d34beb).
+
+### Gap 1 — `POST /papers/upload` (multipart) is missing
+
+`add_paper_to_session_dispatch(paper_id, ...)` is keyed off a `paper_id` *string* with one of three prefixes (`arxiv:`, `ss:`, `library:`); there is no fourth `upload:` branch and adding one would be wrong (the dispatcher's whole point is that the LLM's tool-arg surface is a string ID — file bytes do not belong there). The deterministic UI ingest path must bypass the dispatcher and call `PaperPipeline.ingest()` directly with `IngestRequest(upload_path=..., upload_kind="pdf")`.
+
+### Gap 2 — Composer paperclip icon is disabled
+
+[`frontend/src/components/chat/Composer.tsx:31-35`](../../../frontend/src/components/chat/Composer.tsx) ships the paperclip button as `disabled className="pointer-events-none"` with the tooltip "Coming in Plan C". The other three Plan C/D/F/G placeholders stay disabled (they're genuinely scoped to later plans), but the paperclip one is the Plan C surface and needs to become a working menu.
+
+### Architecture
+
+One new endpoint and one new frontend component (popover anchored on the paperclip button), plus thin API-client + store wiring.
+
+**Backend:**
+
+| File | Role |
+| --- | --- |
+| `backend/src/paperhub/api/papers.py` | Add `POST /papers/upload` accepting `multipart/form-data` with two fields: `session_id` (int) and `file` (UploadFile). Validates MIME (`application/pdf` only for v2.9 — `.tex` upload deferred to v3.x), enforces a 30 MiB ceiling (`PAPERHUB_MAX_UPLOAD_MB` env, default `30`), streams the body to a tempfile, then calls `PaperPipeline.ingest(IngestRequest(session_id=..., upload_path=tmp, upload_kind="pdf"))`. Returns the existing `IngestResponse` Pydantic model — frontend already consumes that shape. Cleans up the tempfile in a `finally` (cache lookup may short-circuit before extract, but the tempfile must still go). |
+| `backend/src/paperhub/config.py` | Add `max_upload_mb: int` to `Settings` (default 30, from `PAPERHUB_MAX_UPLOAD_MB`). |
+| `backend/.env.example` | Document `PAPERHUB_MAX_UPLOAD_MB=30`. |
+
+**Frontend:**
+
+| File | Role |
+| --- | --- |
+| `frontend/src/lib/api.ts` | Add `uploadPdf(sessionId, file)` — `FormData` POST to `/papers/upload`, returns `IngestResult`. Also export `parseArxivId(input)` (pure helper): accepts `2310.06825`, `arxiv:2310.06825`, full URL forms (`https://arxiv.org/abs/2310.06825v1`, `https://arxiv.org/pdf/2310.06825.pdf`), strips `vN` suffix, returns canonical `arxiv:2310.06825` or `null` on bad input. Validation regex: `^(\d{4}\.\d{4,5})|(\w+(\.\w+)*\/\d{7})$` covers both new-style (post-2007) and old-style (pre-2007 `cs.AI/0701001`) IDs. |
+| `frontend/src/components/chat/AttachPaperMenu.tsx` | NEW. Popover (`@radix-ui/react-popover` — already a dep) anchored on the paperclip button. Two segments: "Upload PDF" (file input + drag-and-drop dropzone) and "Paste arXiv ID" (text input + Submit). On success in either, calls `useChatStore`'s new `addReferenceFromIngest(papers_id, paper_content_id, title)` action so the Reference Sources panel reflects the addition without a roundtrip, and surfaces a toast (sonner — already wired in [`frontend/src/components/Toaster.tsx`](../../../frontend/src/components/Toaster.tsx)). On error, surfaces the backend error message (e.g., 413 "file too large", 415 "only application/pdf is accepted", 422 "no_ingestible_source" for arXiv-ID withdrawn-paper case). |
+| `frontend/src/components/chat/Composer.tsx` | Remove the `disabled` + `pointer-events-none` from the paperclip `Capability` entry. Wrap that one button in `<AttachPaperMenu trigger={...} />`. The other three placeholders stay disabled (Plan D/F/G surfaces). Tooltip text changes from "Coming in Plan C —" to "Attach paper — upload PDF or paste arXiv ID". |
+| `frontend/src/store/chat.ts` | Add `addReferenceFromIngest({ papers_id, paper_content_id, title, kind })` action. Idempotent: if a reference with the same `papers_id` already exists in the active session's references list, no-op (covers re-attach + cache-hit case). |
+| `frontend/tests/components/AttachPaperMenu.test.tsx` | NEW. RTL + MSW. Covers: (a) PDF upload happy path (mock `POST /papers/upload` → 201 with `IngestResponse`, assert toast text + store mutation); (b) PDF too large → 413 → error toast; (c) wrong MIME → 415 → error toast; (d) arXiv ID happy path (`2310.06825` → `arxiv:2310.06825` normalized → `POST /papers` mock returns 201); (e) bad arXiv ID → inline validation error, no network call; (f) arXiv URL form (`https://arxiv.org/abs/2310.06825v3`) normalises to canonical form; (g) cache-hit branch (mock returns `cache_hit=true`) → toast says "Re-attached" instead of "Added". |
+| `frontend/tests/lib/api.test.ts` | Extend with `parseArxivId` unit cases — at minimum: bare ID, `arxiv:` prefix, abs URL with version, pdf URL, old-style `cs.AI/0701001`, malformed `foo` → `null`, leading/trailing whitespace tolerated. |
+
+**Out of scope for v2.9** (deliberately deferred):
+
+- LaTeX-tarball (`.tar.gz` / `.zip`) upload. The pipeline `_ingest_upload(upload_kind="latex")` branch exists and works, but the UX shape (decide whether to upload one `.tex` file vs a whole project tarball, and how to surface multi-file error states) deserves a small brainstorm rather than being bolted on as part of this round. Track as a v3.x item.
+- Drag-and-drop directly onto the chat thread (vs the popover dropzone). Same UX-brainstorm reason — and the popover dropzone covers the demo's must-have surface.
+- arXiv-ID *autocomplete* (typing "Mamba" and getting arXiv suggestions). That's `paper_search` agent territory — manual entry is for the user who already has the ID in hand.
+
+### Tasks
+
+#### Task v2.9-1 — Backend: `POST /papers/upload` endpoint
+
+**Files:**
+- Modify: [`backend/src/paperhub/config.py`](../../../backend/src/paperhub/config.py) — add `max_upload_mb`.
+- Modify: [`backend/src/paperhub/api/papers.py`](../../../backend/src/paperhub/api/papers.py) — new route.
+- Modify: [`backend/.env.example`](../../../backend/.env.example) — document the env var.
+- Create: [`backend/tests/test_papers_upload.py`](../../../backend/tests/test_papers_upload.py).
+
+- [ ] **Step 1: Failing test — happy path PDF upload.**
+
+```python
+# backend/tests/test_papers_upload.py
+from pathlib import Path
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from paperhub.app import app
+
+
+@pytest.mark.asyncio
+async def test_upload_pdf_happy_path(seed_session, tmp_path: Path) -> None:
+    sample_pdf = Path(__file__).parent / "fixtures" / "papers" / "sample.pdf"
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        with sample_pdf.open("rb") as f:
+            r = await ac.post(
+                "/papers/upload",
+                data={"session_id": str(seed_session)},
+                files={"file": ("sample.pdf", f, "application/pdf")},
+            )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["cache_hit"] is False
+    assert body["paper_content_id"] >= 1
+    assert body["papers_id"] >= 1
+    assert body["title"] == "sample"  # upload_path.stem fallback per pipeline
+```
+
+Run: `cd backend; uv run pytest tests/test_papers_upload.py::test_upload_pdf_happy_path -v`
+Expected: FAIL with `404 Not Found` (endpoint not registered yet).
+
+- [ ] **Step 2: Add `max_upload_mb` to `Settings`.**
+
+In [`backend/src/paperhub/config.py`](../../../backend/src/paperhub/config.py), extend `Settings`:
+
+```python
+@dataclass(frozen=True)
+class Settings:
+    # ... existing fields ...
+    max_upload_mb: int    # NEW (v2.9)
+```
+
+In `load_settings()`:
+
+```python
+max_upload_mb=int(os.environ.get("PAPERHUB_MAX_UPLOAD_MB", "30")),
+```
+
+- [ ] **Step 3: Implement the upload endpoint.**
+
+Append to [`backend/src/paperhub/api/papers.py`](../../../backend/src/paperhub/api/papers.py):
+
+```python
+import tempfile
+from fastapi import File, Form, UploadFile
+
+_PDF_MIME = "application/pdf"
+
+
+@router.post("/upload", response_model=IngestResponse, status_code=201)
+async def upload_paper(
+    request: Request,
+    session_id: int = Form(..., ge=1),
+    file: UploadFile = File(...),
+) -> IngestResponse:
+    """Accept a multipart PDF upload, sha256-key it, run the pipeline.
+
+    Bypasses `add_paper_to_session_dispatch` because that function is
+    paper_id-string-keyed (`arxiv:` / `ss:` / `library:` prefixes); file
+    bytes don't belong in the LLM-visible tool surface. Calls
+    `PaperPipeline.ingest()` directly with an upload_path IngestRequest.
+    """
+    settings = load_settings()
+    max_bytes = settings.max_upload_mb * 1024 * 1024
+
+    if file.content_type != _PDF_MIME:
+        raise HTTPException(
+            415, f"unsupported content_type={file.content_type!r}; expected {_PDF_MIME}"
+        )
+
+    # Stream to a tempfile (don't materialise the whole PDF in memory).
+    # Suffix .pdf so the pipeline's extension-based branches behave.
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    bytes_written = 0
+    try:
+        try:
+            while chunk := await file.read(1 << 20):  # 1 MiB blocks
+                bytes_written += len(chunk)
+                if bytes_written > max_bytes:
+                    raise HTTPException(
+                        413,
+                        f"file exceeds {settings.max_upload_mb} MiB ceiling",
+                    )
+                tmp.write(chunk)
+        finally:
+            tmp.close()
+
+        upload_path = Path(tmp.name)
+
+        async with open_db(settings.db_path) as conn:
+            pipeline = PaperPipeline(
+                conn,
+                papers_cache_dir=settings.papers_cache_dir,
+                chroma=get_chroma(request, settings),
+            )
+            result = await pipeline.ingest(
+                IngestRequest(
+                    session_id=session_id,
+                    upload_path=upload_path,
+                    upload_kind="pdf",
+                ),
+            )
+    finally:
+        try:
+            Path(tmp.name).unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("failed to remove upload tempfile %s: %s", tmp.name, exc)
+
+    return IngestResponse(
+        paper_content_id=result.paper_content_id,
+        papers_id=result.papers_id,
+        cache_hit=result.cache_hit,
+        title=result.title,
+    )
+```
+
+Top-of-file imports needed: `IngestRequest` from `paperhub.pipelines.paper_pipeline` (already imported `ArxivMetadata, PaperPipeline` — extend the line).
+
+- [ ] **Step 4: Run the happy-path test — it should pass.**
+
+Run: `cd backend; uv run pytest tests/test_papers_upload.py::test_upload_pdf_happy_path -v`
+Expected: PASS.
+
+- [ ] **Step 5: Add edge-case tests — 415 wrong MIME, 413 too large, cache hit on re-upload.**
+
+```python
+@pytest.mark.asyncio
+async def test_upload_rejects_non_pdf(seed_session) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        r = await ac.post(
+            "/papers/upload",
+            data={"session_id": str(seed_session)},
+            files={"file": ("a.txt", b"hello", "text/plain")},
+        )
+    assert r.status_code == 415
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_oversize(seed_session, monkeypatch) -> None:
+    monkeypatch.setenv("PAPERHUB_MAX_UPLOAD_MB", "1")
+    transport = ASGITransport(app=app)
+    big = b"%PDF-1.4\n" + b"\x00" * (2 * 1024 * 1024)  # 2 MiB > 1 MiB cap
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        r = await ac.post(
+            "/papers/upload",
+            data={"session_id": str(seed_session)},
+            files={"file": ("big.pdf", big, "application/pdf")},
+        )
+    assert r.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_upload_same_bytes_returns_cache_hit(seed_session) -> None:
+    sample_pdf = Path(__file__).parent / "fixtures" / "papers" / "sample.pdf"
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        with sample_pdf.open("rb") as f:
+            first = await ac.post(
+                "/papers/upload",
+                data={"session_id": str(seed_session)},
+                files={"file": ("sample.pdf", f, "application/pdf")},
+            )
+        with sample_pdf.open("rb") as f:
+            second = await ac.post(
+                "/papers/upload",
+                data={"session_id": str(seed_session)},
+                files={"file": ("sample.pdf", f, "application/pdf")},
+            )
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert second.json()["cache_hit"] is True
+    assert second.json()["paper_content_id"] == first.json()["paper_content_id"]
+```
+
+Run: `cd backend; uv run pytest tests/test_papers_upload.py -v`
+Expected: 4 PASS.
+
+- [ ] **Step 6: Quality gates + commit.**
+
+```powershell
+cd backend
+uv run pytest -q
+uv run ruff check src tests
+uv run mypy src
+```
+
+Expected: clean.
+
+```powershell
+git add backend/src/paperhub/api/papers.py backend/src/paperhub/config.py backend/.env.example backend/tests/test_papers_upload.py
+git commit -m "feat(papers): add POST /papers/upload multipart endpoint for PDF ingest"
+```
+
+#### Task v2.9-2 — Frontend: `parseArxivId` helper + `uploadPdf` API client
+
+**Files:**
+- Modify: [`frontend/src/lib/api.ts`](../../../frontend/src/lib/api.ts) — add `uploadPdf` and `parseArxivId`.
+- Modify: [`frontend/tests/lib/api.test.ts`](../../../frontend/tests/lib/api.test.ts) — extend with parser cases.
+
+- [ ] **Step 1: Failing test — parseArxivId cases.**
+
+Add to [`frontend/tests/lib/api.test.ts`](../../../frontend/tests/lib/api.test.ts):
+
+```typescript
+import { describe, it, expect } from "vitest";
+import { parseArxivId } from "@/lib/api";
+
+describe("parseArxivId", () => {
+  it("accepts a bare new-style ID", () => {
+    expect(parseArxivId("2310.06825")).toBe("arxiv:2310.06825");
+  });
+  it("accepts an arxiv: prefix", () => {
+    expect(parseArxivId("arxiv:2310.06825")).toBe("arxiv:2310.06825");
+  });
+  it("strips a version suffix", () => {
+    expect(parseArxivId("2310.06825v3")).toBe("arxiv:2310.06825");
+  });
+  it("normalises an abs URL", () => {
+    expect(parseArxivId("https://arxiv.org/abs/2310.06825v1")).toBe(
+      "arxiv:2310.06825",
+    );
+  });
+  it("normalises a pdf URL", () => {
+    expect(parseArxivId("https://arxiv.org/pdf/2310.06825.pdf")).toBe(
+      "arxiv:2310.06825",
+    );
+  });
+  it("accepts old-style IDs", () => {
+    expect(parseArxivId("cs.AI/0701001")).toBe("arxiv:cs.AI/0701001");
+  });
+  it("trims whitespace", () => {
+    expect(parseArxivId("  2310.06825  ")).toBe("arxiv:2310.06825");
+  });
+  it("rejects garbage", () => {
+    expect(parseArxivId("not-an-id")).toBeNull();
+    expect(parseArxivId("")).toBeNull();
+    expect(parseArxivId("12.345")).toBeNull();
+  });
+});
+```
+
+Run: `cd frontend; npm test -- parseArxivId`
+Expected: FAIL — `parseArxivId is not a function`.
+
+- [ ] **Step 2: Implement `parseArxivId` and `uploadPdf`.**
+
+Append to [`frontend/src/lib/api.ts`](../../../frontend/src/lib/api.ts):
+
+```typescript
+const ARXIV_NEW = /^(\d{4}\.\d{4,5})(v\d+)?$/;
+const ARXIV_OLD = /^([a-z\-]+(\.[A-Z]{2})?\/\d{7})(v\d+)?$/;
+
+/** Normalise user-supplied arXiv input to canonical `arxiv:<id>` form, or
+ * null if it doesn't look like an arXiv identifier. Accepts bare IDs,
+ * `arxiv:` prefix, and `arxiv.org/abs/` or `arxiv.org/pdf/` URLs, with or
+ * without a trailing `vN` version suffix. */
+export function parseArxivId(input: string): string | null {
+  let s = input.trim();
+  if (!s) return null;
+  // Strip URL forms first.
+  const urlMatch = s.match(/arxiv\.org\/(?:abs|pdf)\/([^?#]+?)(?:\.pdf)?$/i);
+  if (urlMatch) s = urlMatch[1];
+  // Strip arxiv: prefix.
+  s = s.replace(/^arxiv:/i, "");
+  // Match new-style or old-style, capturing without version.
+  const mNew = s.match(ARXIV_NEW);
+  if (mNew) return `arxiv:${mNew[1]}`;
+  const mOld = s.match(ARXIV_OLD);
+  if (mOld) return `arxiv:${mOld[1]}`;
+  return null;
+}
+
+/** Multipart PDF upload. Backend hashes the bytes → sha256-keyed cache,
+ * so re-uploading the same file produces `cache_hit: true`. */
+export async function uploadPdf(
+  sessionId: number,
+  file: File,
+): Promise<IngestResult> {
+  const form = new FormData();
+  form.append("session_id", String(sessionId));
+  form.append("file", file);
+  const res = await fetch(`${API_BASE_URL}/papers/upload`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`API ${res.status}: ${text}`);
+  }
+  return (await res.json()) as IngestResult;
+}
+```
+
+- [ ] **Step 3: Run tests + lint + typecheck.**
+
+```powershell
+cd frontend
+npm test
+npm run typecheck
+npm run lint
+```
+
+Expected: all pass; parseArxivId tests now green.
+
+- [ ] **Step 4: Commit.**
+
+```powershell
+git add frontend/src/lib/api.ts frontend/tests/lib/api.test.ts
+git commit -m "feat(api): add uploadPdf client + parseArxivId normaliser"
+```
+
+#### Task v2.9-3 — Frontend: AttachPaperMenu popover + wire into Composer
+
+**Files:**
+- Create: [`frontend/src/components/chat/AttachPaperMenu.tsx`](../../../frontend/src/components/chat/AttachPaperMenu.tsx).
+- Modify: [`frontend/src/components/chat/Composer.tsx`](../../../frontend/src/components/chat/Composer.tsx) — replace the disabled paperclip with the menu trigger.
+- Modify: [`frontend/src/store/chat.ts`](../../../frontend/src/store/chat.ts) — add `addReferenceFromIngest` action.
+- Create: [`frontend/tests/components/AttachPaperMenu.test.tsx`](../../../frontend/tests/components/AttachPaperMenu.test.tsx).
+
+- [ ] **Step 1: Failing test — PDF upload happy path through the menu.**
+
+```tsx
+// frontend/tests/components/AttachPaperMenu.test.tsx
+import { describe, it, expect, vi } from "vitest";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { setupServer } from "msw/node";
+
+import { AttachPaperMenu } from "@/components/chat/AttachPaperMenu";
+import { useChatStore } from "@/store/chat";
+
+const server = setupServer(
+  http.post("http://localhost:8000/papers/upload", async () =>
+    HttpResponse.json(
+      {
+        paper_content_id: 11,
+        papers_id: 22,
+        cache_hit: false,
+        title: "Attention Is All You Need",
+      },
+      { status: 201 },
+    ),
+  ),
+);
+
+beforeAll(() => server.listen());
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
+
+beforeEach(() => {
+  // seed an active session in the store
+  useChatStore.setState((s) => ({
+    ...s,
+    sessions: [
+      { id: 1, title: "t", messages: [], backend_session_id: 7 },
+    ],
+    activeSessionId: 1,
+  }));
+});
+
+describe("AttachPaperMenu", () => {
+  it("uploads a PDF and adds the reference to the store", async () => {
+    render(<AttachPaperMenu trigger={<button>Attach</button>} />);
+    await userEvent.click(screen.getByText("Attach"));
+    await userEvent.click(screen.getByRole("tab", { name: /upload pdf/i }));
+
+    const file = new File(["%PDF-1.4 fake"], "paper.pdf", {
+      type: "application/pdf",
+    });
+    const input = screen.getByLabelText(/select pdf/i) as HTMLInputElement;
+    await userEvent.upload(input, file);
+
+    await waitFor(() => {
+      expect(screen.getByText(/added/i)).toBeInTheDocument();
+    });
+    // store mutation
+    const refs = useChatStore.getState().sessions[0].references ?? [];
+    expect(refs.some((r) => r.papers_id === 22)).toBe(true);
+  });
+});
+```
+
+Run: `cd frontend; npm test -- AttachPaperMenu`
+Expected: FAIL — `AttachPaperMenu is not exported`.
+
+- [ ] **Step 2: Implement the menu component.**
+
+Create [`frontend/src/components/chat/AttachPaperMenu.tsx`](../../../frontend/src/components/chat/AttachPaperMenu.tsx):
+
+```tsx
+import { useRef, useState } from "react";
+import { toast } from "sonner";
+
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { ingestPaper, parseArxivId, uploadPdf } from "@/lib/api";
+import { useChatStore } from "@/store/chat";
+
+interface Props {
+  trigger: React.ReactNode;
+}
+
+export function AttachPaperMenu({ trigger }: Props) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [arxivInput, setArxivInput] = useState("");
+  const [arxivError, setArxivError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const sessionId = useChatStore((s) => {
+    const active = s.sessions.find((sess) => sess.id === s.activeSessionId);
+    return active?.backend_session_id ?? null;
+  });
+  const addRef = useChatStore((s) => s.addReferenceFromIngest);
+
+  const handleResult = (
+    r: { papers_id: number; paper_content_id: number; title: string; cache_hit: boolean },
+  ) => {
+    addRef({
+      papers_id: r.papers_id,
+      paper_content_id: r.paper_content_id,
+      title: r.title,
+      kind: "pdf_upload",
+    });
+    toast.success(r.cache_hit ? "Re-attached" : "Added", {
+      description: r.title,
+    });
+    setOpen(false);
+  };
+
+  const onPdfPicked = async (file: File | undefined) => {
+    if (!file || sessionId == null) return;
+    setBusy(true);
+    try {
+      const r = await uploadPdf(sessionId, file);
+      handleResult(r);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error("Upload failed", { description: msg });
+    } finally {
+      setBusy(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
+  const onArxivSubmit = async () => {
+    setArxivError(null);
+    const paperId = parseArxivId(arxivInput);
+    if (!paperId) {
+      setArxivError("Not a valid arXiv identifier or URL.");
+      return;
+    }
+    if (sessionId == null) return;
+    setBusy(true);
+    try {
+      const r = await ingestPaper(sessionId, paperId);
+      handleResult({ ...r, papers_id: r.papers_id });
+      setArxivInput("");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error("Import failed", { description: msg });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>{trigger}</PopoverTrigger>
+      <PopoverContent className="w-80" align="start">
+        <Tabs defaultValue="pdf">
+          <TabsList className="w-full">
+            <TabsTrigger value="pdf" className="flex-1">Upload PDF</TabsTrigger>
+            <TabsTrigger value="arxiv" className="flex-1">Paste arXiv ID</TabsTrigger>
+          </TabsList>
+          <TabsContent value="pdf" className="space-y-2 pt-3">
+            <label className="text-sm text-muted-foreground" htmlFor="pdf-file">
+              Select PDF (max 30 MiB)
+            </label>
+            <Input
+              id="pdf-file"
+              ref={fileRef}
+              type="file"
+              accept="application/pdf"
+              disabled={busy || sessionId == null}
+              onChange={(e) => onPdfPicked(e.target.files?.[0])}
+              aria-label="Select PDF"
+            />
+          </TabsContent>
+          <TabsContent value="arxiv" className="space-y-2 pt-3">
+            <Input
+              placeholder="2310.06825 or arxiv URL"
+              value={arxivInput}
+              onChange={(e) => setArxivInput(e.target.value)}
+              disabled={busy}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void onArxivSubmit();
+                }
+              }}
+            />
+            {arxivError && (
+              <p className="text-xs text-destructive">{arxivError}</p>
+            )}
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => void onArxivSubmit()}
+              disabled={busy || arxivInput.trim().length === 0 || sessionId == null}
+            >
+              Import
+            </Button>
+          </TabsContent>
+        </Tabs>
+      </PopoverContent>
+    </Popover>
+  );
+}
+```
+
+- [ ] **Step 3: Add the store action.**
+
+In [`frontend/src/store/chat.ts`](../../../frontend/src/store/chat.ts), extend the store type with:
+
+```typescript
+interface AddReferenceArgs {
+  papers_id: number;
+  paper_content_id: number;
+  title: string;
+  kind: string;
+}
+
+addReferenceFromIngest: (args: AddReferenceArgs) => void;
+```
+
+Implementation (inside `create<…>(…)`):
+
+```typescript
+addReferenceFromIngest: ({ papers_id, paper_content_id, title, kind }) =>
+  set((state) => ({
+    sessions: state.sessions.map((s) =>
+      s.id === state.activeSessionId
+        ? {
+            ...s,
+            references: (s.references ?? []).some(
+              (r) => r.papers_id === papers_id,
+            )
+              ? s.references
+              : [
+                  ...(s.references ?? []),
+                  {
+                    papers_id,
+                    paper_content_id,
+                    enabled: true,
+                    added_at: new Date().toISOString(),
+                    arxiv_id: null,
+                    title,
+                    year: null,
+                    kind,
+                  },
+                ],
+          }
+        : s,
+    ),
+  })),
+```
+
+If `ChatSession.references` is not yet on the type, add it: `references?: ReferenceItem[]` in [`frontend/src/types/domain.ts`](../../../frontend/src/types/domain.ts).
+
+- [ ] **Step 4: Wire the menu into Composer.**
+
+In [`frontend/src/components/chat/Composer.tsx`](../../../frontend/src/components/chat/Composer.tsx), drop the paperclip from the `CAPABILITIES` array and render it separately:
+
+```tsx
+import { AttachPaperMenu } from "@/components/chat/AttachPaperMenu";
+
+// inside the tool-row JSX, before the .map of remaining placeholders:
+<AttachPaperMenu
+  trigger={
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      className="h-8 w-8 text-muted-foreground"
+      aria-label="Attach paper"
+    >
+      <Paperclip className="h-4 w-4" />
+    </Button>
+  }
+/>
+```
+
+Remove the `Paperclip` entry from `CAPABILITIES` (it now lives in its own JSX block; the other three placeholders stay).
+
+- [ ] **Step 5: Add edge-case tests.**
+
+Extend the test file with:
+
+- 413 (file too large): MSW handler returns 413 → expect `toast.error` rendered.
+- 415 (wrong MIME): the input has `accept="application/pdf"` but a programmatic File with `type="text/plain"` should still get rejected by the backend; assert the error toast.
+- arXiv happy path: type `2310.06825v3`, click Import, assert MSW `/papers` was called with body `{session_id: 7, paper_id: "arxiv:2310.06825"}`, assert store mutation.
+- Bad arXiv input: type `foo`, click Import → inline `Not a valid arXiv identifier` shown, no network call (assert `vi.fn` MSW handler was never hit).
+- Cache hit: MSW returns `cache_hit: true` → toast text is "Re-attached" not "Added".
+
+Each test follows the same `render → click trigger → interact → wait for toast → assert` shape as Step 1.
+
+- [ ] **Step 6: Run all frontend gates.**
+
+```powershell
+cd frontend
+npm test
+npm run typecheck
+npm run lint
+npm run build
+```
+
+Expected: clean across all four.
+
+- [ ] **Step 7: Manual browser verification.**
+
+From repo root, with `backend/.env` provider key set:
+
+```powershell
+.\scripts\smoke_e2e.ps1
+```
+
+Then in the browser:
+
+1. Click the paperclip → popover opens with two tabs.
+2. **Upload PDF tab:** pick a real arXiv PDF off disk. Wait for "Added" toast. Reference Sources panel (already shipped in Plan D-prep) shows the new row with `kind=pdf_upload`. Refresh the page — the reference persists (DB-backed).
+3. **Paste arXiv ID tab:** type `2310.06825`, click Import. Pipeline downloads, extracts LaTeX, embeds. Toast says "Added". Reference Sources panel shows the row with `kind=arxiv`.
+4. **Cache-hit:** re-upload the same PDF → toast says "Re-attached", `paper_content_id` matches the first upload (verifiable in the trace panel or `papers.db` SELECT).
+5. **Bad arXiv ID:** type `not-an-id`, click Import → inline "Not a valid arXiv identifier" shown; nothing hits the network (verifiable in DevTools Network panel).
+
+- [ ] **Step 8: Commit.**
+
+```powershell
+git add frontend/src/components/chat/AttachPaperMenu.tsx \
+        frontend/src/components/chat/Composer.tsx \
+        frontend/src/store/chat.ts \
+        frontend/src/types/domain.ts \
+        frontend/tests/components/AttachPaperMenu.test.tsx
+git commit -m "feat(chat): wire AttachPaperMenu for PDF upload + arXiv-ID import"
+```
+
+#### Task v2.9-4 — CLAUDE.md + SRS pointers
+
+**Files:**
+- Modify: [`CLAUDE.md`](../../../CLAUDE.md) — strike v2.9 follow-up off the Plan C known-follow-ups list; add the new `/papers/upload` line to the backend surface section.
+- Modify: [`docs/superpowers/specs/2026-05-17-paperhub-srs.md`](../../../docs/superpowers/specs/2026-05-17-paperhub-srs.md) — bump to v2.9 with one Revision History entry referencing this round.
+
+- [ ] **Step 1: Update SRS Revision History.**
+
+Append a v2.9 row noting "Composer ‘Attach paper’ wired to `POST /papers/upload` (PDF) and `POST /papers {paper_id: arxiv:…}` (manual arXiv-ID); transport-only round, no schema or agent change." Bump the version banner at the top from v2.8 → v2.9.
+
+- [ ] **Step 2: Update project CLAUDE.md.**
+
+In the "Plan C known follow-ups" section, mark the PDF upload / arxiv-import item closed and reference the v2.9 round. Add `POST /papers/upload` to the surface list near `POST /papers` if surfaces are enumerated.
+
+- [ ] **Step 3: Commit.**
+
+```powershell
+git add CLAUDE.md docs/superpowers/specs/2026-05-17-paperhub-srs.md
+git commit -m "docs(srs,plan-c,claude): v2.9 — Composer attach-paper PDF upload + arXiv-ID import"
+```
+
+### Quality gates after the v2.9 round
+
+From `backend/`:
+
+```powershell
+uv run pytest -q                # 287+4 new = 291 passed
+uv run ruff check src tests
+uv run mypy src
+.\scripts\smoke_mcp_papers.ps1
+.\scripts\smoke_chat_real.ps1   # regression — arxiv-id path still works through the chat surface
+```
+
+From `frontend/`:
+
+```powershell
+npm test                        # 25+7 new = 32 passed
+npm run typecheck
+npm run lint
+npm run build
+```
+
+From repo root:
+
+```powershell
+.\scripts\smoke_e2e.ps1
+```
+
+Browser checks: see Task v2.9-3 Step 7.
+
+### Acceptance for v2.9
+
+- PDF upload through Composer → `paper_content` row with `kind='pdf_upload'`, chunks present, Chroma vectors present, Reference Sources panel reflects the addition immediately, `paper_qa` on a subsequent turn can cite chunks from the uploaded paper.
+- Re-uploading the same bytes → toast "Re-attached", no second `paper_content` row, sub-second response.
+- arXiv ID manual entry through Composer → same end-state as the agent-driven arxiv ingest path; cache shared.
+- Bad input rejected at the right layer: junk in the arXiv tab → inline form error, no network; wrong MIME / oversize → backend 415/413, surfaced as an error toast.
+
+### Files touched (summary)
+
+- New: [`backend/tests/test_papers_upload.py`](../../../backend/tests/test_papers_upload.py).
+- New: [`frontend/src/components/chat/AttachPaperMenu.tsx`](../../../frontend/src/components/chat/AttachPaperMenu.tsx).
+- New: [`frontend/tests/components/AttachPaperMenu.test.tsx`](../../../frontend/tests/components/AttachPaperMenu.test.tsx).
+- Modify: [`backend/src/paperhub/api/papers.py`](../../../backend/src/paperhub/api/papers.py) — `POST /papers/upload` route.
+- Modify: [`backend/src/paperhub/config.py`](../../../backend/src/paperhub/config.py) — `max_upload_mb`.
+- Modify: [`backend/.env.example`](../../../backend/.env.example) — `PAPERHUB_MAX_UPLOAD_MB`.
+- Modify: [`frontend/src/lib/api.ts`](../../../frontend/src/lib/api.ts) — `uploadPdf`, `parseArxivId`.
+- Modify: [`frontend/src/components/chat/Composer.tsx`](../../../frontend/src/components/chat/Composer.tsx) — replace disabled paperclip with `AttachPaperMenu` trigger.
+- Modify: [`frontend/src/store/chat.ts`](../../../frontend/src/store/chat.ts) — `addReferenceFromIngest` action.
+- Modify: [`frontend/src/types/domain.ts`](../../../frontend/src/types/domain.ts) — optional `references` field on `ChatSession` (if not already present).
+- Modify: [`frontend/tests/lib/api.test.ts`](../../../frontend/tests/lib/api.test.ts) — `parseArxivId` cases.
+- Modify: [`CLAUDE.md`](../../../CLAUDE.md), [`docs/superpowers/specs/2026-05-17-paperhub-srs.md`](../../../docs/superpowers/specs/2026-05-17-paperhub-srs.md) — version bump + follow-up closure.
+
+---
+
+## Plan C v2.10 — Agentic hierarchical `paper_qa` (chunk-by-section + per-paper subagents + finalizer)
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use [superpowers:subagent-driven-development](../../../C:/Users/eddie/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/subagent-driven-development) (recommended) or [superpowers:executing-plans](../../../C:/Users/eddie/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/executing-plans). Steps use `- [ ]` for tracking.
+
+**Goal:** Replace the v2.7 dense-RAG `paper_qa` map-reduce (retriever top-k → per-paper analyst LLM writes prose → synthesizer reads prose) with an **agentic hierarchical RAG** pipeline (dispatcher → per-paper subagent that browses the paper's section TOC and picks chunks → finalizer that reads the picked chunks directly and writes the user-facing answer).
+
+**Why now.** Live MolmoACT2 + X-VLA testing produced an "empty papers" answer despite both papers having `enabled=true` references. DB inspection found the analyst LLM had been fed five chunks whose entire `text` was a single literal `.` / `R` / `e` character. Two coupled root causes:
+
+1. **Chunker arithmetic bug** ([`chunker.py:60-68`](../../../backend/src/paperhub/pipelines/chunker.py#L60-L68)): on dense LaTeX, the shrink-loop heuristic `tentative_end -= max(1, (tok_len - hard) * 4)` overshoots by tens of thousands of characters in a single iteration, clamps to `cursor + 1`, emits a 1-char chunk, advances the cursor by 1, and walks the rest of the section character-by-character. Paper 15 (MolmoAct2) has **29,804 chunks ≤ 5 chars** out of 29,891 total. Paper 16 has **1,792 ≤ 5 chars** out of 1,839. Chroma embedded all of them; the reranker dutifully top-5'd whichever scored best for the query vector; the analyst LLM correctly reported "no relevant content" in 187 chars; the synthesizer correctly reported both papers as empty. The pipeline did its job — the chunker fed it `[chunk:71333]\n.`.
+2. **Map-reduce architectural ceiling** (NOTES.md v9 lesson). Even with a sane chunker, the synthesizer never sees raw chunk text — it only sees the per-paper analyst's 3-6 sentence prose. NOTES.md v5 → v9 → v10 showed that giving the answer LLM **chunks + context** beats giving it **summary-of-chunks** by ~+0.10-0.26 correctness on flagship models. Dense top-5 retrieval also wastes the structural prior academic papers offer: section names disambiguate "Methods" from "Related Work" from "Experiments" in a way the embedder flattens. For multi-hop comparative questions ("how do these two papers differ on expert collapse"), an agent that browses the section TOC and decides which section to read outperforms cosine-similarity top-k.
+
+**Architecture.** Replace `_paper_qa_map_one` / `_paper_qa_synthesize_stream` / `_paper_qa_map_reduce` with a four-node LangGraph subgraph mirroring v2.7's `paper_search` pattern:
+
+```
+pq_resolve     (existing: enumerate paper_content_ids WHERE enabled=TRUE)
+   ↓
+pq_dispatch    (fan-out one PerPaperSubagentState per paper)
+   ↓ asyncio.gather
+   ┌──────────────────────────────────────────────────────────────┐
+   │ per_paper_subagent (bounded loop, max_iter=5):               │
+   │   tool palette (paper-scoped, read-only):                    │
+   │     - list_sections()                                        │
+   │         → cached sections_json (name, level, token_count)    │
+   │     - read_section(name)                                     │
+   │         → all chunks in that section, with [chunk:id] heads  │
+   │           and full text (paragraph-bounded post-v2.10-1)     │
+   │   exit:                                                      │
+   │     - LLM emits no tool_calls → final summary message →      │
+   │       done; Python extracts [chunk:N] markers from summary   │
+   │       and treats those as the subagent's picks               │
+   │     - max_iter reached → force-stop; treat ALL chunks the    │
+   │       subagent ever read as picks (best-effort fallback)     │
+   │   yield: PerPaperPicks(paper_content_id, title,              │
+   │                        picked_chunks=[...], rationale=str)   │
+   └──────────────────────────────────────────────────────────────┘
+   ↓ (all per-paper subagents resolved)
+pq_finalize    (single flagship-model LLM call):
+                 input: user_message + list[PerPaperPicks]
+                 expected output: streaming user-facing prose with
+                 [chunk:N] markers preserved (real chunks.id rows)
+   ↓ tokens stream to /chat SSE
+```
+
+**Design decisions (settled with user 2026-05-20):**
+
+| # | Decision | Rationale |
+| --- | --- | --- |
+| 1 | `MAX_SECTION_READS = 5` per subagent | Most papers have ≤ 10 sections; 5 reads is enough for a comparative question. Matches v2.7's `MAX_REFINEMENT_LOOPS=1` minimal-constant style. |
+| 2 | **No section synopses** at ingest | The subagent self-infers what "Methods" / "Experiments" / "Related Work" mean from the section name alone. Avoids per-section LLM calls at ingest (~30 calls/paper). |
+| 3 | Subagent **can re-read** the same section | A read is a tool call against `MAX_SECTION_READS`; the LLM may legitimately re-read after gathering context elsewhere. No special dedup. |
+| 4 | **No cross-paper visibility** inside subagents | Subagent for paper A doesn't see paper B's picks. Finalizer is the only cross-paper synthesis surface. Preserves map-reduce purity + parallelism. |
+| 5 | **Replace entirely** — no feature flag, no A/B | Clean break (matches v2.7 paper_search decomposition). Old paths confuse readers and double the test surface. |
+| 6 | Subagent uses **small-tier model** (gemini-flash-lite by default); finalizer stays **flagship** | Subagent's job is tool-routing + chunk-citing — cheap, structural. Finalizer composes user-visible prose — pay flagship. Production may swap subagent to a local LLM via `PAPERHUB_PAPER_QA_SUBAGENT_MODEL`. |
+| 7 | **Strip LaTeX `%`-comments** in the chunker (new requirement) | The IDE-opened `source.flattened.tex` for arxiv:2510.10274 (X-VLA) shows `pylatexenc`-output comments that survive into chunks; the LLM treats them as content and gets distracted. Strip at chunk-input time so existing renderer output stays untouched (Citation Canvas still resolves char offsets against the un-stripped source). |
+
+**No SRS contract change** at the LLM-visible / SSE / DB-schema layer. **One schema addition**: `paper_content.sections_json TEXT` (nullable; ingested at chunk time, populated on re-ingest of existing papers). Tracing per-stage `tool_step` SSE events preserved end-to-end.
+
+**Pairs with concurrent v2.9 work** (frontend Composer attach menu) — zero file overlap; v2.9 touches `frontend/src/components/chat/Composer.tsx` + `backend/src/paperhub/api/papers.py` (multipart endpoint), v2.10 touches `backend/src/paperhub/agents/*` + `backend/src/paperhub/pipelines/chunker.py` + `backend/src/paperhub/pipelines/paper_pipeline.py`. v2.10 lands after re-ingest so any v2.9-uploaded PDFs get the new chunker + section TOC for free.
+
+**SRS update** (separate task — not gated on this plan landing): bump SRS to v2.8 → v2.10 with a Revision History entry describing the architectural shift, update §III-3 Research Agent row's `paper_qa` paragraph, update §III-5.2 RAG retrieval to describe the agentic loop instead of dense top-k → analyst → synthesizer. Will be done at PR time alongside the implementation.
+
+---
+
+### Task v2.10-1 — Chunker hardening: shrink-loop fix + LaTeX comment strip + paragraph-aware boundaries
+
+**Files:**
+- Modify: [`backend/src/paperhub/pipelines/chunker.py`](../../../backend/src/paperhub/pipelines/chunker.py)
+- Modify: [`backend/tests/test_chunker.py`](../../../backend/tests/test_chunker.py)
+
+**Symptom + fix:**
+
+- [ ] **Step 1: Add a failing test for the 1-char-chunk pathology**
+
+```python
+# backend/tests/test_chunker.py — append to existing module
+def test_chunker_never_emits_chunks_below_min_meaningful_length():
+    """Regression: dense LaTeX previously walked the cursor 1 char at a time
+    through ~1800 iterations, emitting single-period chunks. The shrink loop
+    must always make forward progress at section/paragraph scale."""
+    # Synthetic dense LaTeX-ish section: lots of math-mode noise.
+    section = "\\section{Experiments}\n"
+    # ~6000 chars of dense markup that previously triggered the overshoot.
+    dense = ("$\\sum_{i=0}^{n} \\alpha_i \\beta_i + \\gamma$. " * 200)
+    chunks = chunk_text(section + dense)
+    # No chunk shorter than 50 chars (modulo possible trailing slivers).
+    tiny = [c for c in chunks if len(c.text) < 50]
+    assert len(tiny) <= 1, (
+        f"Expected at most 1 trailing sliver, got {len(tiny)} tiny chunks: "
+        f"{[c.text[:20] for c in tiny[:5]]}"
+    )
+    # And no 1-char chunks at all.
+    one_char = [c for c in chunks if len(c.text) == 1]
+    assert one_char == [], f"1-char chunks regressed: {one_char[:5]}"
+```
+
+- [ ] **Step 2: Add a failing test for LaTeX-comment stripping**
+
+```python
+def test_chunker_strips_latex_line_comments():
+    """LaTeX % line-comments (single-% to end of line, unless escaped \\%) must
+    be removed before chunking so they don't end up as 'content' in chunks
+    served to the analyst LLM."""
+    text = (
+        "\\section{Method}\n"
+        "We use attention. % FIXME: cite original paper here\n"
+        "The key insight is X. 50\\% of the data is held out.\n"
+        "% TODO: rewrite this paragraph\n"
+        "Therefore Y holds.\n"
+    )
+    chunks = chunk_text(text)
+    joined = "\n".join(c.text for c in chunks)
+    assert "FIXME" not in joined
+    assert "TODO" not in joined
+    assert "rewrite this paragraph" not in joined
+    # Escaped % survives (it's literal "50%").
+    assert "50\\%" in joined or "50%" in joined
+    # Real content is preserved.
+    assert "attention" in joined
+    assert "Therefore Y holds" in joined
+```
+
+- [ ] **Step 3: Add a failing test for paragraph-aware boundaries**
+
+```python
+def test_chunker_closes_at_paragraph_boundary_not_mid_sentence():
+    """When target token count is hit, prefer closing at a paragraph break
+    over a mid-sentence break. Paragraph integrity drives synthesizer
+    correctness per NOTES.md v5 / v6 lessons."""
+    para1 = ("This is paragraph one. " * 50).strip()  # ~250 tokens
+    para2 = ("This is paragraph two. " * 50).strip()
+    para3 = ("This is paragraph three. " * 50).strip()
+    text = f"\\section{{Body}}\n{para1}\n\n{para2}\n\n{para3}\n"
+    # Force target small so we close mid-text.
+    chunks = chunk_text(text, target=400, hard=600)
+    for c in chunks:
+        stripped = c.text.strip()
+        # No chunk ends mid-sentence (unless it's the trailing chunk).
+        if c is not chunks[-1]:
+            assert stripped.endswith(".") or stripped.endswith("\n"), (
+                f"Chunk closes mid-sentence: ...{stripped[-30:]!r}"
+            )
+```
+
+- [ ] **Step 4: Run the three tests to confirm they fail against current chunker**
+
+```powershell
+uv run pytest tests/test_chunker.py::test_chunker_never_emits_chunks_below_min_meaningful_length tests/test_chunker.py::test_chunker_strips_latex_line_comments tests/test_chunker.py::test_chunker_closes_at_paragraph_boundary_not_mid_sentence -v
+```
+Expected: 3 FAIL.
+
+- [ ] **Step 5: Implement comment stripping + safe shrink + paragraph boundary**
+
+Replace the body of `chunk_text` in [`backend/src/paperhub/pipelines/chunker.py`](../../../backend/src/paperhub/pipelines/chunker.py):
+
+```python
+import re
+from dataclasses import dataclass
+import tiktoken
+
+_SECTION_RE = re.compile(r"\\section\{([^}]+)\}")
+# Match single-% comments to end-of-line, NOT \% (escaped percent — literal).
+# Negative lookbehind: not preceded by a backslash.
+_COMMENT_RE = re.compile(r"(?<!\\)%[^\n]*")
+# Paragraph break is the strongest natural boundary; sentence-end is fallback.
+_PARA_BOUNDARY_RE = re.compile(r"\n\s*\n")
+_SENT_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+@dataclass(frozen=True)
+class Chunk:
+    section: str | None
+    char_start: int
+    char_end: int
+    text: str
+
+
+def _strip_latex_comments(text: str) -> str:
+    """Remove % line-comments while preserving \\% (literal percent)."""
+    return _COMMENT_RE.sub("", text)
+
+
+def _best_close(piece: str, *, prefer_paragraph: bool) -> int | None:
+    """Return the char offset of the latest natural boundary in *piece*, or
+    None. Paragraph break preferred over sentence-end when ``prefer_paragraph``
+    is True (it always is, at the call site)."""
+    if prefer_paragraph:
+        matches = list(_PARA_BOUNDARY_RE.finditer(piece))
+        if matches:
+            return matches[-1].end()
+    matches = list(_SENT_BOUNDARY_RE.finditer(piece))
+    if matches:
+        return matches[-1].end()
+    return None
+
+
+def chunk_text(text: str, *, target: int = 800, hard: int = 1000) -> list[Chunk]:
+    enc = tiktoken.get_encoding("cl100k_base")
+
+    # 1. Strip LaTeX line-comments BEFORE section detection. We work on the
+    #    stripped text throughout; chunk char_start/char_end indices are
+    #    relative to the stripped text. Renderer output (source.html) is NOT
+    #    re-rendered — the Citation Canvas resolves chunk offsets against the
+    #    pre-rendered HTML, which never contained the comments anyway.
+    text = _strip_latex_comments(text)
+
+    # 2. Split into section-spans.
+    spans: list[tuple[str | None, int, int]] = []
+    last_idx = 0
+    last_section: str | None = None
+    for m in _SECTION_RE.finditer(text):
+        if m.start() > last_idx:
+            spans.append((last_section, last_idx, m.start()))
+        last_section = m.group(1).strip()
+        last_idx = m.end()
+    if last_idx < len(text):
+        spans.append((last_section, last_idx, len(text)))
+
+    # 3. Greedy-fill each span up to hard cap, closing at paragraph (or
+    #    sentence as fallback) boundaries once target is hit.
+    out: list[Chunk] = []
+    for section, span_start, span_end in spans:
+        cursor = span_start
+        while cursor < span_end:
+            # Start with a generous window and shrink ONLY by halving until
+            # we're under hard. Old impl subtracted `(tok_len - hard) * 4`
+            # chars which overshot to cursor+1 in a single iteration on
+            # dense LaTeX — that was the v2.10-1 bug.
+            tentative_end = min(cursor + hard * 5, span_end)
+            piece = text[cursor:tentative_end]
+            tok_len = len(enc.encode(piece))
+            while tok_len > hard and tentative_end - cursor > 1:
+                # Halve the piece. Guaranteed to bottom out at cursor + 1 OR
+                # under hard, whichever comes first; no overshoot.
+                tentative_end = cursor + max(1, (tentative_end - cursor) // 2)
+                piece = text[cursor:tentative_end]
+                tok_len = len(enc.encode(piece))
+
+            # Target-aware early-close at paragraph (preferred) or sentence
+            # boundary, but only if we haven't shrunk down to a sliver.
+            if (
+                tok_len >= target
+                and tentative_end < span_end
+                and tentative_end - cursor > 100  # sanity floor
+            ):
+                boundary_off = _best_close(piece, prefer_paragraph=True)
+                if boundary_off is not None and boundary_off > 100:
+                    tentative_end = cursor + boundary_off
+                    piece = text[cursor:tentative_end]
+
+            raw_piece = text[cursor:tentative_end]
+            stripped = raw_piece.strip()
+            if not stripped:
+                cursor = tentative_end
+                continue
+            lead = len(raw_piece) - len(raw_piece.lstrip())
+            trail = len(raw_piece) - len(raw_piece.rstrip())
+            out.append(
+                Chunk(
+                    section=section,
+                    char_start=cursor + lead,
+                    char_end=tentative_end - trail,
+                    text=stripped,
+                ),
+            )
+            cursor = tentative_end
+    return out
+```
+
+- [ ] **Step 6: Run the three new tests + the existing chunker test suite**
+
+```powershell
+uv run pytest tests/test_chunker.py -v
+```
+Expected: all PASS, including the 3 new ones.
+
+- [ ] **Step 7: Commit**
+
+```powershell
+git add backend/src/paperhub/pipelines/chunker.py backend/tests/test_chunker.py
+git commit -m "fix(chunker): safe halving shrink + LaTeX comment strip + paragraph-bounded chunks (Plan C v2.10-1)"
+```
+
+---
+
+### Task v2.10-2 — Persist `paper_content.sections_json` at ingest time
+
+**Files:**
+- Modify: [`backend/src/paperhub/db/migrations/`](../../../backend/src/paperhub/db/migrations/) — new migration adding the column.
+- Modify: [`backend/src/paperhub/db/schema.sql`](../../../backend/src/paperhub/db/schema.sql) (or wherever the canonical CREATE TABLE lives — verify) — `sections_json TEXT` column on `paper_content`.
+- Modify: [`backend/src/paperhub/pipelines/paper_pipeline.py`](../../../backend/src/paperhub/pipelines/paper_pipeline.py) — populate after chunking.
+- Modify: [`backend/src/paperhub/models/domain.py`](../../../backend/src/paperhub/models/domain.py) — `PaperContent` dataclass + `SectionEntry` model.
+- Modify: [`backend/tests/test_paper_pipeline.py`](../../../backend/tests/test_paper_pipeline.py).
+
+**Schema shape** (TEXT column, JSON-encoded list of objects; never queried as JSON so a plain TEXT column suffices):
+
+```json
+[
+  {"name": "Introduction", "char_start": 0, "char_end": 4892, "token_count": 1183, "chunk_count": 2},
+  {"name": "Method", "char_start": 4892, "char_end": 18430, "token_count": 3320, "chunk_count": 4},
+  {"name": "Experiments", "char_start": 18430, "char_end": 47120, "token_count": 7041, "chunk_count": 9}
+]
+```
+
+No nesting (no subsection tree in v2.10 — `\subsection{...}` is treated as part of its parent section's flat text; can refine later if the subagent's section picks turn out to be too coarse).
+
+**Steps:**
+
+- [ ] **Step 1: Write a failing test that sections_json is populated on ingest**
+
+```python
+# backend/tests/test_paper_pipeline.py — append
+async def test_paper_pipeline_persists_sections_json_at_ingest(
+    tmp_path: Any, db_conn: aiosqlite.Connection,
+) -> None:
+    """After ingest, paper_content.sections_json must contain a list of
+    {name, char_start, char_end, token_count, chunk_count} entries, ordered
+    by appearance, covering every \\section{...} in the source."""
+    sample_tex = (
+        "\\section{Introduction}\nIntro body here. " * 30 + "\n\n"
+        "\\section{Method}\nMethod body here. " * 30 + "\n\n"
+        "\\section{Experiments}\nExperiment body here. " * 50 + "\n"
+    )
+    src = tmp_path / "src" / "main.tex"
+    src.parent.mkdir(parents=True)
+    src.write_text(sample_tex)
+
+    pipeline = PaperPipeline(db_conn, _stub_chroma(), _stub_embedder())
+    req = IngestRequest(
+        paper_id="arxiv:9999.99999",
+        arxiv_meta_override=ArxivMetadata(title="T", abstract="", authors=[], year=2024),
+        source_dir_path=str(tmp_path / "src"),
+    )
+    result = await pipeline.ingest(req)
+
+    async with db_conn.execute(
+        "SELECT sections_json FROM paper_content WHERE id = ?",
+        (result.paper_content_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    sections = json.loads(row[0])
+    assert [s["name"] for s in sections] == ["Introduction", "Method", "Experiments"]
+    for s in sections:
+        assert s["chunk_count"] > 0
+        assert s["token_count"] > 0
+        assert s["char_end"] > s["char_start"]
+```
+
+- [ ] **Step 2: Confirm it fails — the column doesn't exist yet**
+
+```powershell
+uv run pytest tests/test_paper_pipeline.py::test_paper_pipeline_persists_sections_json_at_ingest -v
+```
+Expected: FAIL with `OperationalError: no such column: sections_json` (or KeyError when reading row).
+
+- [ ] **Step 3: Add the schema migration**
+
+The repo's migration mechanism: verify whether it's Alembic, raw SQL files run by `paperhub.db.init`, or sqlite `PRAGMA user_version` step-files. Pattern in earlier migrations is the source of truth — match it.
+
+For a raw-SQL migration file (the most likely pattern given the small scope):
+
+```sql
+-- backend/src/paperhub/db/migrations/0006_paper_content_sections_json.sql
+ALTER TABLE paper_content ADD COLUMN sections_json TEXT;
+```
+
+Also update the canonical CREATE TABLE in `schema.sql` (or equivalent) so a fresh DB has the column directly.
+
+- [ ] **Step 4: Add the `SectionEntry` model + extend `PaperContent` shape**
+
+```python
+# backend/src/paperhub/models/domain.py — append
+class SectionEntry(BaseModel):
+    name: str
+    char_start: int
+    char_end: int
+    token_count: int
+    chunk_count: int
+```
+
+`PaperContent` (or whichever dataclass mirrors the row) gains `sections: list[SectionEntry] | None = None`.
+
+- [ ] **Step 5: Populate during ingest**
+
+In `paper_pipeline.py`'s ingest path, after chunking + before the `INSERT INTO paper_content`:
+
+```python
+import json
+import tiktoken
+from collections import defaultdict
+from paperhub.models.domain import SectionEntry
+
+# After: chunks = chunk_text(flattened_tex)
+enc = tiktoken.get_encoding("cl100k_base")
+per_section: dict[str | None, list[Chunk]] = defaultdict(list)
+for c in chunks:
+    per_section[c.section].append(c)
+sections: list[SectionEntry] = []
+for name, group in per_section.items():
+    if name is None:  # text before any \section (preamble, abstract, etc.)
+        continue
+    section_text = flattened_tex[group[0].char_start : group[-1].char_end]
+    sections.append(
+        SectionEntry(
+            name=name,
+            char_start=group[0].char_start,
+            char_end=group[-1].char_end,
+            token_count=len(enc.encode(section_text)),
+            chunk_count=len(group),
+        ),
+    )
+sections_json = json.dumps([s.model_dump() for s in sections])
+# Then include sections_json in the existing INSERT statement.
+```
+
+- [ ] **Step 6: Run the test from Step 1 + the full paper-pipeline suite**
+
+```powershell
+uv run pytest tests/test_paper_pipeline.py -v
+```
+Expected: all PASS.
+
+- [ ] **Step 7: Commit**
+
+```powershell
+git add backend/src/paperhub/db backend/src/paperhub/pipelines/paper_pipeline.py backend/src/paperhub/models/domain.py backend/tests/test_paper_pipeline.py
+git commit -m "feat(paper-pipeline): persist paper_content.sections_json at ingest (Plan C v2.10-2)"
+```
+
+---
+
+### Task v2.10-3 — Per-paper subagent module + tool palette + bounded loop
+
+**Files:**
+- New: [`backend/src/paperhub/agents/paper_qa_subagent.py`](../../../backend/src/paperhub/agents/paper_qa_subagent.py).
+- New: [`backend/src/paperhub/llm/prompts/paper_qa_subagent_v1.yaml`](../../../backend/src/paperhub/llm/prompts/paper_qa_subagent_v1.yaml).
+- Modify: [`backend/src/paperhub/config.py`](../../../backend/src/paperhub/config.py) — new settings.
+- Modify: [`backend/.env.example`](../../../backend/.env.example) — document new env vars.
+- New: [`backend/tests/test_paper_qa_subagent.py`](../../../backend/tests/test_paper_qa_subagent.py).
+
+**Module shape** (mirrors v2.7 `research_pipeline.py` structure — single-responsibility stage helpers, no class state):
+
+- [ ] **Step 1: Write the failing subagent-loop test**
+
+```python
+# backend/tests/test_paper_qa_subagent.py
+async def test_subagent_loop_lists_sections_reads_picks_chunks_and_stops():
+    """Happy path: subagent receives a question, lists sections, reads two
+    relevant ones, cites chunks via [chunk:N] markers in its final no-tool-
+    calls message; Python extracts the picks."""
+    # Seed: 2 sections, 4 chunks total in DB; LLM is stubbed.
+    paper = _seed_paper_with_sections(
+        sections=[
+            {"name": "Method", "chunks": [(101, "We use cross-attention.")]},
+            {"name": "Experiments", "chunks": [(102, "We achieve 92% accuracy.")]},
+        ],
+    )
+    stub_llm = _StubLlm([
+        # Turn 1: call list_sections
+        _tool_call("list_sections", {}),
+        # Turn 2: call read_section("Method")
+        _tool_call("read_section", {"name": "Method"}),
+        # Turn 3: call read_section("Experiments")
+        _tool_call("read_section", {"name": "Experiments"}),
+        # Turn 4: no tool calls → final summary with citations
+        _final("Paper covers cross-attention [chunk:101] and 92% acc [chunk:102]."),
+    ])
+
+    picks = await run_paper_qa_subagent(
+        paper_content_id=paper.id,
+        title=paper.title,
+        user_message="What method and what accuracy?",
+        adapter=stub_llm,
+        tracer=_FakeTracer(),
+        model="stub",
+        conn=db_conn,
+    )
+
+    assert picks.paper_content_id == paper.id
+    assert sorted(c.chunk_id for c in picks.picked_chunks) == [101, 102]
+    assert "cross-attention" in picks.picked_chunks[0].text
+    assert "92%" in picks.picked_chunks[1].text
+    assert picks.rationale  # non-empty 1-line summary
+```
+
+- [ ] **Step 2: Add max-iter-cap test**
+
+```python
+async def test_subagent_loop_stops_at_max_section_reads_and_returns_what_it_read():
+    """If the LLM keeps calling tools past MAX_SECTION_READS, the loop force-
+    stops and returns every chunk the subagent ever read (best-effort)."""
+    paper = _seed_paper_with_n_sections(n=10)
+    # LLM that always calls read_section, never emits a final.
+    stub_llm = _StubLlm(infinite=[_tool_call("read_section", {"name": "S0"})])
+
+    picks = await run_paper_qa_subagent(
+        paper_content_id=paper.id,
+        title=paper.title,
+        user_message="Tell me everything",
+        adapter=stub_llm,
+        tracer=_FakeTracer(),
+        model="stub",
+        conn=db_conn,
+    )
+
+    # MAX_SECTION_READS=5 → 5 read calls (plus the implicit list_sections is
+    # NOT auto-called; total tool_calls = 5).
+    assert stub_llm.calls == 5
+    # All chunks from the 5 reads end up in picks (force-stop fallback).
+    assert len(picks.picked_chunks) > 0
+```
+
+- [ ] **Step 3: Add unknown-section error-tolerance test**
+
+```python
+async def test_subagent_read_section_unknown_returns_error_to_llm_not_crash():
+    """If the LLM asks for a section that doesn't exist, return a clean error
+    message in the tool result so the LLM can recover (probably call
+    list_sections first)."""
+    paper = _seed_paper_with_sections(sections=[{"name": "Method", "chunks": [(101, "x")]}])
+    stub_llm = _StubLlm([
+        _tool_call("read_section", {"name": "Nonexistent"}),
+        _final("I checked but the requested section doesn't exist [no chunks cited]."),
+    ])
+
+    picks = await run_paper_qa_subagent(
+        paper_content_id=paper.id, title="P", user_message="q",
+        adapter=stub_llm, tracer=_FakeTracer(), model="stub", conn=db_conn,
+    )
+
+    # No crash. Empty picks is fine.
+    assert picks.picked_chunks == []
+    # The error message was relayed to the LLM (check stub_llm.last_tool_result).
+    assert "unknown section" in stub_llm.last_tool_result.lower() or \
+           "not found" in stub_llm.last_tool_result.lower()
+```
+
+- [ ] **Step 4: Run all three subagent tests — confirm fails**
+
+```powershell
+uv run pytest tests/test_paper_qa_subagent.py -v
+```
+Expected: 3 FAIL (module doesn't exist).
+
+- [ ] **Step 5: Write the subagent prompt**
+
+```yaml
+# backend/src/paperhub/llm/prompts/paper_qa_subagent_v1.yaml
+system: |
+  You are PaperHub's per-paper analyst. The user has a question about
+  multiple papers — your job is to scan ONE paper's structure and pick the
+  chunks that contain relevant evidence.
+
+  You have two tools and a hard budget:
+  - `list_sections()`: returns this paper's section table-of-contents
+    (name + token count per section). Call this FIRST if you don't know
+    the paper.
+  - `read_section(name)`: returns every chunk in that section, each with
+    its `[chunk:<id>]` header and full text.
+  - You may make at most {max_section_reads} `read_section` calls per
+    turn. `list_sections` doesn't count against this budget.
+
+  When you've read enough to answer the question for THIS paper, stop
+  calling tools and write a 2-3 sentence summary of what this paper says
+  on the user's question, citing the chunks you found relevant using
+  `[chunk:<id>]` markers. Multiple cites OK: `[chunk:101,102]`.
+
+  Rules:
+  - Cite every claim with `[chunk:<id>]`. The system extracts these IDs
+    from your summary and treats them as your picks — uncited chunks are
+    discarded.
+  - If the paper doesn't address the question, say so explicitly in your
+    summary. Do not fabricate.
+  - Do NOT compare to other papers — you only see one. A separate
+    finalizer handles cross-paper synthesis.
+  - Be willing to re-read a section if needed (re-reads count against
+    the budget; budget yourself).
+user: |
+  PAPER: "{title}"
+
+  USER QUESTION: {user_message}
+
+  Pick the chunks that contain evidence for the user's question.
+```
+
+- [ ] **Step 6: Wire settings**
+
+```python
+# backend/src/paperhub/config.py — append to Settings model
+paper_qa_subagent_model: str = "gemini/gemini-3.1-flash-lite"
+paper_qa_max_section_reads: int = 5
+```
+
+```bash
+# backend/.env.example — append
+PAPERHUB_PAPER_QA_SUBAGENT_MODEL=gemini/gemini-3.1-flash-lite
+PAPERHUB_PAPER_QA_MAX_SECTION_READS=5
+```
+
+- [ ] **Step 7: Implement the subagent module**
+
+```python
+# backend/src/paperhub/agents/paper_qa_subagent.py
+"""Per-paper agentic chunk picker (Plan C v2.10).
+
+Replaces the v2.7 dense-RAG + analyst-prose path with a bounded LLM loop
+that browses the paper's section table-of-contents and decides which
+sections to read. The LLM's final no-tool-calls message contains
+`[chunk:<id>]` markers that Python extracts and treats as the subagent's
+picks. The finalizer downstream reads the picks' raw text directly.
+
+Cross-paper visibility is intentionally zero: one subagent state per
+paper, fan-out via asyncio.gather upstream. The finalizer is the only
+cross-paper synthesis surface.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+from dataclasses import dataclass
+from typing import Any
+
+import aiosqlite
+import litellm
+
+from paperhub.llm.adapter import LlmAdapter
+from paperhub.llm.prompts.registry import PromptRegistry
+from paperhub.tracing.tracer import Tracer
+
+__all__ = [
+    "MAX_SECTION_READS",
+    "PickedChunk",
+    "PerPaperPicks",
+    "run_paper_qa_subagent",
+]
+
+_LOG = logging.getLogger(__name__)
+
+# Default; overridden per call by Settings.paper_qa_max_section_reads.
+MAX_SECTION_READS = 5
+
+# [chunk:101] OR [chunk:101,102,103]
+_CHUNK_MARKER_RE = re.compile(r"\[chunk:(\d+(?:,\d+)*)\]")
+
+
+@dataclass(frozen=True)
+class PickedChunk:
+    chunk_id: int
+    text: str
+    section: str | None
+
+
+@dataclass(frozen=True)
+class PerPaperPicks:
+    paper_content_id: int
+    title: str
+    picked_chunks: list[PickedChunk]
+    rationale: str  # the subagent's own 1-3 sentence summary
+
+
+_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_sections",
+            "description": (
+                "Return this paper's section table-of-contents (name + "
+                "token count + chunk count per section). Free; doesn't "
+                "count against the read budget."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_section",
+            "description": (
+                "Return every chunk in the named section, each with its "
+                "[chunk:<id>] header and full text. Counts against the "
+                "max-reads budget."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Exact section name from list_sections.",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+]
+
+
+async def _list_sections(
+    *, paper_content_id: int, conn: aiosqlite.Connection,
+) -> str:
+    async with conn.execute(
+        "SELECT sections_json FROM paper_content WHERE id = ?",
+        (paper_content_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    if row is None or row[0] is None:
+        return json.dumps({"error": "no section TOC available for this paper"})
+    sections = json.loads(row[0])
+    # Trim the payload to what the LLM needs.
+    return json.dumps(
+        [
+            {"name": s["name"], "tokens": s["token_count"], "chunks": s["chunk_count"]}
+            for s in sections
+        ],
+    )
+
+
+async def _read_section(
+    *, paper_content_id: int, name: str, conn: aiosqlite.Connection,
+) -> tuple[str, list[PickedChunk]]:
+    """Return the prompt-shaped text for the LLM AND a parallel list of
+    PickedChunk records so the caller can stash them for force-stop fallback."""
+    async with conn.execute(
+        "SELECT id, text, section FROM chunks "
+        "WHERE paper_content_id = ? AND section = ? "
+        "ORDER BY char_start",
+        (paper_content_id, name),
+    ) as cur:
+        rows = await cur.fetchall()
+    if not rows:
+        return (
+            json.dumps({"error": f"unknown section: {name!r}. Call list_sections() first."}),
+            [],
+        )
+    picks = [PickedChunk(chunk_id=r[0], text=r[1], section=r[2]) for r in rows]
+    body = "\n\n".join(f"[chunk:{p.chunk_id}]\n{p.text}" for p in picks)
+    return (body, picks)
+
+
+def _extract_cited_chunk_ids(summary: str) -> list[int]:
+    out: list[int] = []
+    for m in _CHUNK_MARKER_RE.finditer(summary):
+        out.extend(int(x) for x in m.group(1).split(","))
+    return out
+
+
+async def run_paper_qa_subagent(
+    *,
+    paper_content_id: int,
+    title: str,
+    user_message: str,
+    adapter: LlmAdapter,
+    tracer: Tracer,
+    model: str,
+    conn: aiosqlite.Connection,
+    max_section_reads: int = MAX_SECTION_READS,
+) -> PerPaperPicks:
+    """Run one per-paper subagent loop. Bounded by ``max_section_reads``
+    ``read_section`` calls. Returns the chunks the LLM cited in its final
+    no-tool-calls message; on force-stop returns every chunk read so far."""
+    prompt_registry = PromptRegistry()
+    sys_text, user_text = prompt_registry.render(
+        slot="paper_qa_subagent/v1",
+        variables={
+            "title": title,
+            "user_message": user_message,
+            "max_section_reads": max_section_reads,
+        },
+    )
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": sys_text},
+        {"role": "user", "content": user_text},
+    ]
+    seen_chunks: dict[int, PickedChunk] = {}  # chunk_id → PickedChunk
+    reads_used = 0
+    final_summary = ""
+
+    async with tracer.step(
+        agent="research", tool="paper_qa:subagent", model=model,
+    ) as step:
+        step.record_args(
+            {"paper_content_id": paper_content_id, "title": title},
+        )
+        while True:
+            response = await adapter.acompletion(
+                model=model, messages=messages, tools=_TOOL_SCHEMAS,
+            )
+            choice = response.choices[0]
+            tool_calls = getattr(choice.message, "tool_calls", None) or []
+            messages.append(choice.message.model_dump())
+
+            if not tool_calls:
+                final_summary = choice.message.content or ""
+                break
+
+            for tc in tool_calls:
+                name = tc.function.name
+                args = json.loads(tc.function.arguments or "{}")
+                if name == "list_sections":
+                    result = await _list_sections(
+                        paper_content_id=paper_content_id, conn=conn,
+                    )
+                elif name == "read_section":
+                    if reads_used >= max_section_reads:
+                        result = json.dumps({
+                            "error": (
+                                f"read_section budget exhausted "
+                                f"({max_section_reads}). Stop calling tools "
+                                "and write your final summary now."
+                            ),
+                        })
+                    else:
+                        reads_used += 1
+                        result, picks = await _read_section(
+                            paper_content_id=paper_content_id,
+                            name=args.get("name", ""),
+                            conn=conn,
+                        )
+                        for p in picks:
+                            seen_chunks.setdefault(p.chunk_id, p)
+                else:
+                    result = json.dumps({"error": f"unknown tool: {name}"})
+
+                messages.append({
+                    "role": "tool", "tool_call_id": tc.id,
+                    "name": name, "content": result,
+                })
+
+            # Force-stop guard: if the LLM never emits a no-tool-calls turn
+            # AND we've blown the budget, the next tool_call's budget-
+            # exhausted result usually convinces it. But if not, break after
+            # one more LLM call lands without a clean final.
+            if reads_used >= max_section_reads and not any(
+                tc.function.name == "read_section" for tc in tool_calls
+            ):
+                # No useful work being done. Force-stop.
+                break
+
+        cited_ids = _extract_cited_chunk_ids(final_summary)
+        if cited_ids:
+            picked = [seen_chunks[cid] for cid in cited_ids if cid in seen_chunks]
+        else:
+            # Force-stop or LLM forgot to cite — best-effort: hand every
+            # chunk we ever read to the finalizer.
+            picked = list(seen_chunks.values())
+
+        step.record_result({
+            "reads_used": reads_used,
+            "chunks_read": len(seen_chunks),
+            "chunks_cited": len(picked),
+            "summary_len": len(final_summary),
+        })
+
+    return PerPaperPicks(
+        paper_content_id=paper_content_id,
+        title=title,
+        picked_chunks=picked,
+        rationale=final_summary,
+    )
+```
+
+- [ ] **Step 8: Run the subagent tests — confirm all green**
+
+```powershell
+uv run pytest tests/test_paper_qa_subagent.py -v
+```
+Expected: 3 PASS.
+
+- [ ] **Step 9: Commit**
+
+```powershell
+git add backend/src/paperhub/agents/paper_qa_subagent.py backend/src/paperhub/llm/prompts/paper_qa_subagent_v1.yaml backend/src/paperhub/config.py backend/.env.example backend/tests/test_paper_qa_subagent.py
+git commit -m "feat(agents): per-paper paper_qa subagent w/ list_sections + read_section tools (Plan C v2.10-3)"
+```
+
+---
+
+### Task v2.10-4 — `paper_qa` LangGraph topology replacement (dispatch → fan-out subagents → finalize)
+
+**Files:**
+- Modify: [`backend/src/paperhub/agents/research_graph.py`](../../../backend/src/paperhub/agents/research_graph.py) — replace the existing `_paper_qa_map_one` / `_paper_qa_synthesize_stream` node wiring with the new four-node subgraph.
+- Modify: [`backend/src/paperhub/agents/research.py`](../../../backend/src/paperhub/agents/research.py) — delete `_paper_qa_map_one`, `_paper_qa_synthesize_stream`, `_paper_qa_map_reduce`, `_K_PER_PAPER`. Keep `paper_qa` entry-point function (signature unchanged) but reduce to a subgraph driver.
+- Modify: [`backend/src/paperhub/agents/state.py`](../../../backend/src/paperhub/agents/state.py) — extend `AgentState` with `pq_dispatched_paper_ids`, `pq_per_paper_picks`.
+- New: [`backend/src/paperhub/llm/prompts/paper_qa_synthesize_v2.yaml`](../../../backend/src/paperhub/llm/prompts/paper_qa_synthesize_v2.yaml) — finalizer sees raw chunks, not analyst prose.
+- Delete: [`backend/src/paperhub/llm/prompts/paper_qa_per_paper_v1.yaml`](../../../backend/src/paperhub/llm/prompts/paper_qa_per_paper_v1.yaml) — no analyst stage anymore.
+- Delete: [`backend/src/paperhub/llm/prompts/paper_qa_synthesize_v1.yaml`](../../../backend/src/paperhub/llm/prompts/paper_qa_synthesize_v1.yaml) — superseded by v2.
+- Modify: [`backend/src/paperhub/llm/prompts/registry.py`](../../../backend/src/paperhub/llm/prompts/registry.py) — drop the deleted slot registrations, add the new ones.
+- Modify: [`backend/tests/test_research_paper_qa.py`](../../../backend/tests/test_research_paper_qa.py) — replace map-reduce tests with subgraph tests.
+- Modify: [`backend/tests/test_research_subgraph.py`](../../../backend/tests/test_research_subgraph.py) — paper_qa subgraph topology assertions.
+
+**Finalizer prompt** (`paper_qa_synthesize_v2.yaml`):
+
+```yaml
+system: |
+  You are PaperHub's synthesis agent. The user has a question about
+  multiple papers. For each paper, a per-paper subagent has read the
+  paper's section table-of-contents, picked the chunks containing
+  relevant evidence, and written a brief rationale. You receive the
+  picks (raw chunk text with `[chunk:<id>]` markers) and the rationales.
+  Compose the final user-facing answer.
+
+  Rules:
+  - Reference each paper by its TITLE in quotes (e.g., 'In "Attention
+    Is All You Need", the authors…'), never by an internal ID.
+  - Cite every claim with the `[chunk:<id>]` markers from the chunk
+    headers. Multiple cites OK: `[chunk:101,102]`.
+  - If the question is comparative ("how do X and Y differ"), structure
+    the answer to address EACH paper + the contrast.
+  - If a paper's subagent reported no relevant content, mention that
+    paper briefly so the user knows it was considered.
+  - Read the raw chunks — that's the ground truth. The subagent
+    rationales are hints, not authority. If a chunk contradicts the
+    rationale, trust the chunk.
+  - Be focused and well-structured. Don't restate every chunk verbatim.
+user: |
+  USER QUESTION: {user_message}
+
+  --- PAPERS ---
+  {per_paper_block}
+  --- END PAPERS ---
+
+  Compose the synthesis.
+```
+
+`per_paper_block` is built in Python as:
+
+```
+## "Title of paper A"
+Subagent rationale: <rationale text>
+Relevant chunks:
+[chunk:101]
+<chunk 101 text>
+
+[chunk:104]
+<chunk 104 text>
+
+---
+
+## "Title of paper B"
+Subagent rationale: <rationale text>
+Relevant chunks:
+[chunk:203]
+<chunk 203 text>
+```
+
+**Steps:**
+
+- [ ] **Step 1: Write a failing subgraph topology test**
+
+```python
+# backend/tests/test_research_subgraph.py — replace paper_qa cases
+async def test_paper_qa_subgraph_dispatches_one_subagent_per_enabled_paper():
+    """pq_dispatch fans out per asyncio.gather; one PerPaperPicks per paper
+    lands in state.pq_per_paper_picks before pq_finalize runs."""
+    state = _state_with_enabled_papers(ids=[15, 16])
+    stub_subagent = _stub_subagent_factory({
+        15: PerPaperPicks(paper_content_id=15, title="A", picked_chunks=[_chunk(101, "a")], rationale="r"),
+        16: PerPaperPicks(paper_content_id=16, title="B", picked_chunks=[_chunk(201, "b")], rationale="s"),
+    })
+    with patch("paperhub.agents.research_graph.run_paper_qa_subagent", stub_subagent):
+        graph = build_research_subgraph()
+        result = await graph.ainvoke(state)
+    assert sorted(p.paper_content_id for p in result["pq_per_paper_picks"]) == [15, 16]
+    # Both subagents ran in parallel (not serial) — verify via fixture timing.
+    assert stub_subagent.max_concurrency == 2
+```
+
+- [ ] **Step 2: Write a failing finalizer test**
+
+```python
+async def test_paper_qa_finalizer_streams_synthesis_with_chunk_markers_preserved():
+    """The finalizer prompt embeds raw chunk text + rationale per paper; its
+    streaming output preserves `[chunk:N]` markers for the Citation Canvas."""
+    picks = [
+        PerPaperPicks(
+            paper_content_id=15, title="MolmoAct",
+            picked_chunks=[_chunk(101, "We compute action tokens via Q-former."),
+                           _chunk(102, "Loss is cross-entropy on tokenized actions.")],
+            rationale="Method centers on action tokenization.",
+        ),
+        PerPaperPicks(
+            paper_content_id=16, title="X-VLA",
+            picked_chunks=[_chunk(203, "Soft prompts learned per embodiment.")],
+            rationale="Method centers on soft-prompt heterogeneity.",
+        ),
+    ]
+    stub_llm = _StubStreamLlm(
+        "Both papers tokenize actions [chunk:101] but X-VLA adds soft "
+        "prompts [chunk:203]. Loss is CE [chunk:102].",
+    )
+    tokens = []
+    async for tok in run_paper_qa_finalize(
+        per_paper_picks=picks, user_message="compare the methods",
+        adapter=stub_llm, tracer=_FakeTracer(), model="stub",
+    ):
+        tokens.append(tok)
+    out = "".join(tokens)
+    assert "[chunk:101]" in out
+    assert "[chunk:203]" in out
+```
+
+- [ ] **Step 3: Run both tests — confirm fails**
+
+```powershell
+uv run pytest tests/test_research_subgraph.py::test_paper_qa_subgraph_dispatches_one_subagent_per_enabled_paper tests/test_research_paper_qa.py::test_paper_qa_finalizer_streams_synthesis_with_chunk_markers_preserved -v
+```
+Expected: 2 FAIL.
+
+- [ ] **Step 4: Implement `paper_qa_finalize` in `research.py`**
+
+```python
+# backend/src/paperhub/agents/research.py — REPLACES old _paper_qa_synthesize_stream
+async def paper_qa_finalize(
+    *,
+    per_paper_picks: list[PerPaperPicks],
+    user_message: str,
+    adapter: LlmAdapter,
+    tracer: Tracer,
+    model: str,
+    state: AgentState | None = None,
+    **adapter_kwargs: Any,
+) -> AsyncIterator[str]:
+    """Finalizer: stream a user-facing synthesis over per-paper picks.
+
+    Replaces the v2.7 _paper_qa_synthesize_stream — that variant saw only
+    analyst prose; this one sees raw chunk text + a brief subagent
+    rationale per paper, mirroring NOTES.md v5's evidence+context lesson.
+    """
+    parts: list[str] = []
+    for pp in per_paper_picks:
+        chunks_block = "\n\n".join(
+            f"[chunk:{c.chunk_id}]\n{c.text}" for c in pp.picked_chunks
+        ) or "(no chunks cited)"
+        parts.append(
+            f'## "{pp.title}"\n'
+            f"Subagent rationale: {pp.rationale}\n"
+            f"Relevant chunks:\n{chunks_block}",
+        )
+    per_paper_block = "\n\n---\n\n".join(parts)
+
+    async with tracer.step(
+        agent="research", tool="paper_qa:finalize", model=model,
+    ) as step:
+        step.record_args({
+            "n_papers": len(per_paper_picks),
+            "n_chunks": sum(len(p.picked_chunks) for p in per_paper_picks),
+        })
+        collected: list[str] = []
+        async for tok in adapter.stream(
+            slot="paper_qa_synthesize/v2",
+            variables={"user_message": user_message, "per_paper_block": per_paper_block},
+            model=model,
+            history=state.get("history") if state else None,
+            **adapter_kwargs,
+        ):
+            collected.append(tok)
+            yield tok
+        step.record_result({"length": sum(len(c) for c in collected)})
+```
+
+- [ ] **Step 5: Replace the LangGraph wiring in `research_graph.py`**
+
+Find the existing paper_qa node registrations + edges (the v2.7 map-reduce path) and replace with:
+
+```python
+# backend/src/paperhub/agents/research_graph.py — paper_qa subgraph
+from paperhub.agents.paper_qa_subagent import run_paper_qa_subagent, PerPaperPicks
+from paperhub.agents.research import paper_qa_finalize
+
+async def _pq_dispatch(state: AgentState) -> AgentState:
+    """Fan-out: one subagent task per enabled paper, asyncio.gather."""
+    pids = state["enabled_paper_content_ids"]
+    settings = state["_settings"]  # threaded through from caller
+    coros = [
+        run_paper_qa_subagent(
+            paper_content_id=pid,
+            title=state["_paper_titles_by_id"][pid],
+            user_message=state["user_message"],
+            adapter=state["_adapter"],
+            tracer=state["_tracer"],
+            model=settings.paper_qa_subagent_model,
+            conn=state["_conn"],
+            max_section_reads=settings.paper_qa_max_section_reads,
+        )
+        for pid in pids
+    ]
+    picks_list = await asyncio.gather(*coros)
+    return {**state, "pq_per_paper_picks": picks_list}
+
+async def _pq_finalize_node(state: AgentState) -> AgentState:
+    """Single flagship call; tokens stream via the existing SSE pipe."""
+    picks = state["pq_per_paper_picks"]
+    if all(not p.picked_chunks for p in picks):
+        # Short-circuit: nothing to synthesize.
+        return {**state, "final_response": (
+            "I checked every enabled reference but none contained content "
+            "relevant to your question. Try a more specific question or "
+            "add more references."
+        )}
+    parts: list[str] = []
+    async for tok in paper_qa_finalize(
+        per_paper_picks=picks,
+        user_message=state["user_message"],
+        adapter=state["_adapter"],
+        tracer=state["_tracer"],
+        model=state["_settings"].paper_qa_model,
+        state=state,
+    ):
+        parts.append(tok)
+        # streaming sink wired by chat.py — same as v2.7 finalize hook
+    return {**state, "final_response": "".join(parts)}
+
+# In build_research_subgraph(): register the two nodes + edge
+graph.add_node("pq_dispatch", _pq_dispatch)
+graph.add_node("pq_finalize", _pq_finalize_node)
+graph.add_edge("pq_resolve", "pq_dispatch")
+graph.add_edge("pq_dispatch", "pq_finalize")
+graph.add_edge("pq_finalize", END)
+```
+
+(Verify against the actual `build_research_subgraph` shape — node names + edges should mirror the v2.7 `ps_*` pattern.)
+
+- [ ] **Step 6: Delete the old map-reduce code**
+
+Remove from `backend/src/paperhub/agents/research.py`: `_K_PER_PAPER`, `_paper_qa_map_one`, `_paper_qa_synthesize_stream`, `_paper_qa_map_reduce`. Keep the top-level `paper_qa(...)` entry-point — but slim it to a subgraph invoker (compatible with existing chat.py call sites).
+
+Delete:
+- `backend/src/paperhub/llm/prompts/paper_qa_per_paper_v1.yaml`
+- `backend/src/paperhub/llm/prompts/paper_qa_synthesize_v1.yaml`
+
+Update `paperhub.llm.prompts.registry.PromptRegistry`: drop `paper_qa_per_paper/v1` and `paper_qa_synthesize/v1` registrations; add `paper_qa_subagent/v1` and `paper_qa_synthesize/v2`.
+
+- [ ] **Step 7: Run the new subgraph tests + the full backend suite**
+
+```powershell
+uv run pytest tests/test_research_subgraph.py tests/test_research_paper_qa.py -v
+uv run pytest -q
+```
+Expected: green across the board (modulo the pre-existing flaky `test_paper_qa_map_reduce_runs_map_steps_in_parallel_via_gather` — DELETE that test in this task since the map-reduce path is gone).
+
+- [ ] **Step 8: Run ruff + mypy**
+
+```powershell
+uv run ruff check src tests
+uv run mypy src
+```
+Expected: clean.
+
+- [ ] **Step 9: Commit**
+
+```powershell
+git add backend/src/paperhub/agents/ backend/src/paperhub/llm/prompts/ backend/tests/test_research_subgraph.py backend/tests/test_research_paper_qa.py
+git commit -m "refactor(agents): paper_qa hierarchical agentic pipeline replaces map-reduce (Plan C v2.10-4)"
+```
+
+---
+
+### Task v2.10-5 — Re-ingest existing papers (drop chunks + Chroma vectors + re-run pipeline)
+
+**Files:**
+- New: [`backend/scripts/reingest_all_papers.ps1`](../../../backend/scripts/reingest_all_papers.ps1) — operator script.
+- New: [`backend/src/paperhub/cli/reingest.py`](../../../backend/src/paperhub/cli/reingest.py) — `paperhub-reingest` entry-point.
+- Modify: [`backend/pyproject.toml`](../../../backend/pyproject.toml) — script entry.
+
+**Why this is mandatory:** every `paper_content` row in the live workspace was chunked by the broken pre-v2.10-1 chunker AND lacks `sections_json`. The subagent's `list_sections` returns nothing useful and `read_section` finds the right `section` field but its chunks are 1-char garbage. Re-ingest is the only way the new pipeline becomes useful on existing data.
+
+**Approach:** for each `paper_content` row, the source is already cached under `workspace/papers_cache/{arxiv,upload}/<key>/source/`. Re-run the pipeline starting from "read flattened source → chunk → embed → persist" while preserving `paper_content.id` (so existing `papers` membership rows and `messages` referencing the paper survive).
+
+- [ ] **Step 1: Write the CLI**
+
+```python
+# backend/src/paperhub/cli/reingest.py
+"""Re-chunk + re-embed every paper_content row using the current chunker.
+
+Deletes chunks + Chroma vectors first; preserves paper_content.id so
+membership (papers) + message history survive. Idempotent — runs as many
+times as needed.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+from pathlib import Path
+
+import aiosqlite
+
+from paperhub.config import load_settings
+from paperhub.pipelines.chunker import chunk_text
+from paperhub.pipelines.embedder import get_embedder
+from paperhub.rag.chroma import ChromaStore
+
+
+async def _reingest_one(
+    pcid: int,
+    conn: aiosqlite.Connection,
+    chroma: ChromaStore,
+    embedder,
+) -> tuple[int, int]:
+    """Returns (chunks_before, chunks_after) for logging."""
+    async with conn.execute(
+        "SELECT source_path, source_dir_path FROM paper_content WHERE id = ?",
+        (pcid,),
+    ) as cur:
+        row = await cur.fetchone()
+    if row is None:
+        return (0, 0)
+    source_path = row[0]
+    flattened = Path(source_path).read_text(encoding="utf-8", errors="replace")
+
+    async with conn.execute(
+        "SELECT COUNT(*) FROM chunks WHERE paper_content_id = ?", (pcid,),
+    ) as cur:
+        before_row = await cur.fetchone()
+    before = int(before_row[0]) if before_row else 0
+
+    # Delete in dependency order.
+    await conn.execute("DELETE FROM chunks WHERE paper_content_id = ?", (pcid,))
+    chroma.delete_by_paper(pcid)
+    await conn.commit()
+
+    # Re-chunk + re-embed + persist (same path the pipeline uses).
+    chunks = chunk_text(flattened)
+    if not chunks:
+        return (before, 0)
+    embeddings = embedder.embed([c.text for c in chunks])
+
+    # Insert chunks, capture new ids.
+    cursor = await conn.execute("BEGIN")
+    new_ids: list[int] = []
+    for c in chunks:
+        async with conn.execute(
+            "INSERT INTO chunks (paper_content_id, section, char_start, char_end, text) "
+            "VALUES (?, ?, ?, ?, ?) RETURNING id",
+            (pcid, c.section, c.char_start, c.char_end, c.text),
+        ) as cur:
+            r = await cur.fetchone()
+            assert r is not None
+            new_ids.append(int(r[0]))
+
+    # Populate sections_json (mirrors paper_pipeline.py logic).
+    import tiktoken
+    from collections import defaultdict
+
+    enc = tiktoken.get_encoding("cl100k_base")
+    per_section: dict[str | None, list] = defaultdict(list)
+    for c in chunks:
+        per_section[c.section].append(c)
+    sections = []
+    for name, group in per_section.items():
+        if name is None:
+            continue
+        section_text = flattened[group[0].char_start : group[-1].char_end]
+        sections.append({
+            "name": name,
+            "char_start": group[0].char_start,
+            "char_end": group[-1].char_end,
+            "token_count": len(enc.encode(section_text)),
+            "chunk_count": len(group),
+        })
+    await conn.execute(
+        "UPDATE paper_content SET sections_json = ? WHERE id = ?",
+        (json.dumps(sections), pcid),
+    )
+
+    # Insert Chroma vectors keyed by new chunk ids.
+    chroma.add(
+        ids=[str(i) for i in new_ids],
+        embeddings=embeddings,
+        metadatas=[
+            {"paper_content_id": pcid, "section": c.section or "",
+             "char_start": c.char_start, "char_end": c.char_end}
+            for c in chunks
+        ],
+        documents=[c.text for c in chunks],
+    )
+    await conn.commit()
+    return (before, len(chunks))
+
+
+async def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--paper-content-id", type=int, default=None,
+                        help="Re-ingest just this paper_content.id (default: all).")
+    args = parser.parse_args()
+
+    settings = load_settings()
+    chroma = ChromaStore(settings.chroma_dir)
+    embedder = get_embedder()
+    async with aiosqlite.connect(settings.db_path) as conn:
+        if args.paper_content_id is not None:
+            ids = [args.paper_content_id]
+        else:
+            async with conn.execute("SELECT id FROM paper_content ORDER BY id") as cur:
+                ids = [int(r[0]) for r in await cur.fetchall()]
+        print(f"Re-ingesting {len(ids)} paper(s)...")
+        for pcid in ids:
+            before, after = await _reingest_one(pcid, conn, chroma, embedder)
+            print(f"  pcid={pcid}: {before} chunks -> {after} chunks")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+- [ ] **Step 2: Wire the script entry**
+
+```toml
+# backend/pyproject.toml — under [project.scripts]
+paperhub-reingest = "paperhub.cli.reingest:main"
+```
+
+- [ ] **Step 3: Wrap in a PowerShell smoke for the operator**
+
+```powershell
+# backend/scripts/reingest_all_papers.ps1
+$ErrorActionPreference = "Stop"
+Write-Host "Backing up workspace/paperhub.db -> paperhub.db.bak.v2.10..."
+Copy-Item workspace/paperhub.db workspace/paperhub.db.bak.v2.10 -Force
+Write-Host "Backing up workspace/chroma -> chroma.bak.v2.10..."
+if (Test-Path workspace/chroma.bak.v2.10) { Remove-Item -Recurse -Force workspace/chroma.bak.v2.10 }
+Copy-Item workspace/chroma workspace/chroma.bak.v2.10 -Recurse
+Write-Host "Running re-ingest..."
+uv run paperhub-reingest
+Write-Host "Done. Old data preserved at workspace/*.bak.v2.10/."
+```
+
+- [ ] **Step 4: Manual run + verify**
+
+```powershell
+.\scripts\reingest_all_papers.ps1
+```
+Expected:
+- Pre-existing 29,891 chunks for paper 15 collapse to ~30-60 chunks
+- Pre-existing 1,839 chunks for paper 16 collapse to ~30-50 chunks
+- `paper_content.sections_json` is populated for every row
+- Workspace backup directory exists for rollback
+
+- [ ] **Step 5: Commit (script + cli)**
+
+```powershell
+git add backend/src/paperhub/cli/reingest.py backend/scripts/reingest_all_papers.ps1 backend/pyproject.toml
+git commit -m "feat(cli): paperhub-reingest — rechunk + reembed existing papers under v2.10 chunker (Plan C v2.10-5)"
+```
+
+---
+
+### Task v2.10-6 — End-to-end smoke: hierarchical paper_qa on the failing MolmoACT2 + X-VLA question
+
+**Files:**
+- Modify: [`backend/scripts/query_papers.ps1`](../../../backend/scripts/query_papers.ps1) — assert the new tool_step shapes.
+
+**Steps:**
+
+- [ ] **Step 1: Update the smoke to assert subagent + finalize trace shape**
+
+The script already runs a multi-paper Q&A and asserts `[chunk:N]` markers. Add assertions for the new trace structure:
+
+```powershell
+# scripts/query_papers.ps1 — append assertions
+$expected_steps = @("paper_qa:resolve", "paper_qa:subagent", "paper_qa:finalize")
+foreach ($s in $expected_steps) {
+  if (-not ($sseRaw -match "tool=`"$s`"")) {
+    Write-Error "Expected tool_step '$s' missing from SSE trace"; exit 1
+  }
+}
+# At least one paper_qa:subagent step per enabled paper.
+$subagent_count = ([regex]::Matches($sseRaw, 'tool="paper_qa:subagent"')).Count
+if ($subagent_count -lt 2) {
+  Write-Error "Expected >=2 paper_qa:subagent steps (one per enabled paper), got $subagent_count"
+  exit 1
+}
+```
+
+- [ ] **Step 2: Run the smoke (manual — needs the user's actual papers + a real LLM key)**
+
+```powershell
+.\scripts\query_papers.ps1 "Compare the methods of these two papers" 60 16
+```
+Expected:
+- Trace shows `paper_qa:resolve` → 2× `paper_qa:subagent` (one per paper, in parallel) → `paper_qa:finalize`
+- Each subagent's `result_summary` has `reads_used > 0`, `chunks_cited > 0`
+- Finalizer output contains `[chunk:N]` markers for chunks from BOTH papers (acceptance criterion I-8 #3)
+- The "I cannot provide a comparison" failure mode is gone
+
+- [ ] **Step 3: Commit**
+
+```powershell
+git add backend/scripts/query_papers.ps1
+git commit -m "test(smoke): assert v2.10 paper_qa subagent + finalize trace shape (Plan C v2.10-6)"
+```
+
+---
+
+### Quality gates after the v2.10 round
+
+From `backend/`:
+
+```powershell
+uv run pytest -v                       # subagent + topology + finalize tests added; map-reduce tests removed
+uv run ruff check src tests
+uv run mypy src                        # strict-clean
+.\scripts\reingest_all_papers.ps1      # one-shot, idempotent
+.\scripts\query_papers.ps1             # end-to-end with new trace shape
+.\scripts\smoke_mcp_papers.ps1         # regression — unchanged path
+.\scripts\smoke_chat_real.ps1          # paper_search regression
+```
+
+Browser verification (manual, after re-ingest + backend restart):
+- "Compare the methods of MolmoAct2 and X-VLA" → trace panel shows the four `paper_qa:resolve` → `paper_qa:subagent` ×2 → `paper_qa:finalize` rows; expanding a subagent row reveals `reads_used`, `chunks_read`, `chunks_cited`; final assistant message contains `[chunk:N]` citations resolvable in the Citation Canvas to chunks from BOTH papers.
+- Single-paper Q&A still works (only one subagent fires; finalizer handles single-paper case).
+- Disabling one of the two papers via the References drawer + re-asking → only one subagent fires; answer cites only the remaining paper. (Validates v2.10 honors `enabled=true` filter at `pq_resolve`.)
+- Operator workflow: starting the backend on a fresh clone with no `papers_cache` → `paper_qa` returns the "I checked every enabled reference but none contained content" short-circuit; ingesting a paper then re-asking succeeds.
+
+### Files touched (summary)
+
+- New: [`backend/src/paperhub/agents/paper_qa_subagent.py`](../../../backend/src/paperhub/agents/paper_qa_subagent.py)
+- New: [`backend/src/paperhub/llm/prompts/paper_qa_subagent_v1.yaml`](../../../backend/src/paperhub/llm/prompts/paper_qa_subagent_v1.yaml)
+- New: [`backend/src/paperhub/llm/prompts/paper_qa_synthesize_v2.yaml`](../../../backend/src/paperhub/llm/prompts/paper_qa_synthesize_v2.yaml)
+- New: [`backend/src/paperhub/cli/reingest.py`](../../../backend/src/paperhub/cli/reingest.py)
+- New: [`backend/scripts/reingest_all_papers.ps1`](../../../backend/scripts/reingest_all_papers.ps1)
+- New: [`backend/src/paperhub/db/migrations/0006_paper_content_sections_json.sql`](../../../backend/src/paperhub/db/migrations/0006_paper_content_sections_json.sql) (or equivalent — verify migration mechanism)
+- New: [`backend/tests/test_paper_qa_subagent.py`](../../../backend/tests/test_paper_qa_subagent.py)
+- Modify: [`backend/src/paperhub/pipelines/chunker.py`](../../../backend/src/paperhub/pipelines/chunker.py) — safe halving shrink, LaTeX comment strip, paragraph boundary preference
+- Modify: [`backend/src/paperhub/pipelines/paper_pipeline.py`](../../../backend/src/paperhub/pipelines/paper_pipeline.py) — populate `sections_json`
+- Modify: [`backend/src/paperhub/agents/research_graph.py`](../../../backend/src/paperhub/agents/research_graph.py) — paper_qa subgraph topology
+- Modify: [`backend/src/paperhub/agents/research.py`](../../../backend/src/paperhub/agents/research.py) — delete map-reduce helpers; add `paper_qa_finalize`
+- Modify: [`backend/src/paperhub/agents/state.py`](../../../backend/src/paperhub/agents/state.py) — `pq_per_paper_picks`
+- Modify: [`backend/src/paperhub/models/domain.py`](../../../backend/src/paperhub/models/domain.py) — `SectionEntry`, `PickedChunk`, `PerPaperPicks` exposure
+- Modify: [`backend/src/paperhub/llm/prompts/registry.py`](../../../backend/src/paperhub/llm/prompts/registry.py) — slot registrations
+- Modify: [`backend/src/paperhub/config.py`](../../../backend/src/paperhub/config.py) — `paper_qa_subagent_model`, `paper_qa_max_section_reads`
+- Modify: [`backend/.env.example`](../../../backend/.env.example) — new env vars
+- Modify: [`backend/pyproject.toml`](../../../backend/pyproject.toml) — `paperhub-reingest` script entry
+- Modify: [`backend/tests/test_chunker.py`](../../../backend/tests/test_chunker.py), [`test_paper_pipeline.py`](../../../backend/tests/test_paper_pipeline.py), [`test_research_subgraph.py`](../../../backend/tests/test_research_subgraph.py), [`test_research_paper_qa.py`](../../../backend/tests/test_research_paper_qa.py)
+- Modify: [`backend/scripts/query_papers.ps1`](../../../backend/scripts/query_papers.ps1)
+- Delete: [`backend/src/paperhub/llm/prompts/paper_qa_per_paper_v1.yaml`](../../../backend/src/paperhub/llm/prompts/paper_qa_per_paper_v1.yaml), [`paper_qa_synthesize_v1.yaml`](../../../backend/src/paperhub/llm/prompts/paper_qa_synthesize_v1.yaml)
+- Update at PR time (separate commit): [`CLAUDE.md`](../../../CLAUDE.md), [`docs/superpowers/specs/2026-05-17-paperhub-srs.md`](../../../docs/superpowers/specs/2026-05-17-paperhub-srs.md) — SRS v2.10 revision entry, §III-3 Research Agent row paper_qa paragraph, §III-5.2 RAG retrieval section.
+
+---
