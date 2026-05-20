@@ -204,7 +204,7 @@ def _extract_pdf_title_from_page1_doc(doc: pymupdf.Document) -> str:
     if len(doc) == 0:
         return ""
     page = doc[0]
-    blocks = page.get_text("dict").get("blocks", [])
+    blocks = page.get_text("dict").get("blocks", [])  # type: ignore[no-untyped-call]
     # First pass: find the maximum text-span font size on page 1.
     max_size = 0.0
     for b in blocks:

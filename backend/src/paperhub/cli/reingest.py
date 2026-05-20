@@ -94,11 +94,20 @@ async def _reingest_one(
     # directly produces preamble-only chunks for arxiv papers (a few KB of
     # \usepackage declarations) and binary-decoded garbage for PDFs.
     if kind in ("arxiv", "latex_upload"):
-        if source_dir_path_raw is None:
-            _LOG.warning("pcid=%d: kind=%s has no source_dir_path — skipped", pcid, kind)
+        # The LaTeX source dir is the directory CONTAINING the main .tex
+        # file — i.e. source_path's parent. This is robust across the
+        # cache layout (`<root>/source/main.tex` → `<root>/source/`) and
+        # flat fixtures (`arxiv_sample/main.tex` → `arxiv_sample/`), unlike
+        # blindly appending "/source" to source_dir_path. Fall back to
+        # source_dir_path when source_path is somehow absent.
+        if source_path_raw is not None:
+            source_dir = Path(source_path_raw).parent
+        elif source_dir_path_raw is not None:
+            source_dir = Path(source_dir_path_raw)
+        else:
+            _LOG.warning("pcid=%d: kind=%s has no source path — skipped", pcid, kind)
             return (0, 0)
-        source_dir = Path(source_dir_path_raw) / "source"
-        if not source_dir.is_dir():
+        if not source_dir.is_dir():  # noqa: ASYNC240 — sequential CLI; sync I/O is fine
             _LOG.warning(
                 "pcid=%d: LaTeX source dir missing at %s — skipped", pcid, source_dir,
             )
@@ -113,7 +122,7 @@ async def _reingest_one(
             _LOG.warning("pcid=%d: pdf_upload has no source_path — skipped", pcid)
             return (0, 0)
         pdf_path = Path(source_path_raw)
-        if not pdf_path.exists():
+        if not pdf_path.exists():  # noqa: ASYNC240 — sequential CLI; sync I/O is fine
             _LOG.warning(
                 "pcid=%d: PDF source missing at %s — skipped", pcid, pdf_path,
             )

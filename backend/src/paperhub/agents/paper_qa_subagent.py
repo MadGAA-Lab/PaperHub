@@ -324,8 +324,8 @@ async def run_paper_qa_subagent(
                         parsed_sections = json.loads(result_str)
                         if isinstance(parsed_sections, list):
                             sec_names = [
-                                s.get("name") for s in parsed_sections
-                                if isinstance(s, dict)
+                                str(s["name"]) for s in parsed_sections
+                                if isinstance(s, dict) and "name" in s
                             ]
                             tool_log_entry["sections_listed"] = sec_names
                             if listed_sections is None:
