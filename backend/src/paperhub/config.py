@@ -2,6 +2,27 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+# F4.4 T8: profile-name normalisation lives in the assemble module
+# (single source of truth for the legacy theme → profile alias map +
+# the unknown-name fallback). Importing here would create a cycle
+# (assemble imports nothing from config), so we re-declare the alias
+# table locally — it's two entries and changes lock-step with the
+# yaml registry.
+_SLIDE_PROFILE_LEGACY_ALIASES = {
+    "gold": "default",
+    "metropolis": "metropolis_minimal",
+}
+_KNOWN_SLIDE_PROFILES = {"default", "metropolis_minimal"}
+_DEFAULT_SLIDE_PROFILE = "default"
+
+
+def _resolve_slide_profile_env(raw: str) -> str:
+    norm = (raw or "").strip().lower()
+    norm = _SLIDE_PROFILE_LEGACY_ALIASES.get(norm, norm)
+    if norm in _KNOWN_SLIDE_PROFILES:
+        return norm
+    return _DEFAULT_SLIDE_PROFILE
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -96,13 +117,19 @@ class Settings:
     unpaywall_email: str | None
 
     # ── 11. Slide presentation (Beamer preamble profile) ───────────────
-    # F4.4 T7: default preamble profile for generated decks. ``"gold"``
-    # (the default) emits the Final_Report gold methodology — Berlin /
-    # dolphin / professionalfonts / 16:9 / 14pt + accent colors + custom
-    # footline + booktabs/mathtools/tikz. ``"metropolis"`` keeps the old
-    # minimal preamble (``\documentclass{beamer}`` + ``\usetheme{metropolis}``)
-    # for parity / debugging. Unknown values fall back to ``"gold"``.
-    slide_theme: str
+    # F4.4 T8: default preamble profile name for generated decks. The
+    # registry is yaml-driven (``slide_style_profiles.yaml`` in
+    # ``pipelines/slide_pipeline``); ``"default"`` ships as the
+    # Final_Report gold methodology, ``"metropolis_minimal"`` as the
+    # legacy minimal preamble. Operators edit the yaml — or add new
+    # profiles — without code changes. The env-var path accepts the new
+    # ``PAPERHUB_SLIDE_STYLE_PROFILE`` (preferred) AND the legacy
+    # ``PAPERHUB_SLIDE_THEME`` (alias mapping ``gold→default``,
+    # ``metropolis→metropolis_minimal``). Unknown env values normalise
+    # to ``"default"`` so a stray typo never silently emits an unrelated
+    # style. The resolved name is also what ``decks.theme`` stores
+    # (backward-compat with dashboards / API consumers).
+    slide_style_profile: str
 
 
 def load_settings() -> Settings:
@@ -197,5 +224,13 @@ def load_settings() -> Settings:
         unpaywall_email=os.environ.get("PAPERHUB_UNPAYWALL_EMAIL") or None,
 
         # 11. Slide presentation (Beamer preamble profile).
-        slide_theme=os.environ.get("PAPERHUB_SLIDE_THEME", "gold"),
+        # PAPERHUB_SLIDE_STYLE_PROFILE (preferred) wins; PAPERHUB_SLIDE_THEME
+        # is the legacy alias (gold→default, metropolis→metropolis_minimal).
+        # Unknown values normalise to "default" so a typo never silently
+        # emits an unrelated style.
+        slide_style_profile=_resolve_slide_profile_env(
+            os.environ.get("PAPERHUB_SLIDE_STYLE_PROFILE")
+            or os.environ.get("PAPERHUB_SLIDE_THEME")
+            or _DEFAULT_SLIDE_PROFILE
+        ),
     )

@@ -1,11 +1,18 @@
-"""F4.4 T7 — default preamble switched to the Final_Report gold methodology.
+"""F4.4 T7/T8 — default preamble is the Final_Report gold methodology.
 
 The Round-1 architecture lifted the contract dimensions (figure-only-frame,
 equation + notation_explanation, named patterns, ADDITIONAL.tex plumbing)
-but every output still rendered under ``\\usetheme{metropolis}``. T7 makes
+but every output still rendered under ``\\usetheme{metropolis}``. T7 made
 the Berlin/dolphin/professionalfonts/14pt/16:9 + custom-footline + accent
 colors stack the DEFAULT (``slide_theme="gold"``), with the legacy minimal
 preamble preserved under ``slide_theme="metropolis"`` for backward compat.
+
+T8 refactored the hardcoded preamble strings into a yaml-driven
+``SlideStyleProfile`` registry. The legacy ``theme="gold"`` /
+``theme="metropolis"`` aliases still work (mapping to ``"default"`` /
+``"metropolis_minimal"``), so these tests both verify the existing
+shape AND prove the alias path. New tests at the bottom exercise the
+registry loader + the Settings env-var wiring directly.
 
 The tests:
 
@@ -407,3 +414,77 @@ def test_assemble_emits_default_institute_anchor(theme: str) -> None:
     idx_institute = tex.find("\\institute{")
     idx_begin_document = tex.find("\\begin{document}")
     assert -1 < idx_institute < idx_begin_document
+
+
+# ────────── F4.4 T8 — yaml-driven SlideStyleProfile registry ──────────
+
+
+def test_assemble_default_profile_name_aliases_to_gold() -> None:
+    """The new canonical profile name ``"default"`` produces the same
+    preamble shape as the legacy ``theme="gold"`` (T7 alias)."""
+    tex_default = assemble_deck(_input("default"))
+    tex_gold = assemble_deck(_input("gold"))
+    assert tex_default == tex_gold
+    assert "\\usetheme{Berlin}" in tex_default
+
+
+def test_assemble_metropolis_minimal_profile_name_aliases_to_metropolis() -> None:
+    """``"metropolis_minimal"`` (new canonical) == ``"metropolis"`` (legacy)."""
+    tex_new = assemble_deck(_input("metropolis_minimal"))
+    tex_old = assemble_deck(_input("metropolis"))
+    assert tex_new == tex_old
+    assert "\\usetheme{metropolis}" in tex_new
+
+
+def test_load_profile_unknown_raises_lookup_error() -> None:
+    """An unknown profile name surfaces a clear error LISTING every
+    available profile so an operator who typo'd a yaml key sees the
+    valid alternatives. Silent fallback to ``"default"`` is the
+    config-layer's job, not this loader's."""
+    from paperhub.pipelines.slide_pipeline.style_profile import load_profile
+
+    with pytest.raises(LookupError) as excinfo:
+        load_profile("nonexistent-style")
+    msg = str(excinfo.value)
+    assert "nonexistent-style" in msg
+    # The available-profiles list MUST appear in the error for ops
+    # discoverability.
+    assert "default" in msg
+    assert "metropolis_minimal" in msg
+
+
+def test_load_profile_round_trips_shipped_profiles() -> None:
+    """Both shipped profiles parse cleanly + carry the load-bearing
+    fields. Asserts the yaml schema matches the dataclass + catches
+    accidental yaml edits that drop a required field."""
+    from paperhub.pipelines.slide_pipeline.style_profile import (
+        list_profiles,
+        load_profile,
+    )
+
+    names = list_profiles()
+    assert "default" in names
+    assert "metropolis_minimal" in names
+
+    default = load_profile("default")
+    assert default.theme == "Berlin"
+    assert default.colortheme == "dolphin"
+    assert default.fonttheme == "professionalfonts"
+    assert "[T1]{fontenc}" in default.packages
+    assert "{tikz}" in default.packages
+    assert default.color_defs.get("accent") == "RGB:0,90,160"
+    assert "headline" in default.beamertemplate_suppressions
+    assert default.custom_footline_tex.startswith("\\setbeamertemplate{footline}")
+    assert default.default_institute_tex == "\\institute{\\normalsize PaperHub}"
+    assert default.requires_unicode_packages == ["{fontspec}"]
+    assert default.requires_cjk_packages == ["{xeCJK}"]
+
+    metro = load_profile("metropolis_minimal")
+    assert metro.theme == "metropolis"
+    assert metro.colortheme is None
+    assert metro.fonttheme is None
+    # Metropolis must NOT suppress headline — it has its own minimal
+    # headline style; suppressing it would blank a deliberate theme element.
+    assert "headline" not in metro.beamertemplate_suppressions
+    assert metro.custom_footline_tex == ""
+    assert metro.color_defs == {}

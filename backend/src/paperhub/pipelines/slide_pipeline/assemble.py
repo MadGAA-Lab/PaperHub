@@ -4,38 +4,50 @@ Writes the preamble (theme + ADDITIONAL.tex), title frame, all section frames,
 and a single \\graphicspath spanning every contributing paper's cache source
 dir (SRS v2.18 §III-5.3 step 4a). Figures are never copied into the session dir.
 
-F4.4 T7: the default preamble profile is the Final_Report gold methodology
-(Berlin / dolphin / professionalfonts / 14pt / 16:9 + accent colors +
-custom footline + booktabs/mathtools/tikz). The legacy minimal preamble
-(``\\documentclass{beamer}`` + ``\\usetheme{metropolis}``) is preserved
-under ``theme="metropolis"`` for parity / debugging. Unknown theme values
-fall back to ``"gold"`` so a stray env-var typo cannot silently produce a
-deck under an unrelated theme.
+F4.4 T8 (this refactor): the hardcoded preamble strings that accumulated
+across F4.4 hotfixes (Unicode engine, headline suppression, default
+institute, CJK) are gone. Style now flows from a yaml-driven
+``SlideStyleProfile`` registry — see ``style_profile.py`` and
+``slide_style_profiles.yaml``. ``assemble_deck`` resolves a profile by
+name (``"default"`` ships as the Final_Report gold methodology;
+``"metropolis_minimal"`` is the legacy minimal preamble) and walks the
+profile fields through one data-driven emitter. Unknown profile names
+are normalised to ``"default"`` so a stray env-var typo cannot silently
+produce an unrelated deck.
 
-F4.4 T7 hotfix²: deck-content-aware Unicode setup (broader than CJK).
-Any non-ASCII character in the deck text (frames / title / subtitle /
-author) flips the preamble into xelatex + fontspec mode so compile.py's
-``select_engine`` switches engines and ``ensure_main_unicode_font``
-injects ``\\setmainfont{Noto Serif}`` at compile time — covering
-Cyrillic, Greek, Arabic, Hebrew, Latin-Extended (European accented
-characters), Devanagari, Thai, Vietnamese, etc. CJK additionally pulls
-in ``\\usepackage{xeCJK}`` (``ensure_cjk_font`` injects the CJK main
-font at compile time). Pure-ASCII decks keep the pdflatex compile path
-(and its compile speed). Applies to BOTH ``gold`` and ``metropolis``
-preambles so the policy is theme-independent. The deterministic
-detection means the LLM never has to remember to emit the right
-``\\usepackage`` lines; ``sl_revise`` stays as a final-line-of-defense
-LLM repair for unexpected compile errors after deterministic setup.
+The deck-content-aware Unicode detection (any non-ASCII codepoint trips
+xelatex + the profile's ``requires_unicode_packages``; CJK additionally
+pulls in ``requires_cjk_packages``) is unchanged from T7 hotfix² — the
+profile just supplies the package names. ``compile.py``'s
+``select_engine`` still picks up the ``% !TeX program = xelatex`` magic
+comment; ``ensure_main_unicode_font`` / ``ensure_cjk_font`` still inject
+the default Unicode / CJK main fonts at compile time.
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 
-# Recognised preamble-profile names. Anything else falls back to ``GOLD``.
-GOLD = "gold"
-METROPOLIS = "metropolis"
-_KNOWN_THEMES = frozenset({GOLD, METROPOLIS})
+from paperhub.pipelines.slide_pipeline.style_profile import (
+    SlideStyleProfile,
+    list_profiles,
+    load_profile,
+)
+
+# Default profile name when an unknown/missing value is passed in. The
+# registry must always contain a profile of this name (see
+# ``slide_style_profiles.yaml``); the assertion in ``_resolve_profile``
+# guards against an operator deleting it.
+DEFAULT_PROFILE = "default"
+
+# Legacy theme aliases — the F4.4 T7 ``theme`` argument used these
+# names ("gold" / "metropolis"). Settings.load_settings() also rewrites
+# the legacy ``PAPERHUB_SLIDE_THEME`` env var via the same mapping so
+# the chat → ReportDeps → assemble path is consistent end-to-end.
+LEGACY_THEME_ALIASES = {
+    "gold": "default",
+    "metropolis": "metropolis_minimal",
+}
 
 
 # CJK detection — covers the BMP CJK Unified Ideographs block (U+4E00–U+9FFF,
@@ -57,26 +69,22 @@ _CJK_RANGE_RE = re.compile(
 # fontspec can.
 _NON_ASCII_RE = re.compile(r"[^\x00-\x7F]")
 
-# Title-band anchor when no ``\institute{}`` is supplied. The Berlin theme's
-# styled colored title band shrinks visibly when this slot is empty, which
-# users mistake for "the title page style is gone". A small ``PaperHub``
-# wordmark keeps the band anchored without overpowering the actual title.
-_DEFAULT_INSTITUTE = "\\institute{\\normalsize PaperHub}"
-
 
 @dataclass(frozen=True)
 class UnicodeProfile:
     """Two-axis classification of a deck's visible text.
 
     ``needs_unicode_engine`` — ANY non-ASCII codepoint present. Trips the
-    ``% !TeX program = xelatex`` magic comment + ``\\usepackage{fontspec}``
+    ``% !TeX program = xelatex`` magic comment + the profile's
+    ``requires_unicode_packages`` (typically ``\\usepackage{fontspec}``)
     so the deck compiles under xelatex with a Unicode-capable main font
     (``compile.ensure_main_unicode_font`` injects ``\\setmainfont{Noto
     Serif}`` at compile time, covering Cyrillic / Greek / Arabic / Hebrew
     / Latin-Extended / etc.).
 
-    ``needs_cjk`` — CJK codepoint present. Additionally pulls in
-    ``\\usepackage{xeCJK}`` (``compile.ensure_cjk_font`` injects
+    ``needs_cjk`` — CJK codepoint present. Additionally pulls in the
+    profile's ``requires_cjk_packages`` (typically
+    ``\\usepackage{xeCJK}``; ``compile.ensure_cjk_font`` injects
     ``\\setCJKmainfont{Noto Serif CJK SC}`` at compile time). Implies
     ``needs_unicode_engine`` — every CJK char is also non-ASCII — but
     callers should not rely on that invariant; check both fields.
@@ -143,145 +151,136 @@ def build_graphicspath(cache_source_dirs: list[str]) -> str:
     return f"\\graphicspath{{ {dirs} }}"
 
 
-def _build_metropolis_preamble_head(profile: UnicodeProfile | None = None) -> list[str]:
-    """Legacy minimal preamble — preserved for ``theme="metropolis"`` parity.
+def _resolve_profile(name: str) -> SlideStyleProfile:
+    """Resolve a profile name to a loaded ``SlideStyleProfile``.
 
-    When ``profile.needs_unicode_engine`` is True, prepend the ``% !TeX
-    program = xelatex`` magic comment and add ``\\usepackage{fontspec}``
-    so compile.py's ``select_engine`` switches to xelatex and
-    ``ensure_main_unicode_font`` injects the default Unicode main font at
-    compile time. When ``profile.needs_cjk`` is additionally True, append
-    ``\\usepackage{xeCJK}`` so ``ensure_cjk_font`` injects the default CJK
-    main font at compile time.
+    Accepts the legacy F4.4 T7 aliases (``"gold"``, ``"metropolis"``)
+    for backward compat. Unknown / empty values fall back to the
+    default profile — a stray env-var typo silently producing an
+    unrelated style would surprise the operator, and the env-var
+    normaliser in ``config.load_settings`` mirrors this policy so the
+    same fallback applies on the chat path.
     """
-    profile = profile or UnicodeProfile(False, False)
-    head = [
-        "\\documentclass{beamer}",
-        "\\usetheme{metropolis}",
-        "\\usepackage{graphicx}",
-        "\\usepackage{booktabs}",
-        "\\usepackage{amsmath,amssymb}",
-    ]
-    if profile.needs_unicode_engine:
-        # fontspec lands right after the math packages so it takes effect
-        # before any frame body renders; xeCJK lands after fontspec when
-        # CJK is also present.
-        head.append("\\usepackage{fontspec}")
-        if profile.needs_cjk:
-            head.append("\\usepackage{xeCJK}")
-        # Magic comment MUST be line 1 — compile.py's _XELATEX_TRIGGERS
-        # check is substring-based but a leading magic comment is also the
-        # convention TeX editors (and humans) recognise.
-        head = ["% !TeX program = xelatex", *head]
-    return head
+    norm = (name or "").strip().lower()
+    norm = LEGACY_THEME_ALIASES.get(norm, norm)
+    available = list_profiles()
+    assert DEFAULT_PROFILE in available, (
+        f"slide_style_profiles.yaml must define a {DEFAULT_PROFILE!r} profile"
+    )
+    if norm not in available:
+        norm = DEFAULT_PROFILE
+    return load_profile(norm)
 
 
-def _build_gold_preamble_head(profile: UnicodeProfile | None = None) -> list[str]:
-    """F4.4 T7 default: the Final_Report gold methodology preamble.
+def _format_color_def(name: str, spec: str) -> str:
+    """Turn a ``"MODEL:value"`` envelope into a ``\\definecolor`` line.
 
-    Verbatim port of ``D:/GitHub/Final_Report/slides.tex`` lines 1-35 minus
-    the deck-specific watermark (which baked a hardcoded ``nycu.png`` and an
-    ID-3-3 footer string). Layout/colors/footline/theme are the gold's;
-    figures + title metadata are still filled by the caller as before.
-
-    When ``profile.needs_unicode_engine`` is True, adds ``fontspec`` (after
-    textcomp) so non-ASCII glyphs render; when ``profile.needs_cjk`` is
-    also True, adds ``xeCJK`` after fontspec.
+    Splitting on the FIRST colon only — colour-model values themselves
+    (``"RGB:0,90,160"``, ``"HTML:1A2B3C"``, ``"cmyk:0,0.5,0.5,0"``)
+    never contain a colon before the model, but RGB values are
+    comma-separated which CAN contain '0:1' style triples in exotic
+    notations. ``partition`` makes the contract explicit.
     """
-    profile = profile or UnicodeProfile(False, False)
-    head = [
-        "\\documentclass[aspectratio=169,14pt]{beamer}",
-        "\\usepackage[T1]{fontenc}",
-        "\\usepackage{textcomp}",
-        *(["\\usepackage{fontspec}"] if profile.needs_unicode_engine else []),
-        *(["\\usepackage{xeCJK}"] if profile.needs_cjk else []),
-        "\\usepackage{graphicx}",
-        "\\usepackage{booktabs}",
-        "\\usepackage{mathtools,amssymb}",
-        "\\usepackage{amsmath}",
-        "\\usepackage{bm}",
-        "\\usepackage{xcolor}",
-        "\\usepackage{tikz}",
-        "",
-        "\\usetheme{Berlin}",
-        "\\usecolortheme{dolphin}",
-        "\\usefonttheme{professionalfonts}",
-        "",
-        "\\definecolor{accent}{RGB}{0,90,160}",
-        "\\definecolor{accent2}{RGB}{200,60,60}",
-        "\\definecolor{lightgray}{RGB}{240,240,240}",
-        "",
-        "\\setbeamercolor{block title}{bg=accent,fg=white}",
-        "\\setbeamercolor{block body}{bg=lightgray,fg=black}",
-        "\\setbeamertemplate{navigation symbols}{}",
-        # F4.4 T7 hotfix³: suppress Berlin's top navigation bar. Berlin's
-        # default headline shows the deck's section/subsection structure,
-        # but the new chain emits NO ``\section{}`` declarations, so the
-        # bar renders empty/broken on every slide — the "all slides have
-        # style issue" symptom the user reported. Mirrors the gold
-        # reference deck (``D:/GitHub/Final_Report/slides.tex`` lines
-        # 11-15) which suppresses all four templates together.
-        "\\setbeamertemplate{headline}{}",
-        "\\setbeamertemplate{section in head/foot}{}",
-        "\\setbeamertemplate{subsection in head/foot}{}",
-        "\\setbeamersize{text margin left=0.6cm, text margin right=0.6cm}",
-        "",
-        "\\setbeamertemplate{footline}{",
-        "  \\leavevmode%",
-        "  \\hbox{%",
-        "  \\begin{beamercolorbox}"
-        "[wd=.5\\paperwidth,ht=2.25ex,dp=1ex,right]"
-        "{title in head/foot}%",
-        "    \\usebeamerfont{title in head/foot}"
-        "\\insertshorttitle\\hspace*{2ex}",
-        "  \\end{beamercolorbox}%",
-        "  \\begin{beamercolorbox}"
-        "[wd=.5\\paperwidth,ht=2.25ex,dp=1ex,left]"
-        "{date in head/foot}%",
-        "    \\usebeamerfont{date in head/foot}"
-        "\\hspace*{2ex}\\hfill"
-        "\\insertframenumber{} / \\inserttotalframenumber"
-        "\\hspace*{2ex}",
-        "  \\end{beamercolorbox}}%",
-        "  \\vskip0pt%",
-        "}",
-    ]
-    if profile.needs_unicode_engine:
-        # Magic comment MUST be line 1 of the source file so compile.py's
-        # ``select_engine`` substring check (and any external editor) sees
-        # it before the documentclass.
+    model, sep, value = spec.partition(":")
+    if not sep:
+        # No model prefix — emit with empty model. Profiles should not
+        # ship like this, but we don't want to crash the deck.
+        return f"\\definecolor{{{name}}}{{}}{{{spec}}}"
+    return f"\\definecolor{{{name}}}{{{model}}}{{{value}}}"
+
+
+def _build_preamble_head(
+    profile: SlideStyleProfile, unicode_profile: UnicodeProfile
+) -> list[str]:
+    """Emit the preamble from a profile + Unicode classification.
+
+    Order (fixed; all sections are optional based on profile contents):
+
+      1.  ``% !TeX program = xelatex`` magic comment (when Unicode needed)
+      2.  ``\\documentclass[OPTIONS]{beamer}``
+      3.  ``\\usepackage`` lines (profile.packages)
+      4.  Unicode add-ons (profile.requires_unicode_packages)
+      5.  CJK add-ons (profile.requires_cjk_packages)
+      6.  ``\\usetheme`` + optional ``\\usecolortheme`` + ``\\usefonttheme``
+      7.  Blank line separator (for readability of the generated .tex)
+      8.  ``\\definecolor`` lines (profile.color_defs)
+      9.  Blank line separator
+      10. ``\\setbeamercolor`` overrides (profile.beamercolor_overrides)
+      11. ``\\setbeamertemplate{NAME}{}`` blanks (profile.beamertemplate_suppressions)
+      12. ``\\setbeamersize`` lines (profile.beamersize_settings)
+      13. Blank line separator
+      14. ``custom_footline_tex`` (verbatim multi-line block)
+
+    The magic comment MUST be line 1 so ``compile.py``'s
+    ``select_engine`` substring check (and any external editor) sees it
+    before the documentclass.
+    """
+    head: list[str] = []
+    opts = profile.document_class_options
+    if opts:
+        head.append(f"\\documentclass[{opts}]{{beamer}}")
+    else:
+        head.append("\\documentclass{beamer}")
+    for pkg in profile.packages:
+        head.append(f"\\usepackage{pkg}")
+    if unicode_profile.needs_unicode_engine:
+        for pkg in profile.requires_unicode_packages:
+            head.append(f"\\usepackage{pkg}")
+        if unicode_profile.needs_cjk:
+            for pkg in profile.requires_cjk_packages:
+                head.append(f"\\usepackage{pkg}")
+    head.append("")
+    head.append(f"\\usetheme{{{profile.theme}}}")
+    if profile.colortheme:
+        head.append(f"\\usecolortheme{{{profile.colortheme}}}")
+    if profile.fonttheme:
+        head.append(f"\\usefonttheme{{{profile.fonttheme}}}")
+    if profile.color_defs:
+        head.append("")
+        for color_name, spec in profile.color_defs.items():
+            head.append(_format_color_def(color_name, spec))
+    if profile.beamercolor_overrides or profile.beamertemplate_suppressions:
+        head.append("")
+        for element, spec in profile.beamercolor_overrides.items():
+            head.append(f"\\setbeamercolor{{{element}}}{{{spec}}}")
+        for template_name in profile.beamertemplate_suppressions:
+            head.append(f"\\setbeamertemplate{{{template_name}}}{{}}")
+    for size_spec in profile.beamersize_settings:
+        head.append(f"\\setbeamersize{{{size_spec}}}")
+    if profile.custom_footline_tex:
+        head.append("")
+        head.append(profile.custom_footline_tex)
+    if unicode_profile.needs_unicode_engine:
         head = ["% !TeX program = xelatex", *head]
     return head
 
 
 def _resolve_theme(name: str) -> str:
-    """Normalise + fall back: unknown values become ``GOLD`` (the default).
+    """Backward-compat shim — returns the resolved profile NAME.
 
-    A stray env-var typo (``PAPERHUB_SLIDE_THEME=goldd``) silently producing
-    a metropolis deck would surprise the operator; falling back to the
-    default keeps the surprise small."""
-    norm = (name or "").strip().lower()
-    return norm if norm in _KNOWN_THEMES else GOLD
+    F4.4 T8: callers that just want to know "what profile did we end
+    up with?" use this; the actual ``SlideStyleProfile`` lookup
+    happens inside ``_resolve_profile``. Kept module-level so the
+    ``decks.theme`` column wiring and any external test that depended
+    on this helper still has a stable name.
+    """
+    return _resolve_profile(name).name
 
 
 def assemble_deck(inp: AssembleInput) -> str:
-    theme = _resolve_theme(inp.theme)
-    # Deck-content-aware Unicode detection (F4.4 T7 hotfix²). Any non-ASCII
-    # character in the visible deck text — frames, title, subtitle, author —
-    # flips the preamble into xelatex + fontspec mode (Cyrillic, Greek,
-    # Arabic, Hebrew, Latin-Extended, etc.). CJK additionally pulls in
-    # xeCJK. compile.py picks up the ``% !TeX program = xelatex`` magic
-    # comment + ``ensure_main_unicode_font`` injects ``\setmainfont{Noto
-    # Serif}`` (and ``ensure_cjk_font`` injects the CJK main font) at
-    # compile time. Pure-ASCII decks keep pdflatex.
-    profile = _unicode_profile(
+    profile = _resolve_profile(inp.theme)
+    # Deck-content-aware Unicode detection. Any non-ASCII character in
+    # the visible deck text — frames, title, subtitle, author — flips
+    # the preamble into xelatex + the profile's ``requires_unicode``
+    # packages (Cyrillic, Greek, Arabic, Hebrew, Latin-Extended, etc.).
+    # CJK additionally pulls in ``requires_cjk``. compile.py picks up
+    # the ``% !TeX program = xelatex`` magic comment + the font helpers
+    # inject the default fonts at compile time. Pure-ASCII decks keep
+    # pdflatex (faster compile path).
+    unicode_profile = _unicode_profile(
         "".join(inp.frames), inp.title, inp.subtitle, inp.author
     )
-    head = (
-        _build_metropolis_preamble_head(profile=profile)
-        if theme == METROPOLIS
-        else _build_gold_preamble_head(profile=profile)
-    )
+    head = _build_preamble_head(profile, unicode_profile)
 
     preamble: list[str] = [
         *head,
@@ -297,11 +296,13 @@ def assemble_deck(inp: AssembleInput) -> str:
     if inp.date:
         preamble.append(f"\\date{{{inp.date}}}")
     # Berlin theme's styled title band shrinks visibly when ``\institute{}``
-    # is unset, producing the "bare title page" symptom the user reported.
-    # Provide a small PaperHub wordmark as the default anchor; callers that
-    # supply their own \institute via additional_tex_macros take precedence
-    # since LaTeX honours the last definition.
-    preamble.append(_DEFAULT_INSTITUTE)
+    # is unset, producing the "bare title page" symptom an earlier hotfix
+    # targeted. The default anchor lives on the profile (operators can edit
+    # it via the yaml without code changes); callers that supply their own
+    # \institute via additional_tex_macros take precedence since LaTeX
+    # honours the last definition.
+    if profile.default_institute_tex:
+        preamble.append(profile.default_institute_tex)
     parts: list[str] = [
         *preamble,
         "\\begin{document}",
