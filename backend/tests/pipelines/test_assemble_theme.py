@@ -198,3 +198,105 @@ def test_assemble_preserves_cjk_macros_in_both_themes(theme: str) -> None:
     idx_first_macro = tex.find(cjk_macros[0])
     idx_title = tex.find("\\title{")
     assert -1 < idx_first_macro < idx_title
+
+
+# ──────────────── F4.4 T7 hotfix — deck-content-aware CJK ─────────────
+
+
+def test_assemble_gold_preamble_skips_xecjk_when_no_cjk_content() -> None:
+    """Pure-ASCII deck must NOT pull in xeCJK / xelatex — keeping the
+    pdflatex compile path and its compile speed."""
+    tex = assemble_deck(_input("gold"))  # subtitle="" + ASCII frames
+    assert "\\usepackage{xeCJK}" not in tex
+    assert "% !TeX program = xelatex" not in tex
+
+
+def test_assemble_gold_preamble_adds_xecjk_when_cjk_in_frames() -> None:
+    """A CJK-containing frame trips xelatex + xeCJK. ``\\setCJKmainfont`` is
+    intentionally NOT emitted here — ``compile.ensure_cjk_font`` owns the
+    default font name so it tracks ``_DEFAULT_CJK_FONT`` in one place."""
+    tex = assemble_deck(
+        _input("gold", frames=["\\begin{frame}\\frametitle{核心文獻}body\\end{frame}"])
+    )
+    # Magic comment MUST be line 1 of the file so compile.py picks it up
+    # before any other directive.
+    assert tex.splitlines()[0] == "% !TeX program = xelatex"
+    assert "\\usepackage{xeCJK}" in tex
+    # compile.ensure_cjk_font injects \setCJKmainfont at compile time.
+    assert "\\setCJKmainfont" not in tex
+    # xeCJK lands AFTER textcomp and BEFORE \title{} so it takes effect for
+    # the title frame.
+    idx_textcomp = tex.find("\\usepackage{textcomp}")
+    idx_xecjk = tex.find("\\usepackage{xeCJK}")
+    idx_title = tex.find("\\title{")
+    assert -1 < idx_textcomp < idx_xecjk < idx_title
+
+
+def test_assemble_gold_preamble_adds_xecjk_when_cjk_in_subtitle() -> None:
+    """The subtitle-only path is the single-paper-deck failure mode the user
+    reported — frames are ASCII but ``\\subtitle{<Chinese>}`` is set."""
+    tex = assemble_deck(
+        _input(
+            "gold",
+            frames=["\\begin{frame}{Intro}ascii body\\end{frame}"],
+            subtitle="核心文獻概述",
+        )
+    )
+    assert tex.splitlines()[0] == "% !TeX program = xelatex"
+    assert "\\usepackage{xeCJK}" in tex
+    assert "\\subtitle{核心文獻概述}" in tex
+
+
+def test_assemble_gold_preamble_adds_xecjk_when_cjk_in_title() -> None:
+    """Defensive: a CJK title also trips the switch (title flows into the
+    titlepage frame, which would otherwise render with empty boxes)."""
+    tex = assemble_deck(_input("gold", title="注意力即是一切"))
+    assert tex.splitlines()[0] == "% !TeX program = xelatex"
+    assert "\\usepackage{xeCJK}" in tex
+
+
+def test_assemble_gold_preamble_adds_xecjk_when_cjk_in_author() -> None:
+    """Defensive: a CJK author name (e.g. 王小明) also trips the switch."""
+    tex = assemble_deck(_input("gold", author="王小明"))
+    assert tex.splitlines()[0] == "% !TeX program = xelatex"
+    assert "\\usepackage{xeCJK}" in tex
+
+
+def test_assemble_metropolis_theme_also_handles_cjk() -> None:
+    """The CJK switch is theme-INdependent: a Chinese deck under the legacy
+    metropolis preamble must also xelatex-compile, not silently emit a
+    glyph-less PDF."""
+    tex = assemble_deck(
+        _input(
+            "metropolis", frames=["\\begin{frame}\\frametitle{核心文獻}body\\end{frame}"]
+        )
+    )
+    assert tex.splitlines()[0] == "% !TeX program = xelatex"
+    assert "\\usepackage{xeCJK}" in tex
+    # The metropolis stack itself stays intact.
+    assert "\\usetheme{metropolis}" in tex
+
+
+def test_assemble_metropolis_preamble_skips_xecjk_when_no_cjk_content() -> None:
+    """Symmetry: pure-ASCII metropolis decks keep the legacy minimal preamble
+    verbatim — no xelatex switch."""
+    tex = assemble_deck(_input("metropolis"))
+    assert "\\usepackage{xeCJK}" not in tex
+    assert "% !TeX program = xelatex" not in tex
+
+
+# ──────────────── F4.4 T7 hotfix — default institute anchor ────────────
+
+
+@pytest.mark.parametrize("theme", ["gold", "metropolis"])
+def test_assemble_emits_default_institute_anchor(theme: str) -> None:
+    """The Berlin theme's styled title band shrinks when ``\\institute{}``
+    is unset, producing the bare-title-page symptom the user reported.
+    Default ``\\institute{\\normalsize PaperHub}`` keeps the band anchored.
+    """
+    tex = assemble_deck(_input(theme))
+    assert "\\institute{\\normalsize PaperHub}" in tex
+    # Default institute lands in the preamble (before \begin{document}).
+    idx_institute = tex.find("\\institute{")
+    idx_begin_document = tex.find("\\begin{document}")
+    assert -1 < idx_institute < idx_begin_document

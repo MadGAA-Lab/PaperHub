@@ -11,15 +11,54 @@ custom footline + booktabs/mathtools/tikz). The legacy minimal preamble
 under ``theme="metropolis"`` for parity / debugging. Unknown theme values
 fall back to ``"gold"`` so a stray env-var typo cannot silently produce a
 deck under an unrelated theme.
+
+F4.4 T7 hotfix: deck-content-aware CJK setup. When any deck text
+(frames / title / subtitle / author) contains CJK characters, prepend a
+``% !TeX program = xelatex`` magic comment + ``\\usepackage{xeCJK}`` to
+the preamble so compile.py's existing ``select_engine`` switches to
+xelatex and ``ensure_cjk_font`` injects ``\\setCJKmainfont{Noto Serif
+CJK SC}`` at compile time. Pure-English decks keep the pdflatex compile
+path (and its compile speed). Applies to BOTH ``gold`` and ``metropolis``
+preambles so the policy is theme-independent.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 # Recognised preamble-profile names. Anything else falls back to ``GOLD``.
 GOLD = "gold"
 METROPOLIS = "metropolis"
 _KNOWN_THEMES = frozenset({GOLD, METROPOLIS})
+
+
+# CJK detection — covers the BMP CJK Unified Ideographs block (U+4E00–U+9FFF,
+# the bulk of Simplified/Traditional Chinese + Japanese kanji), the CJK
+# Symbols and Punctuation block (U+3000–U+303F, e.g. 「」、・), Hiragana
+# (U+3040–U+309F), Katakana (U+30A0–U+30FF), Hangul Syllables
+# (U+AC00–U+D7AF), and the Halfwidth/Fullwidth Forms block (U+FF00–U+FFEF,
+# fullwidth ASCII like ！？).  This is intentionally broader than just CJK
+# Unified Ideographs so a deck whose only "Chinese" content is a CJK
+# punctuation mark still trips the xelatex switch.
+_CJK_RANGE_RE = re.compile(
+    r"[　-〿぀-ゟ゠-ヿ一-鿿가-힯＀-￯]"
+)
+
+# Title-band anchor when no ``\institute{}`` is supplied. The Berlin theme's
+# styled colored title band shrinks visibly when this slot is empty, which
+# users mistake for "the title page style is gone". A small ``PaperHub``
+# wordmark keeps the band anchored without overpowering the actual title.
+_DEFAULT_INSTITUTE = "\\institute{\\normalsize PaperHub}"
+
+
+def _deck_has_cjk(*texts: str) -> bool:
+    """True if any of ``texts`` contains a CJK / fullwidth character.
+
+    Used to decide whether to inject the ``xeCJK`` setup into the preamble.
+    The check is a single union regex over the joined string so a deck with
+    a CJK-only ``\\subtitle{}`` and ASCII frames (or vice-versa) still trips.
+    """
+    return bool(_CJK_RANGE_RE.search("".join(texts)))
 
 
 @dataclass
@@ -65,18 +104,30 @@ def build_graphicspath(cache_source_dirs: list[str]) -> str:
     return f"\\graphicspath{{ {dirs} }}"
 
 
-def _build_metropolis_preamble_head() -> list[str]:
-    """Legacy minimal preamble — preserved for ``theme="metropolis"`` parity."""
-    return [
+def _build_metropolis_preamble_head(needs_cjk: bool = False) -> list[str]:
+    """Legacy minimal preamble — preserved for ``theme="metropolis"`` parity.
+
+    When ``needs_cjk`` is True, prepend the ``% !TeX program = xelatex``
+    magic comment and add ``\\usepackage{xeCJK}`` so compile.py's
+    ``select_engine`` switches to xelatex and ``ensure_cjk_font`` injects
+    the default CJK main font at compile time.
+    """
+    head = [
         "\\documentclass{beamer}",
         "\\usetheme{metropolis}",
         "\\usepackage{graphicx}",
         "\\usepackage{booktabs}",
         "\\usepackage{amsmath,amssymb}",
     ]
+    if needs_cjk:
+        # Magic comment MUST be line 1 — compile.py's _XELATEX_TRIGGERS
+        # check is substring-based but a leading magic comment is also the
+        # convention TeX editors (and humans) recognise.
+        head = ["% !TeX program = xelatex", *head, "\\usepackage{xeCJK}"]
+    return head
 
 
-def _build_gold_preamble_head() -> list[str]:
+def _build_gold_preamble_head(needs_cjk: bool = False) -> list[str]:
     """F4.4 T7 default: the Final_Report gold methodology preamble.
 
     Verbatim port of ``D:/GitHub/Final_Report/slides.tex`` lines 1-35 minus
@@ -84,10 +135,11 @@ def _build_gold_preamble_head() -> list[str]:
     ID-3-3 footer string). Layout/colors/footline/theme are the gold's;
     figures + title metadata are still filled by the caller as before.
     """
-    return [
+    head = [
         "\\documentclass[aspectratio=169,14pt]{beamer}",
         "\\usepackage[T1]{fontenc}",
         "\\usepackage{textcomp}",
+        *(["\\usepackage{xeCJK}"] if needs_cjk else []),
         "\\usepackage{graphicx}",
         "\\usepackage{booktabs}",
         "\\usepackage{mathtools,amssymb}",
@@ -129,6 +181,12 @@ def _build_gold_preamble_head() -> list[str]:
         "  \\vskip0pt%",
         "}",
     ]
+    if needs_cjk:
+        # Magic comment MUST be line 1 of the source file so compile.py's
+        # ``select_engine`` substring check (and any external editor) sees
+        # it before the documentclass.
+        head = ["% !TeX program = xelatex", *head]
+    return head
 
 
 def _resolve_theme(name: str) -> str:
@@ -143,10 +201,18 @@ def _resolve_theme(name: str) -> str:
 
 def assemble_deck(inp: AssembleInput) -> str:
     theme = _resolve_theme(inp.theme)
+    # Deck-content-aware CJK detection (F4.4 T7 hotfix). Any CJK / fullwidth
+    # character in the visible deck text — frames, title, subtitle, author —
+    # flips the preamble into xelatex+xeCJK mode. compile.py picks up the
+    # ``% !TeX program = xelatex`` magic comment + injects the default
+    # ``\setCJKmainfont`` at compile time. Pure-English decks keep pdflatex.
+    needs_cjk = _deck_has_cjk(
+        "".join(inp.frames), inp.title, inp.subtitle, inp.author
+    )
     head = (
-        _build_metropolis_preamble_head()
+        _build_metropolis_preamble_head(needs_cjk=needs_cjk)
         if theme == METROPOLIS
-        else _build_gold_preamble_head()
+        else _build_gold_preamble_head(needs_cjk=needs_cjk)
     )
 
     preamble: list[str] = [
@@ -162,6 +228,12 @@ def assemble_deck(inp: AssembleInput) -> str:
         preamble.append(f"\\author{{{inp.author}}}")
     if inp.date:
         preamble.append(f"\\date{{{inp.date}}}")
+    # Berlin theme's styled title band shrinks visibly when ``\institute{}``
+    # is unset, producing the "bare title page" symptom the user reported.
+    # Provide a small PaperHub wordmark as the default anchor; callers that
+    # supply their own \institute via additional_tex_macros take precedence
+    # since LaTeX honours the last definition.
+    preamble.append(_DEFAULT_INSTITUTE)
     parts: list[str] = [
         *preamble,
         "\\begin{document}",
