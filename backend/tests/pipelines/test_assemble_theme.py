@@ -25,6 +25,12 @@ The tests:
   the assembler. So the equivalent thing to preserve here is that
   user-supplied ``additional_tex_macros`` (where a deck-level CJK setup
   would land) are emitted verbatim regardless of theme.
+
+F4.4 T7 hotfix² broadens the detection from CJK-only to any non-ASCII
+codepoint — Cyrillic, Greek, Arabic, Hebrew, Latin-Extended, etc. all
+need xelatex + fontspec to render. CJK additionally needs xeCJK. The
+extra ``test_assemble_gold_preamble_uses_unicode_engine_on_*`` tests
+cover this.
 """
 from __future__ import annotations
 
@@ -200,41 +206,89 @@ def test_assemble_preserves_cjk_macros_in_both_themes(theme: str) -> None:
     assert -1 < idx_first_macro < idx_title
 
 
-# ──────────────── F4.4 T7 hotfix — deck-content-aware CJK ─────────────
+# ─────── F4.4 T7 hotfix² — deck-content-aware Unicode (broader than CJK) ───────
 
 
-def test_assemble_gold_preamble_skips_xecjk_when_no_cjk_content() -> None:
-    """Pure-ASCII deck must NOT pull in xeCJK / xelatex — keeping the
-    pdflatex compile path and its compile speed."""
+def test_assemble_gold_preamble_skips_unicode_engine_on_ascii() -> None:
+    """Pure-ASCII deck must NOT pull in fontspec / xeCJK / xelatex — keeping
+    the pdflatex compile path and its compile speed."""
     tex = assemble_deck(_input("gold"))  # subtitle="" + ASCII frames
     assert "\\usepackage{xeCJK}" not in tex
+    assert "\\usepackage{fontspec}" not in tex
     assert "% !TeX program = xelatex" not in tex
 
 
-def test_assemble_gold_preamble_adds_xecjk_when_cjk_in_frames() -> None:
-    """A CJK-containing frame trips xelatex + xeCJK. ``\\setCJKmainfont`` is
-    intentionally NOT emitted here — ``compile.ensure_cjk_font`` owns the
-    default font name so it tracks ``_DEFAULT_CJK_FONT`` in one place."""
+def test_assemble_gold_preamble_uses_unicode_engine_on_cyrillic() -> None:
+    """A Cyrillic-containing frame trips xelatex + fontspec (NOT xeCJK —
+    Cyrillic is not CJK). ``\\setmainfont`` is intentionally not emitted
+    here — ``compile.ensure_main_unicode_font`` owns the default font name."""
+    tex = assemble_deck(
+        _input("gold", frames=["\\begin{frame}{Intro}Привет мир\\end{frame}"])
+    )
+    assert tex.splitlines()[0] == "% !TeX program = xelatex"
+    assert "\\usepackage{fontspec}" in tex
+    assert "\\usepackage{xeCJK}" not in tex
+    # compile.ensure_main_unicode_font injects \setmainfont at compile time.
+    assert "\\setmainfont" not in tex
+    # fontspec lands AFTER textcomp and BEFORE \title{} so it takes effect
+    # before any frame body renders.
+    idx_textcomp = tex.find("\\usepackage{textcomp}")
+    idx_fontspec = tex.find("\\usepackage{fontspec}")
+    idx_title = tex.find("\\title{")
+    assert -1 < idx_textcomp < idx_fontspec < idx_title
+
+
+def test_assemble_gold_preamble_uses_unicode_engine_on_greek() -> None:
+    """Greek text (e.g. Γεια σου) trips xelatex + fontspec, NOT xeCJK."""
+    tex = assemble_deck(
+        _input("gold", frames=["\\begin{frame}{Intro}Γεια σου\\end{frame}"])
+    )
+    assert tex.splitlines()[0] == "% !TeX program = xelatex"
+    assert "\\usepackage{fontspec}" in tex
+    assert "\\usepackage{xeCJK}" not in tex
+
+
+def test_assemble_gold_preamble_uses_unicode_engine_on_latin_extended() -> None:
+    """European accented characters (Latin-Extended-A like ``café déjà vu``)
+    trip xelatex + fontspec. pdflatex with T1 fontenc CAN technically handle
+    these via input-encoding tricks but xelatex+fontspec is the robust
+    universal path that doesn't depend on inputenc + the specific accent set."""
+    tex = assemble_deck(
+        _input("gold", frames=["\\begin{frame}{Intro}café déjà vu\\end{frame}"])
+    )
+    assert tex.splitlines()[0] == "% !TeX program = xelatex"
+    assert "\\usepackage{fontspec}" in tex
+    assert "\\usepackage{xeCJK}" not in tex
+
+
+def test_assemble_gold_preamble_uses_unicode_engine_and_xecjk_on_cjk() -> None:
+    """A CJK-containing frame trips xelatex + fontspec + xeCJK.
+    ``\\setCJKmainfont`` / ``\\setmainfont`` are intentionally NOT emitted
+    here — ``compile.ensure_cjk_font`` / ``compile.ensure_main_unicode_font``
+    own the default font names so they track the single-place constants."""
     tex = assemble_deck(
         _input("gold", frames=["\\begin{frame}\\frametitle{核心文獻}body\\end{frame}"])
     )
     # Magic comment MUST be line 1 of the file so compile.py picks it up
     # before any other directive.
     assert tex.splitlines()[0] == "% !TeX program = xelatex"
+    assert "\\usepackage{fontspec}" in tex
     assert "\\usepackage{xeCJK}" in tex
-    # compile.ensure_cjk_font injects \setCJKmainfont at compile time.
     assert "\\setCJKmainfont" not in tex
-    # xeCJK lands AFTER textcomp and BEFORE \title{} so it takes effect for
+    assert "\\setmainfont" not in tex
+    # Ordering: textcomp → fontspec → xeCJK → \title{}, so the Unicode
+    # engine + Latin main-font setup precedes the CJK setup which precedes
     # the title frame.
     idx_textcomp = tex.find("\\usepackage{textcomp}")
+    idx_fontspec = tex.find("\\usepackage{fontspec}")
     idx_xecjk = tex.find("\\usepackage{xeCJK}")
     idx_title = tex.find("\\title{")
-    assert -1 < idx_textcomp < idx_xecjk < idx_title
+    assert -1 < idx_textcomp < idx_fontspec < idx_xecjk < idx_title
 
 
-def test_assemble_gold_preamble_adds_xecjk_when_cjk_in_subtitle() -> None:
-    """The subtitle-only path is the single-paper-deck failure mode the user
-    reported — frames are ASCII but ``\\subtitle{<Chinese>}`` is set."""
+def test_assemble_gold_preamble_uses_unicode_engine_when_cjk_in_subtitle() -> None:
+    """The subtitle-only CJK path — frames are ASCII but
+    ``\\subtitle{<Chinese>}`` is set — still trips fontspec + xeCJK."""
     tex = assemble_deck(
         _input(
             "gold",
@@ -243,45 +297,63 @@ def test_assemble_gold_preamble_adds_xecjk_when_cjk_in_subtitle() -> None:
         )
     )
     assert tex.splitlines()[0] == "% !TeX program = xelatex"
+    assert "\\usepackage{fontspec}" in tex
     assert "\\usepackage{xeCJK}" in tex
     assert "\\subtitle{核心文獻概述}" in tex
 
 
-def test_assemble_gold_preamble_adds_xecjk_when_cjk_in_title() -> None:
+def test_assemble_gold_preamble_uses_unicode_engine_when_cjk_in_title() -> None:
     """Defensive: a CJK title also trips the switch (title flows into the
     titlepage frame, which would otherwise render with empty boxes)."""
     tex = assemble_deck(_input("gold", title="注意力即是一切"))
     assert tex.splitlines()[0] == "% !TeX program = xelatex"
+    assert "\\usepackage{fontspec}" in tex
     assert "\\usepackage{xeCJK}" in tex
 
 
-def test_assemble_gold_preamble_adds_xecjk_when_cjk_in_author() -> None:
+def test_assemble_gold_preamble_uses_unicode_engine_when_cjk_in_author() -> None:
     """Defensive: a CJK author name (e.g. 王小明) also trips the switch."""
     tex = assemble_deck(_input("gold", author="王小明"))
     assert tex.splitlines()[0] == "% !TeX program = xelatex"
+    assert "\\usepackage{fontspec}" in tex
     assert "\\usepackage{xeCJK}" in tex
 
 
+def test_assemble_metropolis_preamble_uses_unicode_engine_on_cyrillic() -> None:
+    """Metropolis-theme parity: Cyrillic text trips xelatex + fontspec
+    under the legacy minimal preamble too, no xeCJK."""
+    tex = assemble_deck(
+        _input("metropolis", frames=["\\begin{frame}{Intro}Привет мир\\end{frame}"])
+    )
+    assert tex.splitlines()[0] == "% !TeX program = xelatex"
+    assert "\\usepackage{fontspec}" in tex
+    assert "\\usepackage{xeCJK}" not in tex
+    # The metropolis stack itself stays intact.
+    assert "\\usetheme{metropolis}" in tex
+
+
 def test_assemble_metropolis_theme_also_handles_cjk() -> None:
-    """The CJK switch is theme-INdependent: a Chinese deck under the legacy
-    metropolis preamble must also xelatex-compile, not silently emit a
-    glyph-less PDF."""
+    """The Unicode switch is theme-INdependent: a Chinese deck under the
+    legacy metropolis preamble must also xelatex-compile with fontspec +
+    xeCJK, not silently emit a glyph-less PDF."""
     tex = assemble_deck(
         _input(
             "metropolis", frames=["\\begin{frame}\\frametitle{核心文獻}body\\end{frame}"]
         )
     )
     assert tex.splitlines()[0] == "% !TeX program = xelatex"
+    assert "\\usepackage{fontspec}" in tex
     assert "\\usepackage{xeCJK}" in tex
     # The metropolis stack itself stays intact.
     assert "\\usetheme{metropolis}" in tex
 
 
-def test_assemble_metropolis_preamble_skips_xecjk_when_no_cjk_content() -> None:
+def test_assemble_metropolis_preamble_skips_unicode_engine_on_ascii() -> None:
     """Symmetry: pure-ASCII metropolis decks keep the legacy minimal preamble
-    verbatim — no xelatex switch."""
+    verbatim — no xelatex switch, no fontspec, no xeCJK."""
     tex = assemble_deck(_input("metropolis"))
     assert "\\usepackage{xeCJK}" not in tex
+    assert "\\usepackage{fontspec}" not in tex
     assert "% !TeX program = xelatex" not in tex
 
 

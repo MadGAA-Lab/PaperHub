@@ -7,6 +7,7 @@ from paperhub.pipelines.slide_pipeline.compile import (
     _has_overfull_vbox,
     compile_with_revise,
     ensure_cjk_font,
+    ensure_main_unicode_font,
     select_engine,
 )
 
@@ -229,6 +230,52 @@ def test_ensure_cjk_font_noop_when_font_already_set() -> None:
     )
     assert ensure_cjk_font(tex) == tex
     assert "Noto Serif CJK SC" not in ensure_cjk_font(tex)
+
+
+# ---------------------------------------------------------------------------
+# ensure_main_unicode_font — inject a default Unicode main font for a bare
+# fontspec preamble (Cyrillic / Greek / Arabic / Hebrew / Latin-Extended / etc.)
+# ---------------------------------------------------------------------------
+
+def test_ensure_main_unicode_font_injects_when_fontspec_unset() -> None:
+    tex = (
+        "\\documentclass{beamer}\n\\usepackage{fontspec}\n"
+        "\\begin{document}\\end{document}"
+    )
+    out = ensure_main_unicode_font(tex)
+    assert "\\setmainfont{Noto Serif}" in out
+    # Inserted immediately after the fontspec package line.
+    assert out.index("\\setmainfont") > out.index("\\usepackage{fontspec}")
+
+
+def test_ensure_main_unicode_font_noop_without_fontspec() -> None:
+    tex = "\\documentclass{beamer}\n\\begin{document}\\end{document}"
+    assert ensure_main_unicode_font(tex) == tex
+
+
+def test_ensure_main_unicode_font_noop_when_font_already_set() -> None:
+    """Operator-supplied \\setmainfont via additional_tex_macros wins."""
+    tex = (
+        "\\documentclass{beamer}\n\\usepackage{fontspec}\n"
+        "\\setmainfont{TeX Gyre Termes}\n\\begin{document}\\end{document}"
+    )
+    assert ensure_main_unicode_font(tex) == tex
+    assert "Noto Serif" not in ensure_main_unicode_font(tex)
+
+
+def test_ensure_main_unicode_font_coexists_with_cjk_font() -> None:
+    """xeCJK + fontspec preamble: both font helpers inject independently
+    (the assembler emits fontspec before xeCJK, and ``compile_with_revise``
+    chains the two ensure_* calls)."""
+    tex = (
+        "\\documentclass{beamer}\n"
+        "\\usepackage{fontspec}\n"
+        "\\usepackage{xeCJK}\n"
+        "\\begin{document}\\end{document}"
+    )
+    out = ensure_cjk_font(ensure_main_unicode_font(tex))
+    assert "\\setmainfont{Noto Serif}" in out
+    assert "\\setCJKmainfont{Noto Serif CJK SC}" in out
 
 
 @pytest.mark.asyncio

@@ -34,9 +34,18 @@ _OVERFULL_VBOX_RE = re.compile(r"Overfull \\vbox")
 _XELATEX_TRIGGERS = ("xecjk", "fontspec", "ctex", "% !tex program = xelatex")
 
 _XECJK_RE = re.compile(r"\\usepackage(?:\[[^\]]*\])?\{xeCJK\}", re.IGNORECASE)
+_FONTSPEC_RE = re.compile(r"\\usepackage(?:\[[^\]]*\])?\{fontspec\}", re.IGNORECASE)
 # Default CJK font shipped by the image's fonts-noto-cjk package. Covers
 # Simplified + Traditional + Japanese + Korean glyphs (Noto CJK is unified).
 _DEFAULT_CJK_FONT = "Noto Serif CJK SC"
+# Default Unicode-capable serif main font for non-CJK scripts (Cyrillic,
+# Greek, Latin-Extended, etc.). Operator-installable as ``fonts-noto`` /
+# ``fonts-noto-extra`` on Debian, ``noto-fonts`` on Arch. When unavailable
+# fontspec falls back to Latin Modern Roman which still covers
+# Latin-Extended-A (most European accented characters); explicit Cyrillic /
+# Greek / Arabic / Hebrew need the Noto family (or the operator's own
+# ``additional_tex_macros`` override taking precedence).
+_DEFAULT_MAIN_UNICODE_FONT = "Noto Serif"
 
 
 def _has_overfull_vbox(log: str) -> bool:
@@ -82,6 +91,26 @@ def ensure_cjk_font(tex: str, font: str = _DEFAULT_CJK_FONT) -> str:
     return tex[: match.end()] + insert + tex[match.end() :]
 
 
+def ensure_main_unicode_font(tex: str, font: str = _DEFAULT_MAIN_UNICODE_FONT) -> str:
+    """Inject a default ``\\setmainfont`` when fontspec is loaded but unset.
+
+    The non-CJK companion to :func:`ensure_cjk_font`. When the deck uses
+    fontspec (loaded for any non-ASCII script — Cyrillic, Greek, Arabic,
+    Hebrew, Latin-Extended, etc.) and no main font is configured, fontspec
+    falls back to Latin Modern Roman which covers Latin-Extended-A but NOT
+    Cyrillic / Greek / Arabic / Hebrew. Injecting ``\\setmainfont{Noto
+    Serif}`` gives those scripts working glyphs on a host that installs
+    ``fonts-noto`` (or equivalent). No-op when fontspec is absent or a
+    main font is already set (the operator's ``additional_tex_macros``
+    override wins by being emitted earlier).
+    """
+    match = _FONTSPEC_RE.search(tex)
+    if match is None or "\\setmainfont" in tex:
+        return tex
+    insert = f"\n\\setmainfont{{{font}}}"
+    return tex[: match.end()] + insert + tex[match.end() :]
+
+
 @dataclass(frozen=True)
 class CompileResult:
     ok: bool
@@ -114,13 +143,13 @@ async def compile_with_revise(
     # thread so a multi-second compile never stalls the FastAPI event loop.
     # The async ``revise`` callback stays on the loop (it awaits the LLM).
     await asyncio.to_thread(workdir.mkdir, parents=True, exist_ok=True)
-    current = ensure_cjk_font(sanitize_frametitles(tex))
+    current = ensure_main_unicode_font(ensure_cjk_font(sanitize_frametitles(tex)))
     last_log = ""
     pdf_path = workdir / Path(tex_name).with_suffix(".pdf").name
     for attempt in range(1, max_retries + 2):
         # Re-derive engine + font each attempt: the revise step rewrites the
-        # TeX and could change (or drop) the xeCJK/font lines.
-        current = ensure_cjk_font(current)
+        # TeX and could change (or drop) the xeCJK/fontspec/font lines.
+        current = ensure_main_unicode_font(ensure_cjk_font(current))
         engine = select_engine(current)
         await asyncio.to_thread((workdir / tex_name).write_text, current, encoding="utf-8")
         if pdf_path.exists():
