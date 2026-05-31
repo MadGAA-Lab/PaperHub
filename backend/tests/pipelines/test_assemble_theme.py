@@ -79,6 +79,12 @@ def test_assemble_default_theme_is_gold() -> None:
     assert "\\setbeamercolor{block title}{bg=accent,fg=white}" in tex
     assert "\\setbeamercolor{block body}{bg=lightgray,fg=black}" in tex
     assert "\\setbeamertemplate{navigation symbols}{}" in tex
+    # F4.4 T7 hotfix³: Berlin's top section/subsection nav bar must be
+    # suppressed — the new chain emits no \section{}, so the default bar
+    # renders empty/broken on every slide.
+    assert "\\setbeamertemplate{headline}{}" in tex
+    assert "\\setbeamertemplate{section in head/foot}{}" in tex
+    assert "\\setbeamertemplate{subsection in head/foot}{}" in tex
     assert "\\setbeamersize{text margin left=0.6cm, text margin right=0.6cm}" in tex
     # Custom footline with page-N/total.
     assert "\\setbeamertemplate{footline}{" in tex
@@ -94,6 +100,35 @@ def test_assemble_default_theme_is_gold() -> None:
     assert "\\author{Vaswani et al.}" in tex
     # Metropolis must NOT leak in.
     assert "\\usetheme{metropolis}" not in tex
+
+
+# ─────────── F4.4 T7 hotfix³ — Berlin top nav-bar suppression ──────────
+
+
+def test_assemble_gold_preamble_suppresses_berlin_section_nav() -> None:
+    """Berlin renders a TOP NAVIGATION BAR showing the deck's
+    section/subsection structure. PaperHub's new chain emits NO
+    ``\\section{}`` declarations, so the bar would render empty/broken on
+    EVERY slide — the "all slides have style issue" symptom the user
+    reported. The gold reference deck (``D:/GitHub/Final_Report/slides.tex``
+    lines 11-15) suppresses all four templates together; the gold preamble
+    must match.
+
+    Metropolis has its own minimal headline style (no Berlin section bar),
+    so the legacy preamble does NOT need ``\\setbeamertemplate{headline}{}``.
+    """
+    tex_gold = assemble_deck(_input("gold"))
+    # All four Berlin nav suppressions present in gold.
+    assert "\\setbeamertemplate{navigation symbols}{}" in tex_gold
+    assert "\\setbeamertemplate{headline}{}" in tex_gold
+    assert "\\setbeamertemplate{section in head/foot}{}" in tex_gold
+    assert "\\setbeamertemplate{subsection in head/foot}{}" in tex_gold
+
+    # Metropolis MUST NOT emit \setbeamertemplate{headline}{} — it has its
+    # own minimal headline style; suppressing it would blank a deliberate
+    # theme element.
+    tex_metro = assemble_deck(_input("metropolis"))
+    assert "\\setbeamertemplate{headline}{}" not in tex_metro
 
 
 # ─────────────────── metropolis backward compat ────────────────────

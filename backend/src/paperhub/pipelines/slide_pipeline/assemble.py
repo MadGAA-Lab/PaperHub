@@ -214,6 +214,16 @@ def _build_gold_preamble_head(profile: UnicodeProfile | None = None) -> list[str
         "\\setbeamercolor{block title}{bg=accent,fg=white}",
         "\\setbeamercolor{block body}{bg=lightgray,fg=black}",
         "\\setbeamertemplate{navigation symbols}{}",
+        # F4.4 T7 hotfix³: suppress Berlin's top navigation bar. Berlin's
+        # default headline shows the deck's section/subsection structure,
+        # but the new chain emits NO ``\section{}`` declarations, so the
+        # bar renders empty/broken on every slide — the "all slides have
+        # style issue" symptom the user reported. Mirrors the gold
+        # reference deck (``D:/GitHub/Final_Report/slides.tex`` lines
+        # 11-15) which suppresses all four templates together.
+        "\\setbeamertemplate{headline}{}",
+        "\\setbeamertemplate{section in head/foot}{}",
+        "\\setbeamertemplate{subsection in head/foot}{}",
         "\\setbeamersize{text margin left=0.6cm, text margin right=0.6cm}",
         "",
         "\\setbeamertemplate{footline}{",
