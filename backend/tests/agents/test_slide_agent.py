@@ -74,6 +74,11 @@ _GOOD_DECK = (
 )
 
 
+def test_default_tool_call_budget_is_30():
+    from paperhub.agents.slide_agent import DEFAULT_MAX_TOOL_CALLS
+    assert DEFAULT_MAX_TOOL_CALLS == 30
+
+
 @pytest.mark.asyncio
 async def test_happy_path_initial_draft_then_compile_then_done(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch, fake_tracer: Any

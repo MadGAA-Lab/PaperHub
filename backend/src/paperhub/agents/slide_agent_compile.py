@@ -13,6 +13,7 @@ ok flag: True iff zero compile_errors AND zero unrendered_math_frames.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 from typing import Literal
@@ -53,6 +54,27 @@ async def run_compile_check(
     tex_name: str = "deck.tex",
 ) -> CompileCheckResult:
     """Write deck.tex, compile once, run detectors, aggregate."""
+    # F4.5 v2.25: write an ADDITIONAL.tex containing aggregated paper
+    # newcommands so the default preamble's ``\input{ADDITIONAL.tex}`` doesn't
+    # fail with ``! LaTeX Error: File `ADDITIONAL.tex' not found.`` (real-API
+    # benchmark Run 342-346 burned ~3 tool calls per case on this preventable
+    # error before this fix).
+    await asyncio.to_thread(workdir.mkdir, parents=True, exist_ok=True)
+    macros: list[str] = []
+    seen: set[str] = set()
+    for b in bundles:
+        for raw in b.paper_newcommands or []:
+            line = raw.strip()
+            if line and line not in seen:
+                macros.append(line)
+                seen.add(line)
+    additional_tex = "\n".join(macros) + ("\n" if macros else "")
+    # asyncio.to_thread keeps the event loop free during file IO (matches the
+    # pattern elsewhere in this module).
+    await asyncio.to_thread(
+        (workdir / "ADDITIONAL.tex").write_text, additional_tex, encoding="utf-8"
+    )
+
     compile_result = await compile_with_revise(
         tex=deck_tex,
         workdir=workdir,

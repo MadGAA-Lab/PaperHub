@@ -138,6 +138,80 @@ async def test_compile_check_records_compile_errors_when_not_ok(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+async def test_compile_check_writes_additional_tex_from_bundle_newcommands(tmp_path, monkeypatch):
+    """run_compile_check must drop an ADDITIONAL.tex into workdir aggregating
+    paper_newcommands across all bundles, deduplicated, so the default
+    preamble's \\input{ADDITIONAL.tex} doesn't error."""
+    bundles = [
+        PaperContextBundle(
+            paper_id=1, paper_idx=0, title="t", authors=[], year=2025,
+            narrative_summary="x", key_figures=[], key_equations=[],
+            section_excerpts=[],
+            paper_newcommands=[r"\newcommand{\R}{\mathbb{R}}", r"\newcommand{\bm}{...}"],
+        ),
+        PaperContextBundle(
+            paper_id=2, paper_idx=1, title="u", authors=[], year=2025,
+            narrative_summary="x", key_figures=[], key_equations=[],
+            section_excerpts=[],
+            paper_newcommands=[r"\newcommand{\R}{\mathbb{R}}", r"\newcommand{\K}{\mathbb{K}}"],
+        ),
+    ]
+
+    async def fake_compile_with_revise(*, tex, workdir, tex_name, revise, max_retries):
+        from paperhub.pipelines.slide_pipeline.compile import CompileResult
+        return CompileResult(ok=True, attempts=1, tex=tex, log="", page_count=0)
+    monkeypatch.setattr(
+        "paperhub.agents.slide_agent_compile.compile_with_revise", fake_compile_with_revise
+    )
+
+    workdir = tmp_path / "slides"
+    workdir.mkdir()
+    await run_compile_check(
+        deck_tex=r"\documentclass{beamer}\begin{document}\end{document}",
+        bundles=bundles,
+        figure_inventory={},
+        workdir=workdir,
+        script="en",
+    )
+
+    additional = (workdir / "ADDITIONAL.tex").read_text(encoding="utf-8")
+    assert "\\newcommand{\\R}" in additional
+    assert "\\newcommand{\\bm}" in additional
+    assert "\\newcommand{\\K}" in additional
+    # Deduplicated — \R appears once, not twice.
+    assert additional.count("\\newcommand{\\R}") == 1
+
+
+@pytest.mark.asyncio
+async def test_compile_check_writes_empty_additional_tex_when_no_newcommands(tmp_path, monkeypatch):
+    """No newcommands → empty ADDITIONAL.tex (still must exist so \\input doesn't crash)."""
+    bundles = [
+        PaperContextBundle(
+            paper_id=1, paper_idx=0, title="t", authors=[], year=2025,
+            narrative_summary="x", key_figures=[], key_equations=[],
+            section_excerpts=[], paper_newcommands=[],
+        ),
+    ]
+    async def fake_compile_with_revise(*, tex, workdir, tex_name, revise, max_retries):
+        from paperhub.pipelines.slide_pipeline.compile import CompileResult
+        return CompileResult(ok=True, attempts=1, tex=tex, log="", page_count=0)
+    monkeypatch.setattr(
+        "paperhub.agents.slide_agent_compile.compile_with_revise", fake_compile_with_revise
+    )
+    workdir = tmp_path / "slides"
+    workdir.mkdir()
+    await run_compile_check(
+        deck_tex=r"\documentclass{beamer}\begin{document}\end{document}",
+        bundles=bundles,
+        figure_inventory={},
+        workdir=workdir,
+        script="en",
+    )
+    assert (workdir / "ADDITIONAL.tex").exists()
+    # Content may be empty or just a newline — both fine.
+
+
+@pytest.mark.asyncio
 async def test_compile_check_ok_flag_false_when_math_contract_violated(tmp_path, monkeypatch):
     async def fake_compile_with_revise(*, tex, workdir, tex_name, revise, max_retries):
         from paperhub.pipelines.slide_pipeline.compile import CompileResult

@@ -4,10 +4,12 @@ Owns the deck across draft AND revise. Receives PaperContextBundles + resolved
 preamble + canvas budget + layout examples; emits the final deck.tex via a
 bounded tool-call loop.
 
-Tool-call budget: default 15 calls (initial_draft + ~3-5 compile_checks +
-~5-10 diff edits + done = ~10-15 calls for a clean run). Budget exhaustion
-ships the current deck state with satisfied=False — same fallback posture
-as the existing compile_with_revise's imperfect-deck-shipping.
+Tool-call budget: default 30 calls (initial_draft + 1-2 compile_checks +
+10-20 diff edits + done = ~20-25 calls for a real-API run). Raised from 15
+after the real-API benchmark Run 342-346 saw all 5 cases hit the 15-call
+ceiling without successfully reaching done(). Budget exhaustion ships the
+current deck state with satisfied=False — same fallback posture as the
+existing compile_with_revise's imperfect-deck-shipping.
 """
 from __future__ import annotations
 
@@ -43,7 +45,7 @@ from paperhub.tracing.tracer import Tracer
 
 LlmAcompletion = Callable[..., Awaitable[Any]]
 
-DEFAULT_MAX_TOOL_CALLS: Final[int] = 15
+DEFAULT_MAX_TOOL_CALLS: Final[int] = 30
 
 # Transient connection-drop signatures we retry mid-loop. Mirrors
 # ``LiteLlmAdapter._is_transient_stream_error`` — same class of fault, but

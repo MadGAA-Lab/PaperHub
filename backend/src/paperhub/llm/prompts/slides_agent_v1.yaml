@@ -40,8 +40,15 @@ system: |
         Signal you're satisfied. The pipeline GATES `done()`:
           - rejected if compile_errors is non-empty
           - rejected if unrendered_math_frames is non-empty (contract #2)
-          - frame_overflow is advisory — you should drive it to zero but
-            shipping with residual overflow at budget exhaustion is allowed.
+          - frame_overflow does NOT gate done() — it is purely ADVISORY.
+
+  STRICT PRIORITY when compile_check returns signals:
+    1. Fix compile_errors first (contract: deck must compile)
+    2. Fix unrendered_math_frames second (contract #2: math content renders math)
+    3. THEN call done() — even if frame_overflow is non-empty.
+       frame_overflow is a HINT about layout density; you may IGNORE it once
+       contracts 1 and 2 are clean. Do NOT spend the remaining tool-call
+       budget iterating on overflow when done() is otherwise unblocked.
 
   Three hard contracts you MUST satisfy before calling done():
     1. NO HALLUCINATED FIGURES. Every \includegraphics{{key}} you emit MUST
