@@ -168,11 +168,30 @@ async def compile_with_revise(
             # Either a hard compile error OR a clean-exit-but-Overfull run —
             # either way, ask the LLM to tighten/fix the TeX and retry.
             # Transient-error retry (Gemini/Vertex connection drops, 5xx) is
-            # the LLM-client's responsibility — litellm.num_retries is set
-            # globally at app lifespan startup (see paperhub.app._lifespan).
-            # This loop only handles compile outcomes, not connection-drop
-            # recovery.
-            current = sanitize_frametitles(await revise(last_log[-4000:], current))
+            # the LLM-client's responsibility — LiteLlmAdapter.stream wraps
+            # streaming calls in its own retry-from-start loop and
+            # litellm.num_retries is set globally at app lifespan startup
+            # (see paperhub.app._lifespan).
+            #
+            # If revise's own retries STILL exhaust (upstream provider
+            # persistently broken for this workload) AND pdflatex already
+            # produced a PDF on this attempt, fall back to shipping the
+            # cosmetically-imperfect deck rather than losing the work — a
+            # PDF on disk plus an Overfull warning is more useful to the
+            # user than no deck at all.
+            try:
+                current = sanitize_frametitles(await revise(last_log[-4000:], current))
+            except Exception as exc:
+                if pdf_produced:
+                    pages = await asyncio.to_thread(_page_count, pdf_path)
+                    _LOG.warning(
+                        "compile_with_revise: revise() exhausted retries (%s) "
+                        "on attempt %d but a PDF was produced; shipping the "
+                        "imperfect deck (%d pages) instead of failing.",
+                        exc.__class__.__name__, attempt, pages,
+                    )
+                    return CompileResult(True, attempt, current, last_log, pages)
+                raise
         elif pdf_produced:
             # Retries exhausted but a PDF exists (overfull every time).
             # Return ok=True — a degraded deck is better than a lost deck.
