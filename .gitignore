@@ -105,3 +105,6 @@ marker_service/*.local.*
 .deck*
 *.pptx
 *.ppt
+
+# benchmark results
+results/
