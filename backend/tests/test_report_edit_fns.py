@@ -3,7 +3,7 @@
 The _Stream stub mirrors the real LlmAdapter.stream contract: stream(...) is an
 async generator function (not a coroutine), so callers do:
     async for tok in adapter.stream(...):
-which matches the existing coherence_pass / revise_tex consumption pattern.
+which matches the existing revise_tex consumption pattern.
 """
 from typing import Any
 
