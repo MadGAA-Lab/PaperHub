@@ -1,0 +1,126 @@
+"""F4.5 compile_check + density_check tool implementations.
+
+compile_check: write deck.tex → pdflatex (via the surviving compile_with_revise
+                 with max_retries=0 — we want pure compile, not a revise loop,
+                 because the agent IS the revise loop) → run overflow_detector +
+                 math_auditor → aggregate into a CompileCheckResult.
+density_check: same minus pdflatex (speculative-edit verification).
+
+ok flag: True iff zero compile_errors AND zero unrendered_math_frames.
+         (Frame overflow is advisory — does NOT zero the ok flag, but the
+          agent prompt tells the LLM to act on overage_tokens > 0 until budget
+          exhaustion.)
+"""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Literal
+
+from paperhub.agents._canvas_budget import load_canvas_budget
+from paperhub.models.slide_domain import (
+    CompileCheckResult,
+    KeyFigureBundle,
+    PaperContextBundle,
+)
+from paperhub.pipelines.slide_pipeline.compile import compile_with_revise
+from paperhub.pipelines.slide_pipeline.math_auditor import audit_math_frames
+from paperhub.pipelines.slide_pipeline.overflow_detector import detect_overflow
+
+Script = Literal["en", "cjk"]
+
+_COMPILE_ERR_RE = re.compile(r"^!\s.+|^l\.\d+\s.+", re.MULTILINE)
+
+
+def _parse_compile_errors(log: str) -> list[str]:
+    """Extract pdflatex error lines (best-effort, lossy)."""
+    return [m.group(0).strip() for m in _COMPILE_ERR_RE.finditer(log)][:20]
+
+
+async def _noop_revise(log: str, tex: str) -> str:
+    """compile_check disables compile_with_revise's internal revise loop —
+    the slide_agent IS the revise loop via its tool calls."""
+    return tex
+
+
+async def run_compile_check(
+    *,
+    deck_tex: str,
+    bundles: list[PaperContextBundle],
+    figure_inventory: dict[str, KeyFigureBundle],
+    workdir: Path,
+    script: Script = "en",
+    tex_name: str = "deck.tex",
+) -> CompileCheckResult:
+    """Write deck.tex, compile once, run detectors, aggregate."""
+    compile_result = await compile_with_revise(
+        tex=deck_tex,
+        workdir=workdir,
+        tex_name=tex_name,
+        revise=_noop_revise,
+        max_retries=0,
+    )
+    compile_errors = (
+        _parse_compile_errors(compile_result.log) if not compile_result.ok else []
+    )
+
+    canvas_budget = load_canvas_budget()
+    frame_overflow = detect_overflow(
+        deck_tex=deck_tex,
+        figure_inventory=figure_inventory,
+        canvas_budget=canvas_budget,
+        pdflatex_log=compile_result.log,
+        script=script,
+    )
+    unrendered_math = audit_math_frames(deck_tex=deck_tex, bundles=bundles)
+
+    ok = (
+        compile_result.ok
+        and len(compile_errors) == 0
+        and len(unrendered_math) == 0
+    )
+    return CompileCheckResult(
+        ok=ok,
+        page_count=compile_result.page_count,
+        compile_errors=compile_errors,
+        frame_overflow=frame_overflow,
+        unrendered_math_frames=unrendered_math,
+    )
+
+
+async def run_density_check(
+    *,
+    deck_tex: str,
+    bundles: list[PaperContextBundle],
+    script: Script = "en",
+    figure_inventory: dict[str, KeyFigureBundle] | None = None,
+) -> CompileCheckResult:
+    """Run overflow + math detectors WITHOUT pdflatex (speculative-edit verify).
+
+    Returns a CompileCheckResult with page_count=0 and compile_errors=[] — the
+    agent reads frame_overflow + unrendered_math_frames to decide whether a
+    speculative split / replace would land within budget before paying the
+    compile cost.
+    """
+    canvas_budget = load_canvas_budget()
+    inv = figure_inventory or {}
+    frame_overflow = detect_overflow(
+        deck_tex=deck_tex,
+        figure_inventory=inv,
+        canvas_budget=canvas_budget,
+        pdflatex_log="",
+        script=script,
+    )
+    unrendered_math = audit_math_frames(deck_tex=deck_tex, bundles=bundles)
+    # ok is not meaningful here — there's no compile pass — but we set it to
+    # True iff the deterministic checks alone pass, for symmetry.
+    ok = len(unrendered_math) == 0 and all(
+        not s.exceeds_canvas_budget for s in frame_overflow
+    )
+    return CompileCheckResult(
+        ok=ok,
+        page_count=0,
+        compile_errors=[],
+        frame_overflow=frame_overflow,
+        unrendered_math_frames=unrendered_math,
+    )
