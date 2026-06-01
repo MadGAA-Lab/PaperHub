@@ -391,3 +391,135 @@ async def test_tool_call_budget_exhaustion_ships_imperfect(
     assert result.satisfied is False
     assert result.deck_tex == _GOOD_DECK
     assert result.tool_calls_used == 8
+
+
+def _make_fast_retry_helper(max_attempts: int) -> Any:
+    """Bypass the backoff sleeps for fast test execution."""
+    async def _retry(llm_acompletion: Any, **kwargs: Any) -> Any:
+        from paperhub.agents.slide_agent import _is_transient
+        last_exc: BaseException | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await llm_acompletion(**kwargs)
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= max_attempts or not _is_transient(exc):
+                    raise
+                # NO sleep for tests
+        if last_exc is not None:
+            raise last_exc
+
+    return _retry
+
+
+@pytest.mark.asyncio
+async def test_slide_agent_ships_imperfect_when_transient_retry_exhausts(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, fake_tracer: Any
+) -> None:
+    """All retry attempts fail with transient error AFTER a successful
+    initial_draft → ship the imperfect deck (satisfied=False), don't raise.
+    Real-API Run 351 / case 5 burned 183s on Gemini disconnects after a
+    deck was already drafted; this verifies the ship-imperfect fallback.
+    """
+    bundles = [_bundle()]
+    workdir = tmp_path / "slides"
+    workdir.mkdir()
+
+    class _Disconnect(Exception):
+        pass
+
+    call_count = {"n": 0}
+
+    async def flaky_llm(**kwargs: Any) -> Any:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # First call: initial_draft succeeds.
+            return _tool_call_msg("initial_draft", {"deck_tex": _GOOD_DECK})
+        # Every subsequent call fails with a transient error — the retry
+        # helper exhausts its budget and re-raises. The slide_agent's catch
+        # should detect deck_tex != "" and ship imperfect.
+        raise _Disconnect("Server disconnected")
+
+    async def fake_compile_check(**kw: Any) -> CompileCheckResult:
+        return CompileCheckResult(
+            ok=True,
+            page_count=1,
+            compile_errors=[],
+            frame_overflow=[],
+            unrendered_math_frames=[],
+        )
+
+    monkeypatch.setattr(
+        "paperhub.agents.slide_agent.run_compile_check", fake_compile_check
+    )
+    # Reduce retry budget for fast test execution.
+    monkeypatch.setattr(
+        "paperhub.agents.slide_agent._acompletion_with_retry",
+        _make_fast_retry_helper(max_attempts=2),
+    )
+
+    result = await run_slide_agent(
+        bundles=bundles,
+        task_description="x",
+        response_language="en",
+        resolved_preamble=r"\documentclass{beamer}",
+        workdir=workdir,
+        existing_deck_tex=None,
+        figure_inventory={},
+        memory_context="",
+        tracer=fake_tracer,
+        model="stub",
+        llm_acompletion=flaky_llm,
+    )
+
+    assert result.satisfied is False
+    assert result.deck_tex == _GOOD_DECK  # The partial deck survived.
+    assert result.tool_calls_used >= 1
+
+
+@pytest.mark.asyncio
+async def test_slide_agent_raises_when_transient_with_no_deck(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, fake_tracer: Any
+) -> None:
+    """Transient error BEFORE any deck state exists (initial_draft never
+    landed) → re-raise (nothing to ship)."""
+    bundles = [_bundle()]
+    workdir = tmp_path / "slides"
+    workdir.mkdir()
+
+    class _Disconnect(Exception):
+        pass
+
+    async def always_fails_llm(**kwargs: Any) -> Any:
+        raise _Disconnect("Server disconnected")
+
+    monkeypatch.setattr(
+        "paperhub.agents.slide_agent._acompletion_with_retry",
+        _make_fast_retry_helper(max_attempts=2),
+    )
+
+    with pytest.raises(Exception, match="Server disconnected"):
+        await run_slide_agent(
+            bundles=bundles,
+            task_description="x",
+            response_language="en",
+            resolved_preamble=r"\documentclass{beamer}",
+            workdir=workdir,
+            existing_deck_tex=None,
+            figure_inventory={},
+            memory_context="",
+            tracer=fake_tracer,
+            model="stub",
+            llm_acompletion=always_fails_llm,
+        )
+
+
+def test_acompletion_retry_default_attempts_is_5() -> None:
+    """Real Gemini outages can exceed 7s; bumped default from 3 to 5 attempts
+    (1s+2s+4s+8s+16s = ~31s patience)."""
+    import inspect
+
+    from paperhub.agents.slide_agent import _acompletion_with_retry
+
+    sig = inspect.signature(_acompletion_with_retry)
+    assert sig.parameters["max_attempts"].default == 5

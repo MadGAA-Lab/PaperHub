@@ -79,12 +79,15 @@ def _is_transient(exc: BaseException) -> bool:
 async def _acompletion_with_retry(
     llm_acompletion: LlmAcompletion,
     *,
-    max_attempts: int = 3,
+    max_attempts: int = 5,
     **kwargs: Any,
 ) -> Any:
     """Wrap one ``acompletion`` call in a transient-retry loop.
 
-    Backoff: 1s, 2s, 4s. Non-transient exceptions propagate immediately.
+    Backoff: 1s, 2s, 4s, 8s, 16s (~31s total patience). Non-transient
+    exceptions propagate immediately. Bumped from 3 attempts (~7s) after
+    real-API Run 351 saw the slide_agent crash on a Gemini disconnect
+    that lasted longer than 7s.
     """
     last_exc: BaseException | None = None
     for attempt in range(1, max_attempts + 1):
@@ -530,103 +533,127 @@ async def run_slide_agent(
         )
         tool_call_log: list[dict[str, Any]] = []
 
-        while tool_calls_used < max_tool_calls:
-            response = await _acompletion_with_retry(
-                llm_acompletion,
-                model=model,
-                messages=messages,
-                tools=tools_schema,
-                tool_choice="auto",
-            )
-            msg = response["choices"][0]["message"]
-            tool_calls = msg.get("tool_calls") or []
-            if not tool_calls:
-                # Agent gave up without done() — ship current state as imperfect.
-                break
-
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": msg.get("content"),
-                    "tool_calls": tool_calls,
-                }
-            )
-
-            for call in tool_calls:
-                if tool_calls_used >= max_tool_calls:
-                    break
-                tool_calls_used += 1
-                name = call["function"]["name"]
+        try:
+            while tool_calls_used < max_tool_calls:
                 try:
-                    args = json.loads(call["function"]["arguments"] or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-
-                state, result_str, new_check, this_done = await _dispatch_tool_call(
-                    name=name,
-                    args=args,
-                    state=state,
-                    bundles=bundles,
-                    figure_inventory=figure_inventory,
-                    workdir=workdir,
-                    session_id=session_id,
-                    conn=conn,
-                    script=script,
-                    pending_done_check=pending_compile_check,
-                )
-                if new_check is not None:
-                    pending_compile_check = new_check
-                if name == "replace_preamble":
-                    try:
-                        parsed = json.loads(result_str)
-                    except json.JSONDecodeError:
-                        parsed = {}
-                    if isinstance(parsed, dict) and parsed.get("persisted"):
-                        preamble_persisted = True
-                if this_done:
-                    accepted_done = True
-
-                tool_call_log.append(
-                    {
-                        "tool": name,
-                        "args_redacted": (
+                    response = await _acompletion_with_retry(
+                        llm_acompletion,
+                        model=model,
+                        messages=messages,
+                        tools=tools_schema,
+                        tool_choice="auto",
+                    )
+                except Exception as exc:
+                    # Transient retry exhausted (or non-transient error). If we
+                    # have ANY deck state from a prior tool call, ship it
+                    # imperfect (mirrors the budget-exhaustion ship-imperfect
+                    # path). If the deck is empty (initial_draft never landed),
+                    # re-raise — there's nothing to ship.
+                    if _is_transient(exc) and state.deck_tex:
+                        tool_call_log.append(
                             {
-                                k: (v[:200] if isinstance(v, str) else v)
-                                for k, v in args.items()
+                                "tool": "_transient_exhausted",
+                                "args_redacted": {},
+                                "result_excerpt": (
+                                    f"{type(exc).__name__}: {str(exc)[:200]}"
+                                ),
                             }
-                            if isinstance(args, dict)
-                            else {}
-                        ),
-                        "result_excerpt": result_str[:400],
-                    }
-                )
+                        )
+                        break
+                    raise
+                msg = response["choices"][0]["message"]
+                tool_calls = msg.get("tool_calls") or []
+                if not tool_calls:
+                    # Agent gave up without done() — ship current state as imperfect.
+                    break
+
                 messages.append(
                     {
-                        "role": "tool",
-                        "tool_call_id": call["id"],
-                        "name": name,
-                        "content": result_str,
+                        "role": "assistant",
+                        "content": msg.get("content"),
+                        "tool_calls": tool_calls,
                     }
                 )
 
+                for call in tool_calls:
+                    if tool_calls_used >= max_tool_calls:
+                        break
+                    tool_calls_used += 1
+                    name = call["function"]["name"]
+                    try:
+                        args = json.loads(call["function"]["arguments"] or "{}")
+                    except json.JSONDecodeError:
+                        args = {}
+
+                    state, result_str, new_check, this_done = await _dispatch_tool_call(
+                        name=name,
+                        args=args,
+                        state=state,
+                        bundles=bundles,
+                        figure_inventory=figure_inventory,
+                        workdir=workdir,
+                        session_id=session_id,
+                        conn=conn,
+                        script=script,
+                        pending_done_check=pending_compile_check,
+                    )
+                    if new_check is not None:
+                        pending_compile_check = new_check
+                    if name == "replace_preamble":
+                        try:
+                            parsed = json.loads(result_str)
+                        except json.JSONDecodeError:
+                            parsed = {}
+                        if isinstance(parsed, dict) and parsed.get("persisted"):
+                            preamble_persisted = True
+                    if this_done:
+                        accepted_done = True
+
+                    tool_call_log.append(
+                        {
+                            "tool": name,
+                            "args_redacted": (
+                                {
+                                    k: (v[:200] if isinstance(v, str) else v)
+                                    for k, v in args.items()
+                                }
+                                if isinstance(args, dict)
+                                else {}
+                            ),
+                            "result_excerpt": result_str[:400],
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call["id"],
+                            "name": name,
+                            "content": result_str,
+                        }
+                    )
+
+                    if accepted_done:
+                        break
                 if accepted_done:
                     break
-            if accepted_done:
-                break
-
-        step.record_result(
-            {
-                "satisfied": accepted_done,
-                "tool_calls_used": tool_calls_used,
-                "final_deck_len": len(state.deck_tex),
-                "last_compile_check": (
-                    pending_compile_check.model_dump()
-                    if pending_compile_check
-                    else None
-                ),
-                "tool_call_log": tool_call_log,
-            }
-        )
+        finally:
+            # Defense-in-depth: always record the partial trace, even if an
+            # unexpected exception escapes the loop body. Without this the
+            # tracer would capture status=error but lose the tool_call_log —
+            # an agent-flow observability iron-rule violation.
+            step.record_result(
+                {
+                    "satisfied": accepted_done,
+                    "tool_calls_used": tool_calls_used,
+                    "final_deck_len": len(state.deck_tex),
+                    "last_compile_check": (
+                        pending_compile_check.model_dump()
+                        if pending_compile_check
+                        else None
+                    ),
+                    "tool_call_log": tool_call_log,
+                }
+            )
 
     return SlideAgentResult(
         deck_tex=state.deck_tex,
