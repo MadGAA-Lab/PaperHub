@@ -113,11 +113,15 @@ export interface DeckMeta {
   deck_id: number;
   session_id: number;
   page_count: number;
-  theme: string;
+  /** F4.5: dropped from the backend schema; left for backwards compat with
+   *  pre-F4.5 responses. Always undefined on a fresh F4.5+ backend. */
+  theme?: string;
   status: "ok" | "error";
   plan: unknown;
   speaker_notes: Record<string, string>;
   contributing_paper_ids: number[];
+  /** F4.5: the version snapshot the SlidesPanel is rendering right now. */
+  current_version_id?: string | null;
   updated_at: string;
 }
 
@@ -131,6 +135,10 @@ export interface DeckEventData {
    *  backend emits `{id}` only, so `title` is optional. */
   contributing_papers: { id: number; title?: string }[];
   has_notes: boolean;
+  /** F4.5: the version snapshot THIS turn stamped (null on legacy rows
+   *  that pre-date `runs.deck_version_id`). Drives the per-turn DeckChip's
+   *  "Switch to this version" affordance — older cards restore via this id. */
+  version_id?: string | null;
 }
 
 export interface ChatMessage {

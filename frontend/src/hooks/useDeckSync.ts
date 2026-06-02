@@ -61,6 +61,10 @@ export function useDeckSync(): void {
           status: d.status,
           contributing_papers: [],
           has_notes: Object.keys(d.speaker_notes).length > 0,
+          // F4.5: keep the currently-active version_id so per-turn DeckChips
+          // can tell whether they are the active card on first render (the
+          // SSE `deck` event refreshes this on every generate/edit).
+          version_id: d.current_version_id ?? null,
         };
         setDeck(backendSessionId, event);
       })
