@@ -589,7 +589,21 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
         # title/authors/arXiv-year; multi-paper -> user message as talk title
         # plus each lead-author surname.
         user_msg = effective_query(state) or state.get("user_message", "") or ""
-        talk_title_arg = user_msg.strip()[:80] if user_msg.strip() else "Conference Talk"
+        if len(papers) == 1:
+            # Single-paper: build_title_metadata uses the paper's own title;
+            # talk_title is unused.
+            talk_title_arg = "Conference Talk"
+        else:
+            # Multi-paper: synthesize a concise talk title via a small LLM
+            # call instead of dumping the user's prompt verbatim into \title{}.
+            from paperhub.agents.title_synthesizer import synthesize_talk_title
+
+            talk_title_arg = await synthesize_talk_title(
+                bundles=bundles,
+                user_message=user_msg,
+                response_language=lang,
+                model=deps.notes_model,
+            )
         title_meta = build_title_metadata(
             [
                 {

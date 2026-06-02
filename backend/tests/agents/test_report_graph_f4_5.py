@@ -462,8 +462,9 @@ async def test_generate_multi_paper_uses_user_message_as_talk_title(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """For multi-paper decks, the talk_title comes from the user message and
-    \\author lists each paper's lead-author surname."""
+    """For multi-paper decks, the talk_title comes from the title synthesizer
+    (a small LLM call over the gathered bundles + user message) — NOT the
+    user message verbatim — and \\author lists each paper's lead-author surname."""
     for pid, (title, authors_json, surname_dir) in enumerate(
         [
             ("Paper One", '["Anna Alice"]', "papA"),
@@ -536,6 +537,14 @@ async def test_generate_multi_paper_uses_user_message_as_talk_title(
             preamble_persisted=False,
         )
 
+    # Patch the title synthesizer to return a deterministic synthesized title
+    # so the assertion is on the integration, not on a live LLM.
+    async def fake_synth(**kw: Any) -> str:
+        return "Efficient VLA: Cross-Paper Synthesis"
+
+    import paperhub.agents.title_synthesizer as ts
+
+    monkeypatch.setattr(ts, "synthesize_talk_title", fake_synth)
     monkeypatch.setattr(rg, "run_gather_context", fake_gather)
     monkeypatch.setattr(rg, "run_slide_agent", fake_agent)
     monkeypatch.setattr(rg, "_pdflatex_available", lambda: True)
@@ -555,9 +564,8 @@ async def test_generate_multi_paper_uses_user_message_as_talk_title(
 
     assert len(captured_preambles) == 1
     preamble = captured_preambles[0]
-    # \title should contain the user message (truncated to 80 chars, escaped).
-    assert "\\title{" in preamble
-    assert "Cross-paper synthesis" in preamble or "VLA" in preamble
+    # \title must come from the synthesizer, NOT the raw user message.
+    assert "\\title{Efficient VLA: Cross-Paper Synthesis}" in preamble
     # \author should list the three lead-author surnames.
     assert "\\author{" in preamble
     assert "Alice" in preamble and "Bob" in preamble and "Carol" in preamble

@@ -1,0 +1,23 @@
+# slides_title_synthesizer_v1 — derive a concise multi-paper talk title.
+system: |
+  You synthesize a concise talk title for a multi-paper academic
+  presentation. The title appears on the deck's title slide. Be terse
+  and substantive — <=60 characters, no quotes, no trailing punctuation,
+  no marketing fluff.
+
+  Output ONLY the title as a single line of text. No JSON, no markdown,
+  no "Title:" prefix, no explanation. Just the title.
+
+user: |
+  Papers in this deck:
+  {paper_titles_block}
+
+  Narrative summaries:
+  {narratives_block}
+
+  User's framing of the talk:
+  {user_message}
+
+  Output language: {response_language}
+
+  Emit the talk title now (<=60 chars).
