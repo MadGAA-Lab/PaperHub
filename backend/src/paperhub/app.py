@@ -26,7 +26,11 @@ from paperhub.api import papers as papers_api
 from paperhub.api import sessions as sessions_api
 from paperhub.config import Settings, load_settings
 from paperhub.db.connection import configure_connection, open_db
-from paperhub.db.migrate import apply_schema, purge_deleted_sessions
+from paperhub.db.migrate import (
+    apply_schema,
+    purge_deleted_sessions,
+    sweep_orphan_session_folders,
+)
 from paperhub.mcp import (
     MCPRegistry,
     build_paperhub_memory_server,
@@ -60,10 +64,21 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with open_db(settings.db_path) as conn:
         await apply_schema(conn)
         # Reclaim storage from chats soft-deleted longer ago than the
-        # retention window (their messages/runs/papers cascade away).
-        purged = await purge_deleted_sessions(conn, settings.session_retention_days)
+        # retention window (their messages/runs/papers cascade away, and
+        # their workspace/chat_session/<id>/ folder is rmtree'd).
+        purged = await purge_deleted_sessions(
+            conn,
+            settings.session_retention_days,
+            workspace_dir=settings.workspace_dir,
+        )
         if purged:
             _LOG.info("purged %d soft-deleted session(s) past retention", purged)
+        # Sweep orphan folders (no matching chat_sessions row — partial-write
+        # crashes, pre-cascade leaks). Runs regardless of whether anything was
+        # purged this boot.
+        orphans = await sweep_orphan_session_folders(conn, settings.workspace_dir)
+        if orphans:
+            _LOG.info("swept %d orphan session folder(s)", orphans)
     # ChromaStore holds a PersistentClient; chromadb manages its own cleanup.
     app.state.chroma = ChromaStore(settings.chroma_dir)
 

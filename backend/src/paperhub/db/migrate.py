@@ -1,6 +1,12 @@
+import asyncio
+import logging
+import shutil
 from importlib.resources import files
+from pathlib import Path
 
 import aiosqlite
+
+_LOG = logging.getLogger(__name__)
 
 
 async def _rebuild_papers_table(conn: aiosqlite.Connection) -> None:
@@ -62,23 +68,97 @@ async def _rebuild_messages_table(conn: aiosqlite.Connection) -> None:
 
 
 async def purge_deleted_sessions(
-    conn: aiosqlite.Connection, retention_days: int
+    conn: aiosqlite.Connection,
+    retention_days: int,
+    *,
+    workspace_dir: Path | None = None,
 ) -> int:
     """Hard-delete soft-deleted sessions whose tombstone is older than the
-    retention window, reclaiming their cascaded papers/messages/runs/tool_calls.
+    retention window. Cascades the DB rows (papers/messages/runs/tool_calls/
+    decks/deck_slides/slide_style_overrides) AND removes each purged session's
+    on-disk folder under ``workspace_dir/chat_session/<session_id>/`` when
+    ``workspace_dir`` is provided.
 
     Returns the number of sessions purged. A retention of 0 purges every
-    tombstoned session immediately. Requires `PRAGMA foreign_keys = ON` for the
-    cascade (open_db sets this).
+    tombstoned session immediately. Requires ``PRAGMA foreign_keys = ON`` for
+    the cascade (open_db sets this). Per-folder cleanup is best-effort: a
+    missing or locked folder logs a warning and continues with the rest.
     """
-    cur = await conn.execute(
+    # Capture IDs first so we can remove their folders after the cascade.
+    async with conn.execute(
+        "SELECT id FROM chat_sessions "
+        "WHERE deleted_at IS NOT NULL "
+        "AND deleted_at < datetime('now', ?)",
+        (f"-{int(retention_days)} days",),
+    ) as cur:
+        purged_ids = [row[0] for row in await cur.fetchall()]
+
+    if not purged_ids:
+        return 0
+
+    del_cur = await conn.execute(
         "DELETE FROM chat_sessions "
         "WHERE deleted_at IS NOT NULL "
         "AND deleted_at < datetime('now', ?)",
         (f"-{int(retention_days)} days",),
     )
     await conn.commit()
-    return cur.rowcount if cur.rowcount is not None else 0
+    n_purged = (
+        del_cur.rowcount if del_cur.rowcount is not None else len(purged_ids)
+    )
+
+    # Cascade to disk. Soft-fails per-folder so a missing/locked folder doesn't
+    # block the rest. Each folder is workspace_dir/chat_session/<id>/.
+    if workspace_dir is not None:
+        sessions_root = Path(workspace_dir) / "chat_session"
+        for sid in purged_ids:
+            folder = sessions_root / str(sid)
+            if folder.exists():
+                try:
+                    await asyncio.to_thread(shutil.rmtree, folder)
+                except Exception as exc:  # noqa: BLE001
+                    _LOG.warning(
+                        "purge_deleted_sessions: failed to remove %s: %r",
+                        folder, exc,
+                    )
+    return n_purged
+
+
+async def sweep_orphan_session_folders(
+    conn: aiosqlite.Connection, workspace_dir: Path
+) -> int:
+    """Remove ``workspace_dir/chat_session/<id>/`` folders whose id has NO row
+    in ``chat_sessions`` (active or tombstoned). Defends against partial-write
+    crashes during session creation and pre-fix leaks from before
+    ``purge_deleted_sessions`` cascaded to disk.
+
+    Only numeric subdirectories are considered — non-digit names (operator
+    scratch like ``scratch/`` or ``tmp_data/``) are left alone. Best-effort
+    per-folder: a failure logs and continues.
+
+    Returns the number of folders removed.
+    """
+    sessions_root = Path(workspace_dir) / "chat_session"
+    if not sessions_root.exists():
+        return 0
+    async with conn.execute("SELECT id FROM chat_sessions") as cur:
+        db_ids = {row[0] for row in await cur.fetchall()}
+    removed = 0
+    for folder in sessions_root.iterdir():
+        if not folder.is_dir():
+            continue
+        if not folder.name.isdigit():
+            continue
+        if int(folder.name) not in db_ids:
+            try:
+                await asyncio.to_thread(shutil.rmtree, folder)
+                removed += 1
+            except Exception as exc:  # noqa: BLE001
+                _LOG.warning(
+                    "sweep_orphan_session_folders: failed to remove %s: %r",
+                    folder, exc,
+                )
+    return removed
 
 
 async def apply_schema(conn: aiosqlite.Connection) -> None:
