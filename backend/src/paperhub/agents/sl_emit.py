@@ -64,67 +64,104 @@ def _is_inside_layout_env(tex: str, pos: int) -> bool:
     return False
 
 
+def _has_centering_in_prefix(tex: str, fig_start: int) -> bool:
+    """Return True if ``\\centering`` (or ``\\centerline``/``\\begin{center}``)
+    is already present in the immediate prefix of the figure within the same
+    frame body.
+
+    "Immediate prefix" means: walk backwards from ``fig_start`` until we hit
+    a ``\\begin{frame}`` (or start of file). If we see a centering directive
+    along the way that has NOT been closed by ``\\end{center}``, the figure
+    is already in a centered paragraph context.
+    """
+    # Find the nearest preceding \begin{frame}; only scan within that frame body.
+    frame_open = tex.rfind("\\begin{frame}", 0, fig_start)
+    head_start = frame_open if frame_open != -1 else 0
+    head = tex[head_start:fig_start]
+    # \centering / \centerline are line-level switches that persist within
+    # the current group — if present anywhere in the frame body before the
+    # figure, the figure is already centered.
+    if re.search(r"\\centering\b", head) or re.search(r"\\centerline\b", head):
+        return True
+    # \begin{center} ... \end{center} — only counts if currently open.
+    opens = len(re.findall(r"\\begin\{center\}", head))
+    closes = len(re.findall(r"\\end\{center\}", head))
+    return opens > closes
+
+
 def enforce_figure_paragraph_break(tex: str) -> str:
-    """Inject ``\\par`` between ``\\includegraphics`` (+ trailing spacing) and
-    the next non-whitespace content when the LLM omitted the blank line.
+    """Make ``\\includegraphics`` in a frame body unambiguously stand alone.
 
     Why: with ``keepaspectratio`` + height-bound includegraphics, the rendered
-    image is narrower than ``\\linewidth``; without a paragraph break LaTeX
-    flows the following text to the RIGHT of the image (inline box behavior).
-    A blank line / ``\\par`` forces the text BELOW the figure.
+    image is narrower than ``\\linewidth``; without a hard paragraph break,
+    LaTeX (and especially Beamer + xeCJK) flows the following text to the
+    RIGHT of the image (inline box behavior). The single-``\\par`` injection
+    we previously did was silently swallowed by Beamer-xeCJK; the working
+    English pattern uses BOTH ``\\centering`` BEFORE the figure AND a blank
+    line AFTER the figure block.
+
+    For each ``\\includegraphics`` not inside a column/figure env, this
+    function:
+
+      1. Injects ``\\centering`` on its own line BEFORE the figure if not
+         already present in the same frame body. ``\\centering`` puts the
+         surrounding group into centered alignment AND breaks the paragraph
+         context, which is what makes Beamer-xeCJK honor the figure as a
+         standalone block.
+      2. Injects a literal blank line (``\\n\\n``) between the end of the
+         figure block (the ``\\includegraphics`` + any trailing
+         ``\\vspace``/``\\hspace``) and the next non-whitespace content.
+         The blank line is what LaTeX-Beamer-xeCJK actually honors as a
+         hard paragraph break; a bare ``\\par`` is unreliable in this
+         combination.
 
     The function is idempotent and conservative:
-      - Skips if a blank line / ``\\par`` / ``\\\\`` already follows.
-      - Skips if the figure is inside ``\\begin{column}`` / ``\\begin{columns}``
-        / ``\\begin{figure}`` / ``\\begin{wrapfigure}`` (those envs own
-        their own layout).
-      - Skips if the next non-whitespace token is ``\\end{...}`` (no text
-        follows — nothing to push down).
+      - Skips when ``\\centering`` is already present in the prefix.
+      - Skips when a blank line / ``\\par`` / ``\\\\`` already follows.
+      - Skips when the figure is inside ``\\begin{column}`` /
+        ``\\begin{columns}`` / ``\\begin{figure}`` / ``\\begin{wrapfigure}``.
+      - Skips when the next non-whitespace token is ``\\end{...}``.
     """
     out_parts: list[str] = []
     cursor = 0
     for m in _INCLUDEGRAPHICS_RE.finditer(tex):
+        # Skip when inside a layout-managing environment — this single early
+        # return guards both the centering and blank-line injections.
+        if _is_inside_layout_env(tex, m.start()):
+            continue
+
         # Find the end of the includegraphics "block" — the figure call
         # itself plus any immediately-following \v/hspace commands and
-        # whitespace (including newlines, but NOT a blank line which itself
+        # whitespace (including a single newline, but NOT a blank line which
         # already terminates the block correctly).
         block_end = m.end()
-        # Walk past any whitespace + spacing commands following the figure.
         scan = block_end
         while scan < len(tex):
-            # Skip horizontal whitespace + a single newline (we want to
-            # stop the moment we see a blank line — that's the desired
-            # paragraph break).
-            ws_match = re.match(r"[ \t]*\n", tex[scan:])
-            if ws_match:
-                scan += ws_match.end()
-            spacing_match = _SPACING_CMD_RE.match(tex[scan:])
-            if spacing_match:
-                # Consume the spacing command; include any trailing
-                # horizontal whitespace before the next newline.
-                scan += spacing_match.end()
+            # Try to consume a spacing cmd that's either right at scan or
+            # preceded only by horizontal whitespace + a single newline
+            # (i.e. on the next line, indented).
+            ws_then_cmd = re.match(
+                r"([ \t]*\n)?[ \t]*(\\[hv]space\*?\s*\{[^}]*\})",
+                tex[scan:],
+            )
+            if ws_then_cmd:
+                scan += ws_then_cmd.end()
+                # Consume trailing horizontal whitespace after the cmd.
                 tail = re.match(r"[ \t]*", tex[scan:])
                 if tail:
                     scan += tail.end()
                 continue
             break
 
-        # Now ``scan`` is after the figure + trailing spacing cmds, sitting on
+        # ``scan`` is now after the figure + trailing spacing cmds, sitting on
         # whatever comes next (possibly a newline starting a blank line, or
         # the next content token).
         remainder = tex[scan:]
 
-        # 1. If a blank line / explicit \par / \\ already exists between the
-        #    figure-spacing block and the next content → nothing to do.
-        if (
-            re.match(r"\s*\n\s*\n", remainder)
-            or re.match(r"\s*\\par\b", remainder)
-            or re.match(r"\s*\\\\", remainder)
-        ):
-            continue
-
-        # 2. Look ahead at the first non-whitespace token. If it's an \end{...}
-        #    (frame, column, etc.) → no text follows → no injection.
+        # Look ahead at the first non-whitespace token. If it's an \end{...}
+        # (frame, column, etc.) → no text follows → no injection at all
+        # (neither centering nor blank line — a standalone figure that ends
+        # the frame doesn't need either).
         nonspace = re.match(r"\s*", remainder)
         next_pos = scan + (nonspace.end() if nonspace else 0)
         if next_pos >= len(tex):
@@ -132,28 +169,64 @@ def enforce_figure_paragraph_break(tex: str) -> str:
         if tex[next_pos:].startswith("\\end{"):
             continue
 
-        # 3. Skip when the figure is inside a layout-managing environment.
-        if _is_inside_layout_env(tex, m.start()):
+        # Decide what already exists.
+        has_centering = _has_centering_in_prefix(tex, m.start())
+        has_paragraph_break = bool(
+            re.match(r"\s*\n\s*\n", remainder)
+            or re.match(r"\s*\\par\b", remainder)
+            or re.match(r"\s*\\\\", remainder)
+        )
+
+        # Nothing to do if BOTH are already present.
+        if has_centering and has_paragraph_break:
             continue
 
-        # 4. Inject \par right before the next content. We emit everything up
-        #    to ``scan`` verbatim, then ``\par\n`` plus the indentation of the
-        #    next line, then continue.
-        out_parts.append(tex[cursor:scan])
-        # Compute indent of the next non-empty line so the injected \par
-        # blends with surrounding style.
-        line_match = re.match(r"([ \t]*)\S", remainder)
-        indent = line_match.group(1) if line_match else ""
-        # Strip any leading whitespace-only newlines from ``remainder`` so we
-        # don't double-pad.
-        leading_ws = re.match(r"[ \t]*\n", remainder)
-        if leading_ws:
-            # Preserve a single newline before the \par for readability.
-            out_parts.append("\n")
-            cursor = scan + leading_ws.end()
-        else:
-            cursor = scan
-        out_parts.append(f"{indent}\\par\n")
+        # Emit everything from the previous cursor up through the figure's
+        # opening position; we may need to inject \centering right before it.
+        out_parts.append(tex[cursor:m.start()])
+
+        if not has_centering:
+            # Determine indent from the figure's own line.
+            line_start = tex.rfind("\n", 0, m.start()) + 1
+            fig_line_prefix = tex[line_start:m.start()]
+            indent_match = re.match(r"[ \t]*", fig_line_prefix)
+            indent = indent_match.group(0) if indent_match else ""
+            # Insert \centering on its own line just before the figure. If the
+            # figure's line had leading whitespace already in the output (it
+            # did — we emitted up to m.start()), we drop our own line onto a
+            # fresh line above it.
+            out_parts.append(f"\\centering\n{indent}")
+
+        # Emit the figure block + trailing spacing/whitespace verbatim
+        # (everything from m.start() up to scan).
+        out_parts.append(tex[m.start():scan])
+        cursor = scan
+
+        if not has_paragraph_break:
+            # Inject a blank line between the figure block and the next
+            # content. We want exactly ``\n\n`` separating them.
+            leading_ws = re.match(r"[ \t]*\n", remainder)
+            if leading_ws:
+                # The figure block ended without a trailing newline emitted
+                # yet — emit ``\n\n`` (consuming the existing single newline)
+                # then keep the next content's indent intact.
+                out_parts.append("\n\n")
+                cursor = scan + leading_ws.end()
+                # Strip the trailing whitespace from what we just emitted
+                # would be wrong; the next content's indent comes from the
+                # remaining slice we'll emit at the end. So we simply
+                # advance past the existing single newline and emit two.
+            else:
+                # No newline before the next content — inject ``\n\n`` plus
+                # the deduced indent of the next non-empty content.
+                line_match = re.match(r"([ \t]*)\S", remainder)
+                indent = line_match.group(1) if line_match else ""
+                out_parts.append(f"\n\n{indent}")
+                # Skip leading horizontal whitespace from remainder so we
+                # don't double-indent.
+                ws = re.match(r"[ \t]*", remainder)
+                if ws:
+                    cursor = scan + ws.end()
 
     out_parts.append(tex[cursor:])
     return "".join(out_parts)
