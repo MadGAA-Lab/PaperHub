@@ -352,3 +352,212 @@ async def test_generate_short_circuits_when_pdflatex_missing(
             final = payload["final_response"]
     assert not called
     assert "latex" in final.lower()
+
+
+@pytest.mark.asyncio
+async def test_generate_injects_title_metadata_into_preamble(
+    conn: aiosqlite.Connection,
+    fake_tracer: Tracer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """report_graph._generate must inject \\title{...}/\\author{...}/\\date{...}
+    into the preamble passed to slide_agent — derived from paper_content rows.
+    Otherwise \\titlepage renders blank (F4.5 regression: F4.2's
+    build_title_metadata wiring was dropped by the Phase 10 rewrite)."""
+    # Seed one paper with a known title/authors/year/arxiv_id.
+    source = tmp_path / "papA" / "source"
+    _seed_asset(source)
+    await conn.execute(
+        "INSERT INTO paper_content (content_key, kind, arxiv_id, title, abstract, "
+        "authors_json, year, source_path, source_dir_path, html_path) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            "arxiv:2509.22093v1",
+            "arxiv",
+            "2509.22093v1",
+            "Action-aware Dynamic Pruning for VLA",
+            "abs",
+            '["Feng Pei", "Jiawei Chen"]',
+            2025,
+            "p",
+            str(source),
+            "h",
+        ),
+    )
+    await conn.execute(
+        "INSERT INTO papers (session_id, paper_content_id, enabled) VALUES (1,1,1)"
+    )
+    await conn.commit()
+
+    captured_preambles: list[str] = []
+
+    async def fake_gather(**kw: Any) -> PaperContextBundle:
+        return PaperContextBundle(
+            paper_id=kw["paper_id"],
+            paper_idx=kw["paper_idx"],
+            title=kw["paper_title"],
+            authors=kw["paper_authors"],
+            year=kw["paper_year"],
+            narrative_summary="x",
+            key_figures=[],
+            key_equations=[],
+            section_excerpts=[],
+            paper_newcommands=[],
+        )
+
+    async def fake_agent(**kw: Any) -> SlideAgentResult:
+        captured_preambles.append(kw["resolved_preamble"])
+        return SlideAgentResult(
+            deck_tex=(
+                r"\documentclass{beamer}"
+                r"\begin{document}"
+                r"\begin{frame}{x}body\end{frame}"
+                r"\end{document}"
+            ),
+            preamble="",
+            satisfied=True,
+            tool_calls_used=1,
+            last_compile_check=CompileCheckResult(
+                ok=True,
+                page_count=1,
+                compile_errors=[],
+                frame_overflow=[],
+                unrendered_math_frames=[],
+            ),
+            preamble_persisted=False,
+        )
+
+    monkeypatch.setattr(rg, "run_gather_context", fake_gather)
+    monkeypatch.setattr(rg, "run_slide_agent", fake_agent)
+    monkeypatch.setattr(rg, "_pdflatex_available", lambda: True)
+
+    deps = _deps(_NullAdapter(), fake_tracer, conn, tmp_path)
+    state = _state()
+    state["run_id"] = fake_tracer.run_id
+    state["user_message"] = "Generate slides for this paper."
+    state["effective_query"] = "Generate slides for this paper."
+
+    graph = build_report_subgraph(deps)
+    async for _mode, _payload in graph.astream(
+        state, stream_mode=["custom", "values"]
+    ):
+        pass
+
+    assert len(captured_preambles) == 1
+    preamble = captured_preambles[0]
+    # \title must match the paper's title (single-paper logic).
+    assert "\\title{Action-aware Dynamic Pruning for VLA}" in preamble
+    # \author must list at least one surname.
+    assert "\\author{" in preamble
+    assert "Pei" in preamble or "Chen" in preamble
+    # \date must include the arxiv id + year.
+    assert "\\date{arXiv:2509.22093v1 (2025)}" in preamble
+
+
+@pytest.mark.asyncio
+async def test_generate_multi_paper_uses_user_message_as_talk_title(
+    conn: aiosqlite.Connection,
+    fake_tracer: Tracer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """For multi-paper decks, the talk_title comes from the user message and
+    \\author lists each paper's lead-author surname."""
+    for pid, (title, authors_json, surname_dir) in enumerate(
+        [
+            ("Paper One", '["Anna Alice"]', "papA"),
+            ("Paper Two", '["Brian Bob"]', "papB"),
+            ("Paper Three", '["Cara Carol"]', "papC"),
+        ],
+        start=1,
+    ):
+        source = tmp_path / surname_dir / "source"
+        _seed_asset(source)
+        await conn.execute(
+            "INSERT INTO paper_content (content_key, kind, arxiv_id, title, "
+            "abstract, authors_json, year, source_path, source_dir_path, html_path) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                f"arxiv:p{pid}",
+                "arxiv",
+                f"p{pid}",
+                title,
+                "",
+                authors_json,
+                2025,
+                "p",
+                str(source),
+                "h",
+            ),
+        )
+        await conn.execute(
+            "INSERT INTO papers (session_id, paper_content_id, enabled) "
+            "VALUES (1, ?, 1)",
+            (pid,),
+        )
+    await conn.commit()
+
+    captured_preambles: list[str] = []
+
+    async def fake_gather(**kw: Any) -> PaperContextBundle:
+        return PaperContextBundle(
+            paper_id=kw["paper_id"],
+            paper_idx=kw["paper_idx"],
+            title=kw["paper_title"],
+            authors=kw["paper_authors"],
+            year=kw["paper_year"],
+            narrative_summary="x",
+            key_figures=[],
+            key_equations=[],
+            section_excerpts=[],
+            paper_newcommands=[],
+        )
+
+    async def fake_agent(**kw: Any) -> SlideAgentResult:
+        captured_preambles.append(kw["resolved_preamble"])
+        return SlideAgentResult(
+            deck_tex=(
+                r"\documentclass{beamer}"
+                r"\begin{document}"
+                r"\begin{frame}{x}body\end{frame}"
+                r"\end{document}"
+            ),
+            preamble="",
+            satisfied=True,
+            tool_calls_used=1,
+            last_compile_check=CompileCheckResult(
+                ok=True,
+                page_count=1,
+                compile_errors=[],
+                frame_overflow=[],
+                unrendered_math_frames=[],
+            ),
+            preamble_persisted=False,
+        )
+
+    monkeypatch.setattr(rg, "run_gather_context", fake_gather)
+    monkeypatch.setattr(rg, "run_slide_agent", fake_agent)
+    monkeypatch.setattr(rg, "_pdflatex_available", lambda: True)
+
+    deps = _deps(_NullAdapter(), fake_tracer, conn, tmp_path)
+    state = _state()
+    state["run_id"] = fake_tracer.run_id
+    user_msg = "Cross-paper synthesis: 12-minute conference talk on efficient VLA"
+    state["user_message"] = user_msg
+    state["effective_query"] = user_msg
+
+    graph = build_report_subgraph(deps)
+    async for _mode, _payload in graph.astream(
+        state, stream_mode=["custom", "values"]
+    ):
+        pass
+
+    assert len(captured_preambles) == 1
+    preamble = captured_preambles[0]
+    # \title should contain the user message (truncated to 80 chars, escaped).
+    assert "\\title{" in preamble
+    assert "Cross-paper synthesis" in preamble or "VLA" in preamble
+    # \author should list the three lead-author surnames.
+    assert "\\author{" in preamble
+    assert "Alice" in preamble and "Bob" in preamble and "Carol" in preamble

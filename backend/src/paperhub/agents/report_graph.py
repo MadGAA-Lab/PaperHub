@@ -85,6 +85,7 @@ from paperhub.pipelines.slide_pipeline.figure_inventory import (
     verify_and_fix_graphics,
 )
 from paperhub.pipelines.slide_pipeline.history import VersionHistory
+from paperhub.pipelines.slide_pipeline.title_meta import build_title_metadata
 from paperhub.tracing.tracer import Tracer
 
 # F4.5: only used by the NOTES/EDIT sub-flows' deck staging needs; the
@@ -578,11 +579,41 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
             session_id=int(state["session_id"]), conn=deps.conn
         )
 
+        # F4.5 fix (closes the empty-title-page bug): F4.2 wired
+        # ``build_title_metadata`` into the deleted ``sl_assemble`` step so the
+        # preamble had \title/\author/\date when the agent's \titlepage renders.
+        # The Phase 10 rewrite dropped this; \titlepage now renders blank. Bake
+        # the metadata into the resolved preamble BEFORE handing it to the
+        # slide_agent so the agent's emitted \begin{frame}\titlepage\end{frame}
+        # has the declarations it needs. Single paper -> paper's own
+        # title/authors/arXiv-year; multi-paper -> user message as talk title
+        # plus each lead-author surname.
+        user_msg = effective_query(state) or state.get("user_message", "") or ""
+        talk_title_arg = user_msg.strip()[:80] if user_msg.strip() else "Conference Talk"
+        title_meta = build_title_metadata(
+            [
+                {
+                    "title": p.get("title"),
+                    "authors": p.get("authors") or [],
+                    "year": p.get("year"),
+                    "arxiv_id": p.get("arxiv_id"),
+                }
+                for p in papers
+            ],
+            talk_title=talk_title_arg,
+        )
+        preamble_with_title = resolved_preamble.rstrip() + "\n"
+        preamble_with_title += f"\\title{{{title_meta.title}}}\n"
+        if title_meta.author:
+            preamble_with_title += f"\\author{{{title_meta.author}}}\n"
+        if title_meta.date:
+            preamble_with_title += f"\\date{{{title_meta.date}}}\n"
+
         agent_result = await run_slide_agent(
             bundles=bundles,
             task_description=effective_query(state) or state.get("user_message", ""),
             response_language=lang,
-            resolved_preamble=resolved_preamble,
+            resolved_preamble=preamble_with_title,
             workdir=slides_dir,
             existing_deck_tex=None,  # GENERATE — no prior deck content
             figure_inventory=figure_inventory,
