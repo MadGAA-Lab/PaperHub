@@ -18,6 +18,12 @@ interface SlidesState {
    *  recompile). The Slides panel keys its PDF fetch on this so a completed
    *  edit forces a cache-busted refetch of the freshly compiled deck. */
   deckRevisionBySession: Record<number, number>;
+  /** Per-session "version-restore in flight" flag. The DeckChip's Switch
+   *  affordance flips this true around the restore POST + getDeck round-trip;
+   *  the SlidesPanel folds it into its mask so the old PDF doesn't sit on
+   *  screen pretending it's the restored one. Mirrors how the chat-turn
+   *  ``busy`` prop masks during an edit. */
+  restoringBySession: Record<number, boolean>;
   currentPageBySession: Record<number, number>;
   /** Draggable filmstrip rail width (px). Persisted. */
   filmstripWidth: number;
@@ -26,6 +32,7 @@ interface SlidesState {
   setDeck: (sid: number, deck: DeckEventData) => void;
   clearDeck: (sid: number) => void;
   setCurrentPage: (sid: number, page: number) => void;
+  setRestoring: (sid: number, restoring: boolean) => void;
   toggleOpen: () => void;
   openPanel: () => void;
   closePanel: () => void;
@@ -39,6 +46,7 @@ export const useSlidesStore = create<SlidesState>()(
       open: false,
       deckBySession: {},
       deckRevisionBySession: {},
+      restoringBySession: {},
       currentPageBySession: {},
       filmstripWidth: FILMSTRIP_DEFAULT_WIDTH,
       noteHeight: NOTE_DEFAULT_HEIGHT,
@@ -60,6 +68,10 @@ export const useSlidesStore = create<SlidesState>()(
       setCurrentPage: (sid, page) =>
         set((s) => ({
           currentPageBySession: { ...s.currentPageBySession, [sid]: page },
+        })),
+      setRestoring: (sid, restoring) =>
+        set((s) => ({
+          restoringBySession: { ...s.restoringBySession, [sid]: restoring },
         })),
       toggleOpen: () => set((s) => ({ open: !s.open })),
       openPanel: () => set({ open: true }),
