@@ -425,6 +425,10 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
                     "status": deck.status,
                     "contributing_papers": papers_meta,
                     "has_notes": has_notes,
+                    # F4.5: which version snapshot the panel is now showing.
+                    # Each per-turn DeckChip uses this to know "the version
+                    # *I* produced" — the one to restore on Switch.
+                    "version_id": deck.current_version_id,
                 },
             }
         )
@@ -744,6 +748,17 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
             (slides_dir / "speaker_notes.json").write_text(
                 json.dumps(notes, ensure_ascii=False), encoding="utf-8"
             )
+            # F4.5: notes are an addendum to the ACTIVE version, not a new
+            # version of the deck content. Patch the current snapshot's
+            # ``speaker_notes`` field in place so a later restore of THIS
+            # version brings the notes back. We don't stamp a new version_id
+            # (the deck-card replay correctly shows no per-turn card for
+            # notes-only turns).
+            if deck.current_version_id:
+                VersionHistory(str(slides_dir)).patch_snapshot_notes(
+                    deck.current_version_id,
+                    {str(k): v for k, v in notes.items()} or None,
+                )
 
         await asyncio.to_thread(_persist_notes)
 
@@ -773,10 +788,19 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
         new_tex: str,
         *,
         description: str,
+        wipe_indices: set[int] | None = None,
     ) -> str:
         """Verify graphics, recompile (Overfull-aware revise loop), snapshot the
         version, persist the deck + rebuild deck_slides, restore notes by
         slide_index, and emit the deck event. Returns the final-response text.
+
+        ``wipe_indices`` controls which notes are dropped across the rewrite:
+        the caller decides scope. Pass an empty set for a "preamble-only"
+        edit (title / preamble — content frames untouched, all notes survive),
+        a set of slide indices for a "targeted pages" edit (those notes drop,
+        the rest survive), or the full set for a "whole deck" edit (every
+        note drops because every frame was rewritten). ``None`` is treated as
+        the empty set for backwards compatibility.
         Shared by sl_edit_slides / sl_edit_title / sl_edit_preamble."""
         slides_dir = (
             deps.workspace / "chat_session" / str(state["session_id"]) / "slides"
@@ -817,15 +841,40 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
                 cstep.mark_error(f"{description} — deck failed to compile after retries")
         await _flush_steps()
 
-        # version snapshot (blocking IO off the loop) — only when it compiled.
-        def _persist() -> None:
-            if result.ok:
-                VersionHistory(str(slides_dir)).save_version(
-                    result.tex, description, {}
-                )
+        # Page-scoped note invalidation: a frame whose content was rewritten
+        # this turn (slide_index ∈ ``wipe_indices``) drops its note — the old
+        # note described the OLD content. Untouched frames keep theirs.
+        # ``None`` is treated as the empty set (preamble-only edits keep all
+        # notes — title / preamble flows pass it that way).
+        wipe = wipe_indices or set()
+        preserved_notes: dict[str, str] = {
+            str(idx): nt
+            for idx, (nt, _nl) in old_notes.items()
+            if nt is not None and idx not in wipe
+        }
 
-        await asyncio.to_thread(_persist)
+        # Version snapshot (blocking IO off the loop) — only when it compiled.
+        # The snapshot bundles the post-invalidation note map so a later
+        # restore of THIS version brings back exactly what's in the deck now:
+        # untouched-frame notes survive; edited-frame slots are empty (and the
+        # user can author fresh notes for them). We pass an EXPLICIT dict
+        # rather than ``None`` — ``None`` means "auto-load from disk" in the
+        # legacy paper2slides-plus signature, but our DB is the source of
+        # truth and on-disk ``speaker_notes.json`` may still hold the previous
+        # turn's state at this point in the flow.
+        def _persist() -> str | None:
+            if not result.ok:
+                return None
+            return VersionHistory(str(slides_dir)).save_version(
+                result.tex, description, preserved_notes
+            )
 
+        new_version_id = await asyncio.to_thread(_persist)
+
+        # F4.5: when the edit recompiled cleanly the new snapshot becomes the
+        # active version (so the version-history endpoint + per-turn DeckChip
+        # cards both reflect "this edit is what you're looking at"). Failed
+        # recompiles keep the previously-active version pointer intact.
         await upsert_deck(
             deps.conn,
             session_id=state["session_id"],
@@ -837,8 +886,17 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
             page_count=result.page_count,
             contributing_paper_ids=deck.contributing_paper_ids,
             status="ok" if result.ok else "error",
-            current_version_id=deck.current_version_id,
+            current_version_id=new_version_id or deck.current_version_id,
         )
+        # Record which version snapshot THIS run stamped, so message replay
+        # can surface a per-turn DeckChip card pointing at it (FR-12).
+        run_id_state = state.get("run_id")
+        if new_version_id and run_id_state is not None:
+            await deps.conn.execute(
+                "UPDATE runs SET deck_version_id = ? WHERE id = ?",
+                (new_version_id, run_id_state),
+            )
+            await deps.conn.commit()
         fresh = await get_deck(deps.conn, session_id=state["session_id"])
         assert fresh is not None
 
@@ -848,8 +906,12 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
                 deck_id=fresh.id,
                 slides=build_deck_slides(result.tex, result.page_count),
             )
-            # restore notes onto the matching slide_index, then rebuild the map.
+            # Restore notes onto the matching slide_index — but skip the
+            # ``wipe`` set (slides whose content was rewritten this turn:
+            # the old note no longer matches). Then rebuild the map.
             for r in await get_deck_slides(deps.conn, deck_id=fresh.id):
+                if r.slide_index in wipe:
+                    continue
                 nt, nl = old_notes.get(r.slide_index, (None, None))
                 if nt is not None:
                     await update_slide_note(
@@ -921,6 +983,11 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
 
         new_tex = full_tex
         lang = _slide_language(state)
+        # The title row's body is just \titlepage — the rendered text lives in
+        # the preamble \title{}/\author{}/\date{} macros, which edit_frame can't
+        # reach. Skip it here; deck-wide instructions (scope=all) re-run
+        # edit_title_block on the preamble below so the title stays consistent.
+        targets = [r for r in targets if not is_title_frame(r.frame_tex)]
         # edit_frame returns exactly one frame per call (its prompt forbids
         # splitting), so slide_index→frame_number stays stable across the loop.
         for r in targets:
@@ -939,9 +1006,33 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
                     new_tex = replaced
             await _flush_steps()
 
+        # A deck-wide edit (e.g. "translate everything to English") must also
+        # carry through to the title page; otherwise \title{}/\author{}/\date{}
+        # in the preamble keeps its original language while every content frame
+        # shifts. Only scope=all triggers this — page/current edits stay local.
+        if cmd.target_scope == "all":
+            block = get_preamble(new_tex)
+            if block is not None:
+                new_block = await edit_title_block(
+                    adapter=deps.adapter,
+                    tracer=deps.tracer,
+                    model=deps.section_model,
+                    page_block=block,
+                    instruction=state.get("user_message", ""),
+                    response_language=lang,
+                )
+                updated = replace_preamble(new_tex, new_block)
+                if updated:
+                    new_tex = updated
+                await _flush_steps()
+
+        # Page-scoped note invalidation: every targeted frame had its content
+        # rewritten by ``edit_frame``, so its bundled note no longer matches.
+        # Untouched frames keep their notes through _recompile_and_emit.
+        edited_indices: set[int] = {r.slide_index for r in targets}
         msg = await _recompile_and_emit(
             state, writer, _flush_steps, deck, papers, papers_meta, old_notes,
-            new_tex, description="Edited deck",
+            new_tex, description="Edited deck", wipe_indices=edited_indices,
         )
         fresh = await get_deck(deps.conn, session_id=state["session_id"])
         assert fresh is not None
