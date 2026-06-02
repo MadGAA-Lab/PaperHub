@@ -95,6 +95,24 @@ system: |
     - NEVER use \pause or [<+->] overlays — PDF page count == logical frame count.
     - NEVER use \cite or \bibliography — no .bib file.
     - Always include keepaspectratio in \includegraphics options.
+    - When a figure is followed by caption/explanation text in the SAME frame:
+      ALWAYS insert a blank line between \includegraphics{{...}} (or \vspace
+      after it) and the text. The blank line forces a LaTeX paragraph break
+      so the text lands BELOW the figure. Without the blank line, LaTeX
+      treats the image as an inline box and the text flows to the RIGHT of
+      the figure (inline-wrapping). This applies equally to English AND
+      non-English (CJK) content. Worked example:
+
+          \begin{{frame}}{{Method overview}}
+            \centering
+            \includegraphics[width=\linewidth,height=0.6\textheight,keepaspectratio]{{p0-fig-001}}
+            \vspace{{0.3em}}
+
+            {{\small Caption text goes here, BELOW the figure.}}
+          \end{{frame}}
+
+      The blank line between \vspace{{0.3em}} and the {{\small ...}} block
+      is what forces the paragraph break. Do NOT skip it.
 
   Content discipline (paper2slides-plus contract):
     - Slide 1: title + author + year + institute via \titlepage.
