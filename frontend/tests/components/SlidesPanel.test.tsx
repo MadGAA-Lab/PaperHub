@@ -17,9 +17,19 @@ vi.mock("react-pdf", () => ({
     onLoadSuccess?.({ numPages: 5 });
     return <div data-testid="doc">{children}</div>;
   },
-  Page: ({ pageNumber }: { pageNumber: number }) => (
-    <div data-testid={`page-${pageNumber}`}>page {pageNumber}</div>
-  ),
+  Page: ({
+    pageNumber,
+    onRenderSuccess,
+  }: {
+    pageNumber: number;
+    onRenderSuccess?: () => void;
+  }) => {
+    // Mirror react-pdf's contract: onRenderSuccess fires once the canvas has
+    // rasterized. SlidesPanel uses this to drop its "Updating slides…" mask,
+    // so the mock has to invoke it (synchronously is fine for the test).
+    onRenderSuccess?.();
+    return <div data-testid={`page-${pageNumber}`}>page {pageNumber}</div>;
+  },
 }));
 vi.mock("@/lib/api", () => ({
   fetchDeckPdfData: vi.fn(() => Promise.resolve(new Uint8Array([1, 2, 3]))),

@@ -99,6 +99,12 @@ export function SlidesPanel({
   const [bytes, setBytes] = useState<Uint8Array | null>(null);
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [numPages, setNumPages] = useState(0);
+  // Tracks the fetchKey whose pdf.js Document has finished PARSING and whose
+  // current Page has finished rasterizing. The mask covers the panel until
+  // this matches the current fetchKey — without it, the mask drops the moment
+  // the bytes load, but pdf.js still spends ~1-2 s parsing + rasterizing the
+  // new deck, so the stale PDF flashes underneath before the new one paints.
+  const [renderedKey, setRenderedKey] = useState<string | null>(null);
   const [mainWidth, setMainWidth] = useState(0);
   // Defer the width used for pdf.js rasterisation so a rapid resize-drag
   // doesn't fire N renders per pixel across every mounted page. React holds
@@ -197,11 +203,18 @@ export function SlidesPanel({
 
   // Mask the canvas while a turn is in flight, while a version-switch
   // restore is mid-handshake, OR while a completed edit/restore's fresh deck
-  // is still loading (same session, newer revision than what's on screen).
-  // Derived — no extra state — so the effect stays setState-free.
+  // is still loading (same session, newer revision than what's on screen) OR
+  // while pdf.js is still parsing/rasterizing the just-loaded bytes.
+  // ``renderedKey`` is bumped only in the active Page's ``onRenderSuccess``,
+  // so a fresh fetchKey naturally fails this comparison until the new page
+  // has actually painted — no reset effect needed (the inequality IS the
+  // reset). Without this gate the mask drops the moment the fetch resolves
+  // but pdf.js still spends ~1-2 s parsing + rasterizing, flashing the stale
+  // PDF through.
   const reloading =
     !busy && bytes !== null && loadedSid === sessionId && loadedRev !== revision;
-  const masked = busy || restoringVersion || reloading;
+  const pdfRendering = file !== null && renderedKey !== fetchKey;
+  const masked = busy || restoringVersion || reloading || pdfRendering;
   // Restore wins as the stage label when both are present so the user knows
   // why the panel masked (version switch vs. chat-turn edit). The chat-turn's
   // ``stage`` prop carries live slide-agent stage names when ``busy`` is set.
@@ -457,6 +470,20 @@ export function SlidesPanel({
                     pageNumber={pageNum}
                     width={renderWidth > 0 ? renderWidth : undefined}
                     className="mx-auto shadow"
+                    // Flip the "rendered" marker only when the CURRENTLY
+                    // visible page has actually rasterized for THIS fetchKey.
+                    // The mask uses this to wait for real pixel paint instead
+                    // of just bytes-loaded, so a version switch keeps the
+                    // overlay on through pdf.js's ~1-2 s parse + first-paint
+                    // window instead of dropping early and flashing the old
+                    // deck. Inactive pages also fire onRenderSuccess as they
+                    // rasterize in the background, but we only care about the
+                    // active one for the mask handoff.
+                    onRenderSuccess={
+                      isActive
+                        ? () => setRenderedKey(fetchKey)
+                        : undefined
+                    }
                   />
                 </div>
               );
@@ -471,12 +498,27 @@ export function SlidesPanel({
             in flight or the post-edit reload is fetching. The current deck stays
             underneath (non-interactive) so the swap-in is seamless. */}
         {masked && (
+          // Solid ~95% card overlay (no ``backdrop-blur``): the blur shares a
+          // GPU layer with whatever sits on top and re-composes every frame,
+          // which contends with pdf.js's heavy main-thread paint while a deck
+          // is being parsed. The spinner was getting starved of frames and
+          // appearing stuck. A solid overlay hides the underlying PDF just as
+          // well at zero compositor cost.
+          //
+          // Three pulsing dots replace the rotating Loader2: `animate-pulse`
+          // is opacity-only (the cheapest animation a compositor can run) so
+          // it stays smooth even under canvas-paint backpressure. The
+          // staggered delays read as "working…" without needing rotate.
           <div
             role="status"
             aria-live="polite"
-            className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-card/70 backdrop-blur-sm"
+            className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-card/95"
           >
-            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+            <div className="flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full bg-muted-foreground motion-safe:animate-pulse" />
+              <span className="h-2 w-2 rounded-full bg-muted-foreground motion-safe:animate-pulse [animation-delay:200ms]" />
+              <span className="h-2 w-2 rounded-full bg-muted-foreground motion-safe:animate-pulse [animation-delay:400ms]" />
+            </div>
             <span className="text-sm font-medium text-foreground">
               {restoringVersion ? "Restoring version…" : "Updating slides…"}
             </span>
