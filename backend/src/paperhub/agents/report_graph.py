@@ -42,7 +42,7 @@ from langgraph.graph import END, START, StateGraph
 from paperhub.agents.gather_context import run_gather_context
 from paperhub.agents.memory_recall import build_active_memory_block
 from paperhub.agents.report_pipeline import (
-    author_note,
+    author_deck_notes,
     classify_deck_command,
     detect_slide_language,
     edit_frame,
@@ -148,6 +148,36 @@ def _slide_language(state: AgentState) -> str:
     return state.get("report_slide_language") or response_language(state)
 
 
+def _load_paper_context(
+    slides_dir: Path, papers_fallback: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Load the persisted PaperContextBundles a previous ``_generate`` wrote
+    to ``slides/context_bundles.json``. The bundles contain the same narrative
+    + section excerpts (chunk text) + figure / equation metadata the
+    slide_agent saw — so a notes / regen turn grounds each speaker note in
+    the SAME source material the deck was built from, instead of re-fetching
+    chunks or paraphrasing the abstract.
+
+    Falls back to ``papers_fallback`` (title + abstract from the DB) when:
+      * the file is absent (legacy deck pre-dating bundle persistence, or a
+        deck that was restored from a snapshot without re-running generate)
+      * the file is unreadable / malformed
+      * the JSON is not a list
+    Falling back keeps the notes flow runnable; the model gets the abstract
+    instead of the rich context — degraded but not broken.
+    """
+    bundle_path = slides_dir / "context_bundles.json"
+    if not bundle_path.exists():
+        return papers_fallback
+    try:
+        raw = json.loads(bundle_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return papers_fallback
+    if not isinstance(raw, list) or not raw:
+        return papers_fallback
+    return raw
+
+
 def _select_rows(
     rows: list[DeckSlideRow], cmd: DeckCommand, *, current_view_page: int
 ) -> list[DeckSlideRow]:
@@ -187,7 +217,7 @@ class ReportDeps:
     # F1 model-tier names are reused as-is so chat.py / config.py need no
     # change. The F4.5 flat flow maps them: plan_model → slide_agent,
     # section_model → slide_agent revise + edit_frame, notes_model →
-    # gather_context + author_note, resolve_model → classifier/budget.
+    # gather_context + author_deck_notes, resolve_model → classifier/budget.
     plan_model: str
     section_model: str
     notes_model: str
@@ -571,6 +601,21 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
         )
         await asyncio.to_thread(lambda: slides_dir.mkdir(parents=True, exist_ok=True))
 
+        # Persist the rich PaperContextBundles produced by gather_context so a
+        # later notes / regen turn can ground each slide's speaker note in the
+        # SAME context the slide_agent saw (narrative summary + key figures +
+        # equations + section excerpts), not just the bare paper abstract.
+        # Without this every notes call would have to re-run gather_context.
+        def _persist_bundles() -> None:
+            (slides_dir / "context_bundles.json").write_text(
+                json.dumps(
+                    [b.model_dump() for b in bundles], ensure_ascii=False, indent=2
+                ),
+                encoding="utf-8",
+            )
+
+        await asyncio.to_thread(_persist_bundles)
+
         # Stage figure files into workdir under inventory-key-matching names
         # so the slide_agent's \includegraphics{p{idx}-{stem}} resolves via
         # pdflatex's default \graphicspath (= the document directory =
@@ -715,33 +760,79 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
                 ),
             }
 
-        for r in targets:
-            note = await author_note(
-                adapter=deps.adapter,
-                tracer=deps.tracer,
-                model=deps.notes_model,
-                frame_tex=r.frame_tex,
-                existing_note=r.note_text if cmd.action == "edit_notes" else None,
-                instruction=(
-                    state.get("user_message") if cmd.action == "edit_notes" else None
-                ),
-                note_language=lang,
-            )
-            await update_slide_note(
-                deps.conn,
-                deck_id=deck.id,
-                slide_index=r.slide_index,
-                note_text=note,
-                note_language=lang,
-            )
-            await _flush_steps()
-
-        notes = await rebuild_speaker_notes_json(deps.conn, deck_id=deck.id)
-        # Mirror the on-disk speaker_notes.json so a later version snapshot is
-        # consistent with the DB (DB remains authoritative via the rebuild).
+        # Deck-wide single-call notes author: the model sees ALL frames and
+        # the source-paper context so notes have a real narrative arc
+        # (foreshadow / callback) and stay grounded in the actual research.
+        # ``wanted_indices`` is whichever subset of slides this turn covers;
+        # ``existing_notes`` is the notes on slides we are NOT regenerating —
+        # the model reads them for tone + through-line but does not touch them.
+        # Title frames are skipped (they have no body content note).
+        wanted_indices: list[int] = [
+            r.slide_index for r in targets if not is_title_frame(r.frame_tex)
+        ]
+        # When edit_notes targets a subset, the surviving (non-target) notes
+        # remain context. For generate_notes (no prior notes anyway) the map
+        # is empty.
+        target_idx_set: set[int] = set(wanted_indices)
+        surviving_notes: dict[int, str] = {
+            r.slide_index: r.note_text
+            for r in rows
+            if r.note_text and r.slide_index not in target_idx_set
+        }
+        frames_payload: list[tuple[int, int, str]] = [
+            (r.slide_index, r.page_start, r.frame_tex)
+            for r in rows
+            if not is_title_frame(r.frame_tex)
+        ]
+        instruction = (
+            state.get("user_message") if cmd.action == "edit_notes" else None
+        )
+        # Prefer the persisted PaperContextBundles (rich: narrative summary,
+        # key figures + roles, equations + legends, section excerpts) so the
+        # author grounds each note in the SAME context the slide_agent built
+        # the deck from. Fall back to ``papers`` (title + abstract) on legacy
+        # decks that pre-date bundle persistence.
         slides_dir = (
             deps.workspace / "chat_session" / str(state["session_id"]) / "slides"
         )
+        paper_context = _load_paper_context(slides_dir, papers)
+        authored = await author_deck_notes(
+            adapter=deps.adapter,
+            tracer=deps.tracer,
+            model=deps.notes_model,
+            papers=paper_context,
+            frames=frames_payload,
+            existing_notes=surviving_notes,
+            wanted_indices=wanted_indices,
+            note_language=lang,
+            instruction=instruction,
+        )
+        for slide_index, note in authored.items():
+            await update_slide_note(
+                deps.conn,
+                deck_id=deck.id,
+                slide_index=slide_index,
+                note_text=note,
+                note_language=lang,
+            )
+        await _flush_steps()
+
+        notes = await rebuild_speaker_notes_json(deps.conn, deck_id=deck.id)
+        # ``notes`` is keyed by PDF page number (it is the SlidesPanel's
+        # per-page lookup cache, written into decks.speaker_notes_json). The
+        # snapshot bundle, however, is keyed by SLIDE_INDEX — sl_emit and
+        # _recompile_and_emit both write it that way, and the restore
+        # endpoint reads it back by slide_index. Build a slide_index-keyed
+        # map from deck_slides for the snapshot so a later restore returns
+        # the notes to the correct frames; persist the page-number map to
+        # ``speaker_notes.json`` for the panel as before.
+        # ``slides_dir`` was already defined above for the paper-context load.
+        snapshot_rows = await get_deck_slides(deps.conn, deck_id=deck.id)
+        snapshot_notes: dict[str, str] = {
+            str(r.slide_index): r.note_text
+            for r in snapshot_rows
+            if r.note_text
+        }
 
         def _persist_notes() -> None:
             slides_dir.mkdir(parents=True, exist_ok=True)
@@ -757,7 +848,7 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
             if deck.current_version_id:
                 VersionHistory(str(slides_dir)).patch_snapshot_notes(
                     deck.current_version_id,
-                    {str(k): v for k, v in notes.items()} or None,
+                    snapshot_notes or None,
                 )
 
         await asyncio.to_thread(_persist_notes)
@@ -776,6 +867,119 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
             ),
             "report_deck_id": deck.id,
         }
+
+    async def _regenerate_notes_for_indices(
+        state: AgentState,
+        writer: Any,
+        _flush_steps: Any,
+        deck: Any,
+        lang: str,
+        indices: set[int],
+    ) -> None:
+        """Re-author notes for ONLY the given slide_indices in ``lang``, then
+        rebuild the page-cache + patch the active snapshot.
+
+        The user's mental model: a speaker note is bound to its page's
+        content. If a frame's content changes (single-page edit / insert),
+        that page's note gets regenerated; OTHER pages' notes stay
+        untouched. Deck-wide edits don't call this — they wipe + leave
+        notes empty so the user can decide whether to spend the LLM calls
+        to regenerate everything.
+        """
+        if not indices:
+            return
+        new_rows = await get_deck_slides(deps.conn, deck_id=deck.id)
+        # Re-author the targeted notes in ONE deck-wide call that sees every
+        # frame and every surviving note plus the source-paper context. The
+        # surviving notes (slides we are NOT regenerating) drive the talk's
+        # voice + through-line so the regen'd notes flow with the rest; they
+        # are NOT touched. Title frames have no spoken note.
+        target_idx_set: set[int] = {i for i in indices}
+        wanted_indices: list[int] = [
+            r.slide_index
+            for r in new_rows
+            if r.slide_index in target_idx_set and not is_title_frame(r.frame_tex)
+        ]
+        if not wanted_indices:
+            return
+        surviving_notes: dict[int, str] = {
+            r.slide_index: r.note_text
+            for r in new_rows
+            if r.note_text and r.slide_index not in target_idx_set
+        }
+        frames_payload: list[tuple[int, int, str]] = [
+            (r.slide_index, r.page_start, r.frame_tex)
+            for r in new_rows
+            if not is_title_frame(r.frame_tex)
+        ]
+        # Reuse the chunk-derived context the slide_agent saw at generate
+        # time so a regenerated note stays grounded in the SAME source
+        # material the deck was built from (section excerpts → chunk text,
+        # key figures, key equations). Falls back to title+abstract when
+        # the bundles file is absent.
+        slides_dir = (
+            deps.workspace / "chat_session" / str(state["session_id"]) / "slides"
+        )
+        paper_context = _load_paper_context(slides_dir, state["report_papers"])
+        authored = await author_deck_notes(
+            adapter=deps.adapter,
+            tracer=deps.tracer,
+            model=deps.notes_model,
+            papers=paper_context,
+            frames=frames_payload,
+            existing_notes=surviving_notes,
+            wanted_indices=wanted_indices,
+            note_language=lang,
+            instruction=None,
+        )
+        for slide_index, note in authored.items():
+            await update_slide_note(
+                deps.conn,
+                deck_id=deck.id,
+                slide_index=slide_index,
+                note_text=note,
+                note_language=lang,
+            )
+        await _flush_steps()
+        notes = await rebuild_speaker_notes_json(deps.conn, deck_id=deck.id)
+        # ``notes`` is page-number-keyed (panel cache). The snapshot bundle
+        # is slide_index-keyed (sl_emit / _recompile_and_emit / restore all
+        # agree on that key). Build the slide_index-keyed map from the
+        # post-regen deck_slides so restoring this version returns notes to
+        # the right frames; persist the page-number map to disk as before.
+        post_rows = await get_deck_slides(deps.conn, deck_id=deck.id)
+        snapshot_notes: dict[str, str] = {
+            str(r.slide_index): r.note_text
+            for r in post_rows
+            if r.note_text
+        }
+        # ``slides_dir`` was already defined above for the paper-context load.
+
+        def _persist() -> None:
+            slides_dir.mkdir(parents=True, exist_ok=True)
+            (slides_dir / "speaker_notes.json").write_text(
+                json.dumps(notes, ensure_ascii=False), encoding="utf-8"
+            )
+            # Re-bundle the full post-regen note map into THIS turn's
+            # snapshot so a later restore brings the page-bound notes back
+            # alongside the edited tex.
+            fresh_active = deck.current_version_id
+            if fresh_active:
+                VersionHistory(str(slides_dir)).patch_snapshot_notes(
+                    fresh_active,
+                    snapshot_notes or None,
+                )
+
+        await asyncio.to_thread(_persist)
+
+        fresh = await get_deck(deps.conn, session_id=state["session_id"])
+        if fresh is not None:
+            _emit_deck(
+                writer, fresh, _deck_title(fresh),
+                [{"id": p["id"], "title": p["title"]} for p in state["report_papers"]],
+                has_notes=bool(notes),
+            )
+            await _flush_steps()
 
     async def _recompile_and_emit(
         state: AgentState,
@@ -1036,6 +1240,24 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
         )
         fresh = await get_deck(deps.conn, session_id=state["session_id"])
         assert fresh is not None
+
+        # Targeted single-page edits (scope=page/current) auto-regenerate the
+        # ONE wiped note so the user doesn't have to ask "generate notes again
+        # for this slide". Only when that slide HAD a note coming in — if it
+        # was already noteless, an edit shouldn't conjure a note. Deck-wide
+        # edits (scope=all) DON'T auto-regen: 12 LLM calls is a lot to spend
+        # silently, and the user can trigger notes regeneration explicitly.
+        if cmd.target_scope in ("page", "current") and len(targets) == 1:
+            target = targets[0]
+            had_note = old_notes.get(target.slide_index, (None, None))[0]
+            if had_note:
+                await _regenerate_notes_for_indices(
+                    state, writer, _flush_steps, fresh, lang,
+                    {target.slide_index},
+                )
+                fresh = await get_deck(deps.conn, session_id=state["session_id"])
+                assert fresh is not None
+
         return {**state, "final_response": msg, "report_deck_id": fresh.id}
 
     async def _edit_title(state: AgentState) -> AgentState:
