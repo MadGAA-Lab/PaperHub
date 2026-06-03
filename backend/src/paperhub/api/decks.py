@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -54,18 +53,7 @@ _FILENAME_BANNED = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 def _read_title_from_tex(
     tex_path: str | None = None, *, tex_content: str | None = None
 ) -> str:
-    """Extract the deck's ``\\title{...}`` value from the LaTeX source.
-
-    F4.5 sl_emit no longer persists a plan, but the talk title IS baked into
-    ``\\title{}`` in the preamble (built by ``build_title_metadata`` at
-    generate time and re-edited by the title sub-flow). Reading the source
-    gives a single source of truth that stays correct through edits.
-
-    Returns the inner text (balanced-brace aware so ``\\title{A {B} C}`` works),
-    or an empty string on any failure / missing file. ``tex_content`` (Phase 16)
-    wins over ``tex_path`` so the version-id download path can pass the
-    snapshot's tex directly without round-tripping through a temp file.
-    """
+    """Return the balanced-brace inner text of ``\\title{...}`` in the source (``tex_content`` wins over ``tex_path``); empty string on missing/unreadable input."""
     if tex_content is not None:
         tex = tex_content
     elif tex_path is not None:
@@ -97,19 +85,9 @@ def _read_title_from_tex(
 def _download_name(
     deck: Any, ext: str, *, title_override: str | None = None
 ) -> str:
-    """Build a human, source-identifying download filename from the deck title
-    (e.g. "Transformer 拋棄遞迴與卷積的注意力架構.pdf") instead of a generic
-    ``deck.pdf``. Non-ASCII titles are preserved — Starlette emits them via the
-    RFC 5987 ``filename*`` form.
+    """Build a human download filename from the deck title (or ``"slides"`` fallback), banned-char-scrubbed and capped at 80 chars.
 
-    Title-resolution order:
-      0. ``title_override`` (Phase 16: the version-id download path passes the
-         snapshot's own ``\\title{}`` so an older deck's filename matches its
-         contents, not the live deck.tex).
-      1. ``plan.title`` / ``plan.talk_title`` (when the generator persists one).
-      2. The ``\\title{...}`` macro in ``deck.tex_path`` (the source of truth
-         after F4.5; sl_emit and edit_title both write it there).
-      3. ``"slides"`` fallback so the response always has a filename.
+    Title-resolution order: ``title_override`` → ``plan.talk_title``/``plan.title`` → ``\\title{}`` in ``deck.tex_path`` → ``"slides"``.
     """
     if title_override is not None:
         title = title_override.strip()
@@ -160,15 +138,7 @@ async def get_deck_meta(session_id: int) -> dict[str, Any]:
 async def get_deck_pdf(
     session_id: int, version_id: str | None = None
 ) -> FileResponse:
-    """Stream the compiled PDF.
-
-    F4.5 Phase 16: when ``?version_id=<v>`` is set AND that version is not the
-    active one, serve the cached ``edit_history/<v>.pdf`` (so an older
-    chat-turn's DeckChip downloads the deck that turn produced, not whichever
-    version happens to be active now). A version without a cached PDF returns
-    404 with a helpful detail; the user can restore the version to recompile.
-    Omitted/current version_id keeps the original behaviour (serve deck.pdf).
-    """
+    """Stream the compiled PDF; ``?version_id=<v>`` (non-active) serves the cached snapshot PDF, else 404."""
     if version_id is not None and not _VERSION_ID_RE.match(version_id):
         raise HTTPException(status_code=400, detail="invalid version_id")
 
@@ -229,13 +199,7 @@ async def get_deck_pdf(
 async def get_deck_tex(
     session_id: int, version_id: str | None = None
 ) -> FileResponse:
-    """Stream the LaTeX source.
-
-    F4.5 Phase 16: when ``?version_id=<v>`` is set AND not the active version,
-    write the snapshot's ``tex_content`` to a temp file and serve that — same
-    rationale as ``get_deck_pdf``. The snapshot always has tex_content (unlike
-    ``pdf_filename`` which is optional), so no special legacy 404 path.
-    """
+    """Stream the LaTeX source; ``?version_id=<v>`` (non-active) serves the snapshot's tex_content, else 404."""
     if version_id is not None and not _VERSION_ID_RE.match(version_id):
         raise HTTPException(status_code=400, detail="invalid version_id")
 
@@ -260,20 +224,15 @@ async def get_deck_tex(
                 status_code=404,
                 detail=f"snapshot {version_id} has no tex_content",
             )
-        # Write the snapshot tex to a temp file so FileResponse can stream it;
-        # we don't keep a permanent on-disk copy because the snapshot JSON is
-        # already the source of truth. ``delete=False`` so FileResponse can
-        # read it back after the with-block closes the handle.
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            suffix=".tex",
-            delete=False,
-        ) as tmp:
-            tmp.write(tex_content)
+        # Cache the snapshot tex alongside its pdf so FileResponse streams a
+        # real file (no tempfile leak); idempotent write — concurrent
+        # downloads race-but-converge on identical bytes.
+        cached_tex = edit_history / f"{version_id}.tex"
+        if not cached_tex.exists():
+            cached_tex.write_text(tex_content, encoding="utf-8")
         snapshot_title = _read_title_from_tex(tex_content=tex_content)
         return FileResponse(
-            tmp.name,
+            str(cached_tex),
             media_type="text/plain",
             filename=_download_name(deck, "tex", title_override=snapshot_title),
         )

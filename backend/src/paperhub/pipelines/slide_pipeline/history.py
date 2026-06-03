@@ -91,10 +91,7 @@ class VersionHistory:
 
             version_id = f"version_{timestamp_str}"
 
-            # F4.5 Phase 16: cache deck.pdf next to the snapshot so older
-            # versions can be downloaded without recompiling. Copy BEFORE the
-            # JSON write so a partial failure leaves the snapshot reading
-            # pdf_filename=null (caller falls back to recompile on restore).
+            # Copy BEFORE the JSON write so a partial failure leaves pdf_filename=null.
             pdf_filename: str | None = None
             deck_pdf = self.workspace_dir / "deck.pdf"
             if deck_pdf.exists():

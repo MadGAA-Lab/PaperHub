@@ -328,3 +328,67 @@ async def test_get_deck_tex_with_version_id_serves_snapshot_tex(
     assert resp.text == older_tex
     disp = resp.headers.get("content-disposition", "")
     assert "Older.tex" in disp
+
+
+@pytest.mark.asyncio
+async def test_get_deck_tex_caches_snapshot_tex_alongside_pdf(
+    tmp_path: Path,
+    app_with_db: tuple[Any, aiosqlite.Connection],
+) -> None:
+    """The tex stream writes to edit_history/<v>.tex once (idempotent); two
+    sequential downloads produce exactly one cached file (no per-request
+    tempfile leak)."""
+    app, conn = app_with_db
+    session_id = 1
+    slides_dir = tmp_path / "chat_session" / str(session_id) / "slides"
+    edit_history = slides_dir / "edit_history"
+    edit_history.mkdir(parents=True)
+    older_id = "version_20260601_120000_000000"
+    older_tex = (
+        r"\documentclass{beamer}\title{Older}\begin{document}"
+        r"\begin{frame}{X}y\end{frame}\end{document}"
+    )
+    _write_snapshot(
+        edit_history,
+        older_id,
+        description="older",
+        timestamp_iso="2026-06-01T12:00:00",
+        tex=older_tex,
+        pdf_filename=f"{older_id}.pdf",
+        pdf_bytes=b"x",
+    )
+    deck_tex = slides_dir / "deck.tex"
+    deck_pdf = slides_dir / "deck.pdf"
+    deck_tex.write_text("active tex", encoding="utf-8")
+    deck_pdf.write_bytes(b"active pdf")
+
+    await _seed_session(conn, session_id)
+    await _seed_deck(
+        conn,
+        session_id=session_id,
+        tex_path=deck_tex,
+        pdf_path=deck_pdf,
+        current_version_id="version_20260601_130000_000000",
+    )
+
+    cached_tex = edit_history / f"{older_id}.tex"
+    assert not cached_tex.exists()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        for _ in range(2):
+            resp = await client.get(
+                f"/sessions/{session_id}/deck/tex",
+                params={"version_id": older_id},
+                headers={"X-Paperhub-Session-Id": str(session_id)},
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.text == older_tex
+
+    assert cached_tex.exists()
+    assert cached_tex.read_text(encoding="utf-8") == older_tex
+    # No stray .tex files leaked in $TMPDIR-style locations; the only .tex
+    # cache lives in edit_history/.
+    assert sorted(p.name for p in edit_history.glob("*.tex")) == [
+        f"{older_id}.tex"
+    ]
