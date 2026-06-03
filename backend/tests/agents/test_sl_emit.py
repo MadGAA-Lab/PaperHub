@@ -147,3 +147,52 @@ async def test_emit_writes_version_snapshot_under_edit_history(
     assert row is not None
     cv_id = row[0]
     assert cv_id == snapshots[0].stem
+
+
+@pytest.mark.asyncio
+async def test_emit_caches_pdf_when_deck_pdf_exists(
+    conn: aiosqlite.Connection, tmp_path: Path
+) -> None:
+    """Phase 16: sl_emit must copy deck.pdf to edit_history/<v>.pdf and record
+    pdf_filename on the snapshot, matching VersionHistory.save_version."""
+    import json
+
+    workdir = tmp_path / "slides"
+    workdir.mkdir()
+    (workdir / "deck.tex").write_text(_DECK, encoding="utf-8")
+    (workdir / "deck.pdf").write_bytes(b"%PDF-fake-bytes\nfor-cache-test\n")
+    result = await run_sl_emit(
+        session_id=1, run_id=1, deck_tex=_DECK, workdir=workdir,
+        page_count=2, status="ok", contributing_paper_ids=[],
+        figure_inventory={}, conn=conn,
+    )
+    edit_history = workdir / "edit_history"
+    snapshots = list(edit_history.glob("version_*.json"))
+    assert len(snapshots) == 1
+    data = json.loads(snapshots[0].read_text(encoding="utf-8"))
+    assert data["pdf_filename"] == f"{result.current_version_id}.pdf"
+    cached = edit_history / data["pdf_filename"]
+    assert cached.exists()
+    assert cached.read_bytes() == b"%PDF-fake-bytes\nfor-cache-test\n"
+
+
+@pytest.mark.asyncio
+async def test_emit_records_null_pdf_filename_when_deck_pdf_missing(
+    conn: aiosqlite.Connection, tmp_path: Path
+) -> None:
+    """status='error' runs have no deck.pdf; pdf_filename must be null so a
+    restore of this version falls back to recompile."""
+    import json
+
+    workdir = tmp_path / "slides"
+    workdir.mkdir()
+    (workdir / "deck.tex").write_text(_DECK, encoding="utf-8")
+    # No deck.pdf written.
+    await run_sl_emit(
+        session_id=1, run_id=1, deck_tex=_DECK, workdir=workdir,
+        page_count=0, status="error", contributing_paper_ids=[],
+        figure_inventory={}, conn=conn,
+    )
+    snapshots = list((workdir / "edit_history").glob("version_*.json"))
+    data = json.loads(snapshots[0].read_text(encoding="utf-8"))
+    assert data["pdf_filename"] is None

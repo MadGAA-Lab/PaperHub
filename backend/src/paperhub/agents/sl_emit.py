@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +32,8 @@ from paperhub.pipelines.slide_pipeline.deck_slides_map import build_deck_slides
 from paperhub.pipelines.slide_pipeline.figure_inventory import (
     verify_and_fix_graphics,
 )
+
+_LOG = logging.getLogger(__name__)
 
 # F4.5: defensive post-process — see ``enforce_figure_paragraph_break``.
 _INCLUDEGRAPHICS_RE = re.compile(
@@ -444,18 +448,33 @@ async def run_sl_emit(
     snapshot_notes: dict[str, str] | None = (
         {str(k): v for k, v in speaker_notes.items()} if speaker_notes else None
     )
-    snapshot = {
-        "tex_content": audited_tex,
-        "speaker_notes": snapshot_notes,
-        "description": "F4.5 sl_emit snapshot",
-        "timestamp": ts,
-    }
-
     def _persist_files() -> bool:
         workdir.mkdir(parents=True, exist_ok=True)
         deck_path.write_text(audited_tex, encoding="utf-8")
         edit_history = workdir / "edit_history"
         edit_history.mkdir(exist_ok=True)
+        # Phase 16: cache deck.pdf next to the snapshot so DeckChip downloads
+        # for this turn can serve it later without a recompile. Copy BEFORE
+        # the JSON write so a partial failure leaves pdf_filename=None and
+        # the restore endpoint falls back to recompile.
+        pdf_filename: str | None = None
+        if pdf_path.exists():
+            cached_pdf = edit_history / f"{version_id}.pdf"
+            try:
+                shutil.copy2(pdf_path, cached_pdf)
+                pdf_filename = cached_pdf.name
+            except OSError as exc:
+                _LOG.warning(
+                    "sl_emit: failed to cache deck.pdf for %s: %r",
+                    version_id, exc,
+                )
+        snapshot = {
+            "tex_content": audited_tex,
+            "speaker_notes": snapshot_notes,
+            "description": "F4.5 sl_emit snapshot",
+            "timestamp": ts,
+            "pdf_filename": pdf_filename,
+        }
         (edit_history / f"{version_id}.json").write_text(
             json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8"
         )
