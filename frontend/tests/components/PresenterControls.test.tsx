@@ -44,4 +44,18 @@ describe("PresenterControls", () => {
     );
     expect(screen.getByTestId("next")).toBeInTheDocument();
   });
+
+  it("hides the preview on the last slide (and still shows Stop)", () => {
+    render(
+      <PresenterControls
+        {...base}
+        currentPage={10}
+        numPages={10}
+        nextPreview={<div data-testid="next" />}
+      />,
+    );
+    expect(screen.queryByTestId("next")).not.toBeInTheDocument();
+    expect(screen.queryByText(/next →/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("stop presenting")).toBeInTheDocument();
+  });
 });

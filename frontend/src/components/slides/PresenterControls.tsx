@@ -41,7 +41,9 @@ export function PresenterControls({
     return () => clearInterval(id);
   }, [startedAt, now]);
 
-  const hasNext = currentPage < numPages;
+  // Only show the preview group when there IS a next slide AND a node to render
+  // (avoids an orphaned empty thumbnail box if a caller omits the slot).
+  const showPreview = currentPage < numPages && Boolean(nextPreview);
 
   return (
     <div className="flex items-center gap-3 border-b border-border bg-muted/40 px-3 py-1.5 text-xs">
@@ -58,7 +60,7 @@ export function PresenterControls({
         <Radio className="h-3 w-3" />
         {audienceConnected ? "audience connected" : "audience window closed"}
       </span>
-      {hasNext && (
+      {showPreview && (
         <span className="ml-auto flex items-center gap-1 text-muted-foreground">
           next →
           <span className="block w-16 overflow-hidden rounded border border-border">
@@ -70,7 +72,7 @@ export function PresenterControls({
         type="button"
         size="sm"
         variant="ghost"
-        className={hasNext ? "h-6 px-2 gap-1" : "ml-auto h-6 px-2 gap-1"}
+        className={showPreview ? "h-6 px-2 gap-1" : "ml-auto h-6 px-2 gap-1"}
         onClick={onStop}
         aria-label="stop presenting"
       >
