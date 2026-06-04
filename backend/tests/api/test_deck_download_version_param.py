@@ -392,3 +392,38 @@ async def test_get_deck_tex_caches_snapshot_tex_alongside_pdf(
     assert sorted(p.name for p in edit_history.glob("*.tex")) == [
         f"{older_id}.tex"
     ]
+
+
+def test_read_title_handles_beamer_two_arg_form() -> None:
+    """edit_title flow emits ``\\title[short]{full}``; the parser must skip
+    the optional ``[short]`` argument and return the full title."""
+    from paperhub.api.decks import _read_title_from_tex
+
+    tex = (
+        r"\documentclass{beamer}" "\n"
+        r"\title[FASTer]{FASTer: ニューラルアクショントークン化}" "\n"
+        r"\author{...}" "\n"
+        r"\begin{document}\end{document}" "\n"
+    )
+    assert _read_title_from_tex(tex_content=tex) == "FASTer: ニューラルアクショントークン化"
+
+
+def test_read_title_single_arg_form_still_works() -> None:
+    from paperhub.api.decks import _read_title_from_tex
+
+    tex = r"\title{Plain title}" "\n" r"\begin{document}\end{document}" "\n"
+    assert _read_title_from_tex(tex_content=tex) == "Plain title"
+
+
+def test_read_title_balanced_braces_in_full_title() -> None:
+    from paperhub.api.decks import _read_title_from_tex
+
+    tex = r"\title[short]{A {nested} title}" "\n"
+    assert _read_title_from_tex(tex_content=tex) == "A {nested} title"
+
+
+def test_read_title_missing_returns_empty() -> None:
+    from paperhub.api.decks import _read_title_from_tex
+
+    tex = r"\documentclass{beamer}\begin{document}\end{document}"
+    assert _read_title_from_tex(tex_content=tex) == ""

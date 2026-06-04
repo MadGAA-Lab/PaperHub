@@ -63,11 +63,23 @@ def _read_title_from_tex(
             return ""
     else:
         return ""
-    marker = r"\title{"
+    # Find ``\title`` then skip an optional ``[short]`` argument (Beamer's
+    # two-arg form ``\title[short]{full}``), then capture the inner of ``{}``.
+    marker = r"\title"
     pos = tex.find(marker)
     if pos < 0:
         return ""
-    start = pos + len(marker)
+    i = pos + len(marker)
+    if i < len(tex) and tex[i] == "[":
+        # Skip ``[...]`` — assume no nested brackets, which Beamer's short title
+        # contract enforces.
+        close = tex.find("]", i)
+        if close < 0:
+            return ""
+        i = close + 1
+    if i >= len(tex) or tex[i] != "{":
+        return ""
+    start = i + 1
     depth = 1
     i = start
     while i < len(tex):
