@@ -385,7 +385,7 @@ export function SlidesPanel({
           aria-label={presenting ? "presenting" : "present"}
           aria-pressed={presenting}
           disabled={presenting || numPages === 0 || deck?.status !== "ok"}
-          onClick={() => present()}
+          onClick={present}
           title={presenting ? "Presenting — Stop from the presenter bar" : "Open the audience window"}
         >
           <Presentation className="h-3 w-3" />
