@@ -83,19 +83,38 @@ export function PresentPage({ sessionId }: Props) {
           onLoadSuccess={(pdf) => setNumPages(pdf.numPages)}
           loading=""
         >
-          {/* Canvas-only: the audience is a pure display, so render just the
+          {/* Mount EVERY page once and toggle visibility (hidden = display:none
+              on the inactive ones), so advancing a slide is a CSS show/hide of
+              an already-rasterized canvas — no teardown/re-rasterize flash
+              between pages. Same approach as SlidesPanel (v2.23.2). pdf.js
+              rasterizes each page once on mount; memory is bounded by the deck
+              budget (8–30 slides).
+
+              Canvas-only: the audience is a pure display, so render just the
               slide image. The text + annotation layers are HTML overlays that
               need react-pdf's layer CSS — which only loads in the MAIN bundle
               (via PdfView), not in this separate present.html entry — so leaving
               them on rendered unstyled, overlapping HTML text. We don't want
               selection/links here anyway. */}
-          <Page
-            pageNumber={safePage}
-            width={width}
-            loading=""
-            renderTextLayer={false}
-            renderAnnotationLayer={false}
-          />
+          {Array.from({ length: numPages }, (_, i) => {
+            const pageNum = i + 1;
+            const isActive = pageNum === safePage;
+            return (
+              <div
+                key={pageNum}
+                hidden={!isActive}
+                aria-hidden={!isActive}
+              >
+                <Page
+                  pageNumber={pageNum}
+                  width={width}
+                  loading=""
+                  renderTextLayer={false}
+                  renderAnnotationLayer={false}
+                />
+              </div>
+            );
+          })}
         </Document>
       )}
     </div>
