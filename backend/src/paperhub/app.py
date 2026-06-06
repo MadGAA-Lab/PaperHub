@@ -114,13 +114,24 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         _LOG.info("marker worker started")
 
     # The dense-vector RAG stack (embedder + reranker + Chroma) was removed, so
-    # there is no model pre-warm to wait on — announce ready now that the whole
-    # stack (DB, MCP registry, Marker worker) is wired, just before serving.
-    _print_boot_banner(settings, app)
+    # there is no model pre-warm to wait on. Defer the "ready" banner to a
+    # background task so it lands AFTER uvicorn logs "Application startup
+    # complete" — the banner is the human-facing "we're up" marker and should be
+    # the last thing on screen. uvicorn emits that log the instant this lifespan
+    # startup phase yields, so an inline print here would always precede it.
+    app.state.ready_banner_task = asyncio.create_task(
+        _announce_ready(settings, app), name="paperhub-ready-banner",
+    )
 
     try:
         yield
     finally:
+        # Cancel the ready banner if boot was so fast it hasn't fired yet.
+        ready_task = getattr(app.state, "ready_banner_task", None)
+        if ready_task is not None and not ready_task.done():
+            ready_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await ready_task
         # Stop the Marker worker (guard with a timeout so a slow in-flight
         # Marker call can't hang shutdown indefinitely).
         worker_stop = app.state.marker_worker_stop
@@ -152,6 +163,20 @@ _BANNER_ART = [
     r"/_/    \__,_/ .___/\___/_/  /_/ /_/\__,_/_.___/  ",
     r"           /_/                                   ",
 ]
+
+
+async def _announce_ready(settings: object, app: FastAPI) -> None:
+    """Print the boot banner once uvicorn has finished startup.
+
+    uvicorn logs ``Application startup complete`` the instant the lifespan
+    startup phase yields. Scheduling this as a background task (rather than an
+    inline print before the yield) lets the banner land AFTER that line, so the
+    'we're up' marker is the last thing on screen. The short sleep cedes the
+    loop so the startup-complete log wins the race; cancelled cleanly at
+    shutdown if boot was too fast for it to fire."""
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.sleep(0.2)
+        _print_boot_banner(settings, app)
 
 
 def _print_boot_banner(_settings: object, app: FastAPI) -> None:
