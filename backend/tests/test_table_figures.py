@@ -177,18 +177,45 @@ def test_residual_dump_envs_empty_when_pandoc_unavailable(
     assert _residual_dump_envs(tex) == []
 
 
-def test_residual_dump_envs_skips_when_misaligned(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Two envs share colspec `l|rrrr` (one renders, one dumps) but the outcome
-    # count (here only the dump survives our crude fake) disagrees with the env
-    # count -> we must rasterise NOTHING rather than risk the rendered one.
+def test_residual_dump_envs_misaligned_matches_dump_by_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Two envs share colspec `l|rrrr`; the SECOND dumps (its cells appear in the
+    # dump), the first renders. Counts are misaligned (1 dump outcome, 2 envs),
+    # so we must match by CONTENT and rasterise ONLY the dumped (second) env —
+    # never the rendered first one.
     tex = (
-        "\\begin{tabular}{l|rrrr}A & a & b & c & d\\\\\\end{tabular}"
-        " mid \\begin{tabular}{l|rrrr}B & e & f & g & h\\\\\\end{tabular}"
+        "\\begin{tabular}{l|rrrr}Alpha & q1 & q2 & q3 & q4\\\\\\end{tabular}"
+        " mid \\begin{tabular}{l|rrrr}Bravo & z9 & z8 & z7 & z6\\\\\\end{tabular}"
     )
-    # One dump outcome, but two envs -> misaligned.
     monkeypatch.setattr(
         "paperhub.pipelines.table_figures._render_pandoc",
-        lambda _t: '<div class="tabular"><p><span>l|rrrr</span>x</p></div>',
+        lambda _t: (
+            "<table><tbody><tr><td>Alpha</td><td>q1</td></tr></tbody></table>"
+            '<div class="tabular"><p><span>l|rrrr</span>Bravo z9 z8 z7 z6</p></div>'
+        ),
+    )
+    targets = _residual_dump_envs(tex)
+    assert len(targets) == 1
+    s, e = targets[0]
+    assert "Bravo" in tex[s:e] and "Alpha" not in tex[s:e]
+
+
+def test_residual_dump_envs_misaligned_skips_unmatched_dump(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Misaligned, but no env's cells fill the dump (content < threshold) -> leave
+    # it as text rather than risk rasterising a rendered table.
+    tex = (
+        "\\begin{tabular}{l|rrrr}Alpha & q1 & q2 & q3 & q4\\\\\\end{tabular}"
+        " mid \\begin{tabular}{cc}Bravo & z9\\\\\\end{tabular}"
+    )
+    monkeypatch.setattr(
+        "paperhub.pipelines.table_figures._render_pandoc",
+        lambda _t: (
+            "<table><tbody></tbody></table><table><tbody></tbody></table>"
+            '<div class="tabular"><p><span>xx</span>totally unrelated words here</p></div>'
+        ),
     )
     assert _residual_dump_envs(tex) == []
 

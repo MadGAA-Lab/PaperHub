@@ -239,7 +239,28 @@ _FIRST_SPAN_RE = re.compile(r"<span>([^<]*)</span>")
 # Open/close of a <table> or a <div class="tabular...">, for depth-aware
 # OUTERMOST-outcome extraction (pandoc nests a tabular's sub-tables).
 _TAG_RE = re.compile(r"<(/?)(table|div)\b([^>]*)>")
+_DUMP_REGION_RE = re.compile(r'<div class="tabular[^"]*">.*?</div>', re.S)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_CONTENT_TOK_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.]*")
+# A dump must be ≥60% explained by ONE env's own cells before we rasterise that
+# env — a rendered table's cells live in its <table>, not the dump, so it scores
+# near zero (arXiv:2102.05918's two `l|rrrr` tables: the dumped Multi30K scores
+# ~0.96, the rendered Spearman ~0.19). Comfortable margin.
+_DUMP_MATCH_MIN = 0.6
 _PANDOC_PROBE_TIMEOUT_SECONDS = 60
+
+
+def _content_tokens(s: str) -> set[str]:
+    return {
+        t.lower()
+        for t in _CONTENT_TOK_RE.findall(_HTML_TAG_RE.sub(" ", s))
+        if len(t) >= 2
+    }
+
+
+def _env_content_tokens(env: str) -> set[str]:
+    body = re.sub(r"\\[A-Za-z@]+\*?", " ", env)
+    return {t.lower() for t in _CONTENT_TOK_RE.findall(body) if len(t) >= 2}
 
 
 def _norm_colspec(cs: str) -> str:
@@ -353,6 +374,37 @@ def _outermost_outcomes(html: str) -> list[tuple[str, str]]:
     return outcomes
 
 
+def _match_dumps_by_content(
+    html: str, envs: list[tuple[int, int]], tex: str
+) -> list[tuple[int, int]]:
+    r"""Match each dump region to the env whose OWN cells fill it, by content.
+
+    Used when the 1:1 order mapping is unavailable (env/outcome counts differ).
+    pandoc dumps a table's cells as raw text, so the dumped env's tokens appear
+    verbatim in its dump region; a RENDERED table's cells live in its ``<table>``,
+    not the dump, so it scores near zero. We rasterise the env that supplies
+    ≥``_DUMP_MATCH_MIN`` of a dump's tokens (best match, each env used once) —
+    safe disambiguation even when two tables share a column-spec."""
+    targets: list[tuple[int, int]] = []
+    used: set[int] = set()
+    env_tokens = [_env_content_tokens(tex[s:e]) for (s, e) in envs]
+    for m in _DUMP_REGION_RE.finditer(html):
+        dt = _content_tokens(m.group(0))
+        if not dt:
+            continue
+        best_idx, best_score = -1, 0.0
+        for idx, et in enumerate(env_tokens):
+            if idx in used or not et:
+                continue
+            score = len(et & dt) / len(dt)  # fraction of the dump supplied by env
+            if score > best_score:
+                best_idx, best_score = idx, score
+        if best_idx != -1 and best_score >= _DUMP_MATCH_MIN:
+            used.add(best_idx)
+            targets.append(envs[best_idx])
+    return targets
+
+
 def _residual_dump_envs(repaired: str) -> list[tuple[int, int]]:
     r"""Envs in the REPAIRED tex that pandoc STILL dumps as raw text.
 
@@ -360,10 +412,10 @@ def _residual_dump_envs(repaired: str) -> list[tuple[int, int]]:
     OUTERMOST plain-tabular env produces exactly one HTML outcome — a ``<table>``
     or a dump — in document order. When the outcome count matches the env count
     we map 1:1 by order and rasterise the dumped ones. If the counts disagree
-    (a rare nested/edge case) we fall back to matching the dump's leaked colspec
-    to an env — conservative: an unmatched dump is left as visible text rather
-    than risk rasterising a rendered table. A rendered table is never targeted
-    either way. Empty when pandoc is unavailable / the whole doc failed."""
+    (a rare nested/edge case) we match each dump to its env by CONTENT instead —
+    a rendered table's cells aren't in the dump, so it can't be matched; only the
+    genuinely-dumped env is rasterised. A rendered table is never targeted either
+    way. Empty when pandoc is unavailable / the whole doc failed."""
     html = _render_pandoc(repaired)
     if html is None:
         return []
@@ -371,22 +423,17 @@ def _residual_dump_envs(repaired: str) -> list[tuple[int, int]]:
     if not any(k == "dump" for k, _ in outcomes):
         return []
     envs = _find_plain_tabulars(repaired)
-    if len(outcomes) != len(envs):
-        # A rare nested/edge case left the env<->outcome counts out of step, so
-        # the 1:1 order mapping is no longer trustworthy. We do NOT fall back to
-        # colspec matching: two tables can share a column-spec (arXiv:2102.05918
-        # has two `l|rrrr` tables — one renders, one dumps), and matching the
-        # wrong one would rasterise a WORKING table. Leave the dump as visible
-        # text instead — never risk a rendered table.
-        logger.warning(
-            "table: %d plain-tabular envs but %d outcomes; skipping rasterisation "
-            "(leaving any dump as text) to avoid touching a rendered table",
-            len(envs),
-            len(outcomes),
-        )
-        return []
-    return [(s, e) for (s, e), (kind, _cs) in zip(envs, outcomes, strict=True)
-            if kind == "dump"]
+    if len(outcomes) == len(envs):
+        return [(s, e) for (s, e), (kind, _cs) in zip(envs, outcomes, strict=True)
+                if kind == "dump"]
+    # Counts out of step (a rare nested/edge case) — disambiguate by content so a
+    # column-spec collision (arXiv:2102.05918's two `l|rrrr` tables, one renders /
+    # one dumps) can't rasterise the rendered one.
+    logger.info(
+        "table: %d plain-tabular envs vs %d outcomes; matching dumps by content",
+        len(envs), len(outcomes),
+    )
+    return _match_dumps_by_content(html, envs, repaired)
 
 
 # ---------------------------------------------------------------------------
