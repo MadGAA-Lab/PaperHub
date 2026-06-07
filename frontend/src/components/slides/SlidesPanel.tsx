@@ -25,6 +25,7 @@ import {
   NOTE_MIN_HEIGHT,
 } from "@/store/slides";
 import { fetchDeckPdfData, deckPdfUrl, deckTexUrl } from "@/lib/api";
+import { pushWidth } from "@/lib/stableWidth";
 import { Button } from "@/components/ui/button";
 import { usePresentation } from "@/hooks/usePresentation";
 import { PresenterControls } from "@/components/slides/PresenterControls";
@@ -131,6 +132,10 @@ export function SlidesPanel({
   const panelRef = useRef<HTMLDivElement>(null);
   const roRef = useRef<ResizeObserver | null>(null);
   const filmRoRef = useRef<ResizeObserver | null>(null);
+  // Recent-applied width buffers feeding pushWidth's flap guard (issue #6) — one
+  // per measured element. Survive re-renders so the guard sees prior samples.
+  const mainWidthRecent = useRef<number[]>([]);
+  const thumbWidthRecent = useRef<number[]>([]);
 
   // Measure the main slide area via a CALLBACK ref so it fires the instant the
   // element mounts — which is when the <Document> renders (file != null), not
@@ -141,7 +146,14 @@ export function SlidesPanel({
     roRef.current?.disconnect();
     roRef.current = null;
     if (!el) return;
-    const measure = () => setMainWidth(Math.max(0, el.clientWidth - 16));
+    const measure = () => {
+      const next = Math.max(0, el.clientWidth - 16);
+      // Flap guard: reject a width that bounces back across a scrollbar
+      // threshold so the layout can't oscillate forever (issue #6).
+      const step = pushWidth(mainWidthRecent.current, next);
+      mainWidthRecent.current = step.recent;
+      if (step.apply) setMainWidth(next);
+    };
     measure();
     if (typeof ResizeObserver === "undefined") return; // jsdom guard
     const ro = new ResizeObserver(measure);
@@ -156,7 +168,12 @@ export function SlidesPanel({
     filmRoRef.current?.disconnect();
     filmRoRef.current = null;
     if (!el) return;
-    const measure = () => setThumbWidth(Math.max(32, el.clientWidth - 12));
+    const measure = () => {
+      const next = Math.max(32, el.clientWidth - 12);
+      const step = pushWidth(thumbWidthRecent.current, next);
+      thumbWidthRecent.current = step.recent;
+      if (step.apply) setThumbWidth(next);
+    };
     measure();
     if (typeof ResizeObserver === "undefined") return; // jsdom guard
     const ro = new ResizeObserver(measure);
@@ -427,7 +444,10 @@ export function SlidesPanel({
           <div
             ref={measureFilmstrip}
             className="flex flex-col gap-1 p-1 overflow-y-auto bg-muted/30 shrink-0"
-            style={{ width: filmstripWidth }}
+            // scrollbar-gutter: stable reserves the scrollbar's space whether or
+            // not it's shown, so clientWidth stays constant when the scrollbar
+            // toggles — removing the ResizeObserver flap at its source (issue #6).
+            style={{ width: filmstripWidth, scrollbarGutter: "stable" }}
           >
             {Array.from(
               { length: numPages || deck?.page_count || 0 },
@@ -476,6 +496,10 @@ export function SlidesPanel({
           <div
             ref={measureMainArea}
             className="flex-1 min-h-0 overflow-auto bg-neutral-100 dark:bg-neutral-900 p-2"
+            // Reserve the scrollbar gutter so clientWidth doesn't change when the
+            // vertical scrollbar appears/disappears — the root cause of the
+            // layout-switching loop at threshold widths (issue #6).
+            style={{ scrollbarGutter: "stable" }}
           >
             {presenting && (
               <PresenterControls

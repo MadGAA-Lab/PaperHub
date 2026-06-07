@@ -171,6 +171,23 @@ describe("SlidesPanel", () => {
     expect(wrap(2)?.hidden).toBe(false);
   });
 
+  it("reserves the scrollbar gutter on the scroll areas (issue #6 flap guard)", async () => {
+    // scrollbar-gutter: stable keeps clientWidth constant when the vertical
+    // scrollbar toggles, so the ResizeObserver-driven page width can't
+    // oscillate between two layouts at threshold widths.
+    const { container } = render(<SlidesPanel sessionId={7} speakerNotes={{}} />);
+    await waitFor(() => {
+      expect(container.querySelectorAll("[data-page]")).toHaveLength(5);
+    });
+    // The main slide scroll area is the parent of the per-page wrappers.
+    const mainArea = container.querySelector<HTMLElement>('[data-page="1"]')
+      ?.parentElement;
+    expect(mainArea?.style.scrollbarGutter).toBe("stable");
+    // The filmstrip rail reserves it too.
+    const filmstrip = container.querySelector<HTMLElement>(".overflow-y-auto");
+    expect(filmstrip?.style.scrollbarGutter).toBe("stable");
+  });
+
   it("reloads the deck (cache-busted by revision) when the edit completes", async () => {
     useSlidesStore.setState({ deckRevisionBySession: { 7: 4 } });
     const { rerender } = render(
