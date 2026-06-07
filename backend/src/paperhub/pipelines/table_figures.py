@@ -194,3 +194,46 @@ def _compile_table_to_png(
             logger.warning("table: rasterise failed: %s", exc)
             return False
     return True
+
+
+def rasterize_complex_tables(
+    tex: str, *, preamble: str, out_dir: Path, dpi: int = 300
+) -> str:
+    r"""Replace each pandoc-hostile table environment in ``tex`` with an
+    ``\includegraphics`` pointing at a rendered PNG.
+
+    Parameters mirror ``rasterize_tikz_figures``: ``preamble`` is the paper's
+    preamble (reused for the standalone compile), ``out_dir`` is where PNGs land
+    (the paper's ``source/`` dir, so the figures pass externalises them), ``dpi``
+    is the rasterisation resolution (300 keeps dense tables crisp).
+
+    Only OUTERMOST hostile envs are rasterised; the surrounding ``table`` float +
+    ``\caption`` are left for pandoc. Non-hostile ``tabular`` envs are untouched.
+    Any compile failure leaves that env as-is; ``pdflatex`` absent -> no-op.
+    """
+    if shutil.which("pdflatex") is None:
+        logger.debug("rasterize_complex_tables: pdflatex unavailable; no-op")
+        return tex
+    hostile = [(s, e, n) for (s, e, n) in _find_table_envs(tex) if _is_hostile(n, tex[s:e])]
+    if not hostile:
+        return tex
+    out_dir.mkdir(parents=True, exist_ok=True)
+    parts: list[str] = []
+    last_end = 0
+    for idx, (start, end, _name) in enumerate(hostile, start=1):
+        parts.append(tex[last_end:start])
+        png_name = f"table-fig-{idx:03d}.png"
+        ok = _compile_table_to_png(
+            tex[start:end],
+            preamble=preamble,
+            body_prefix=tex[:start],
+            png_path=out_dir / png_name,
+            dpi=dpi,
+        )
+        parts.append(f"\\includegraphics{{{png_name}}}" if ok else tex[start:end])
+        last_end = end
+    parts.append(tex[last_end:])
+    return "".join(parts)
+
+
+__all__ = ["rasterize_complex_tables"]

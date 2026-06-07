@@ -1,4 +1,19 @@
-from paperhub.pipelines.table_figures import _is_hostile
+import shutil
+from pathlib import Path
+
+import pytest
+
+from paperhub.pipelines.table_figures import (
+    _build_snippet,
+    _compile_table_to_png,
+    _find_table_envs,
+    _is_hostile,
+    rasterize_complex_tables,
+)
+
+# ---------------------------------------------------------------------------
+# Task 1: Hostility classifier
+# ---------------------------------------------------------------------------
 
 
 def test_starred_and_x_envs_are_hostile() -> None:
@@ -20,7 +35,9 @@ def test_multicolumn_alone_is_not_hostile_but_with_cmidrule_is() -> None:
     assert _is_hostile("tabular", "\\multicolumn{2}{c}{a} \\\\ \\cmidrule(lr){1-2}")
 
 
-from paperhub.pipelines.table_figures import _find_table_envs
+# ---------------------------------------------------------------------------
+# Task 2: Env-depth-aware table finder
+# ---------------------------------------------------------------------------
 
 
 def test_finds_a_simple_tabular() -> None:
@@ -60,7 +77,9 @@ def test_unclosed_env_is_skipped() -> None:
     assert _find_table_envs(tex) == []
 
 
-from paperhub.pipelines.table_figures import _build_snippet
+# ---------------------------------------------------------------------------
+# Task 3: Standalone-snippet builder
+# ---------------------------------------------------------------------------
 
 
 def test_snippet_has_bedrock_textwidth_and_document() -> None:
@@ -88,12 +107,9 @@ def test_snippet_drops_paper_documentclass_but_keeps_definecolor() -> None:
     assert "\\definecolor{hl}{RGB}{0,119,255}" in snip    # body-prefix colour kept
 
 
-import shutil
-from pathlib import Path
-
-import pytest
-
-from paperhub.pipelines.table_figures import _compile_table_to_png
+# ---------------------------------------------------------------------------
+# Task 4: Compile table to PNG (pdflatex + pymupdf)
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.skipif(shutil.which("pdflatex") is None, reason="pdflatex not installed")
@@ -110,7 +126,7 @@ def test_compile_simple_table_produces_png(tmp_path: Path) -> None:
     assert png.is_file() and png.stat().st_size > 0
 
 
-def test_compile_returns_false_when_pdflatex_missing(tmp_path, monkeypatch) -> None:
+def test_compile_returns_false_when_pdflatex_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("paperhub.pipelines.table_figures.shutil.which", lambda _: None)
     # No pdflatex on PATH -> FileNotFoundError inside subprocess -> graceful False.
     monkeypatch.setattr(
@@ -122,3 +138,47 @@ def test_compile_returns_false_when_pdflatex_missing(tmp_path, monkeypatch) -> N
         preamble="", body_prefix="", png_path=tmp_path / "x.png", dpi=150,
     )
     assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# Task 5: Orchestrator rasterize_complex_tables
+# ---------------------------------------------------------------------------
+
+
+def test_no_op_when_pdflatex_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("paperhub.pipelines.table_figures.shutil.which", lambda _: None)
+    tex = "\\begin{tabular*}{\\textwidth}{cc}a & b\\\\\\end{tabular*}"
+    assert rasterize_complex_tables(tex, preamble="", out_dir=tmp_path, dpi=150) == tex
+
+
+def test_simple_tabular_is_left_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # pdflatex "present" but no hostile env -> unchanged, compiler never called.
+    monkeypatch.setattr("paperhub.pipelines.table_figures.shutil.which", lambda _: "/usr/bin/pdflatex")
+    called = []
+    monkeypatch.setattr("paperhub.pipelines.table_figures._compile_table_to_png",
+                        lambda *a, **k: called.append(1) or True)
+    tex = "\\begin{tabular}{cc}a & b\\\\\\end{tabular}"
+    assert rasterize_complex_tables(tex, preamble="", out_dir=tmp_path, dpi=150) == tex
+    assert called == []
+
+
+def test_hostile_table_replaced_with_includegraphics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("paperhub.pipelines.table_figures.shutil.which", lambda _: "/usr/bin/pdflatex")
+    # Stub the compiler to "succeed" and create the PNG so we test the rewrite.
+    def fake_compile(env_text: str, *, preamble: str, body_prefix: str, png_path: Path, dpi: int) -> bool:
+        png_path.write_bytes(b"\x89PNG")
+        return True
+    monkeypatch.setattr("paperhub.pipelines.table_figures._compile_table_to_png", fake_compile)
+    tex = "pre \\begin{tabular*}{\\textwidth}{cc}a & b\\\\\\end{tabular*} post"
+    out = rasterize_complex_tables(tex, preamble="", out_dir=tmp_path, dpi=150)
+    assert "\\includegraphics{table-fig-001.png}" in out
+    assert "\\begin{tabular*}" not in out
+    assert out.startswith("pre ") and out.endswith(" post")
+    assert (tmp_path / "table-fig-001.png").is_file()
+
+
+def test_compile_failure_leaves_env_in_place(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("paperhub.pipelines.table_figures.shutil.which", lambda _: "/usr/bin/pdflatex")
+    monkeypatch.setattr("paperhub.pipelines.table_figures._compile_table_to_png", lambda *a, **k: False)
+    tex = "\\begin{tabular*}{\\textwidth}{cc}a & b\\\\\\end{tabular*}"
+    assert rasterize_complex_tables(tex, preamble="", out_dir=tmp_path, dpi=150) == tex
