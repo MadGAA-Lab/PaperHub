@@ -61,6 +61,53 @@ _DATA_URI_EXT = {
 # other pandoc failure — fall back to pylatexenc, then the raw envelope.
 _PANDOC_TIMEOUT_SECONDS = 60
 
+# Max stray unclosed braces we'll delete before retrying pandoc. A real-world
+# typo leaves 1 (arXiv:2406.07524 ships `\owt{` with no close); a large count
+# signals something else (e.g. a verbatim miscount) where blind editing is
+# unlikely to help, so we don't bother and fall back instead.
+_MAX_BRACE_FIX = 16
+
+
+def _unmatched_open_braces(text: str) -> list[int]:
+    """Indices of unmatched opening ``{`` (escape- + comment-aware).
+
+    pdflatex tolerates a stray unclosed brace — a common authoring typo
+    (arXiv:2406.07524 ships ``\\owt{`` with no close) — by implicitly closing
+    the group at ``\\end{document}``; pandoc's stricter parser instead rejects
+    the whole document with "unexpected end of input". Returning the exact
+    positions lets us delete the typo'd opener and retry pandoc.
+
+    We delete the opener rather than append a closer at EOF: a trailing ``}``
+    makes the stray ``{`` swallow the entire remainder of the paper into the
+    preceding macro's argument (so pandoc renders only the prefix), whereas
+    deleting the typo'd ``{`` renders the full document.
+    """
+    stack: list[int] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\" and i + 1 < n:  # escaped char (\{ \} \%) — skip both
+            i += 2
+            continue
+        if c == "%":  # unescaped comment — skip to end of line
+            nl = text.find("\n", i)
+            if nl == -1:
+                break
+            i = nl + 1
+            continue
+        if c == "{":
+            stack.append(i)
+        elif c == "}" and stack:
+            stack.pop()
+        i += 1
+    return stack
+
+
+def _unclosed_braces(text: str) -> int:
+    """Count of unmatched opening braces (see :func:`_unmatched_open_braces`)."""
+    return len(_unmatched_open_braces(text))
+
 
 def render_html(
     *,
@@ -109,6 +156,13 @@ def render_html(
                     exc.returncode,
                     (exc.stderr or "")[:500],
                 )
+                # A stray unclosed brace (author typo pdflatex tolerates) makes
+                # pandoc reject the whole document. Re-balance and retry once
+                # before degrading to the plain-text fallback.
+                if _try_pandoc_brace_balanced(
+                    source, out_path, resource_dir=resource_dir, macros=macros,
+                ):
+                    return out_path
             except subprocess.TimeoutExpired:
                 # pandoc hung past the cap — kill it and fall back rather than
                 # parking the ingest until the worker OOMs.
@@ -183,6 +237,46 @@ def _render_latex_pandoc(
         cwd=tex_path.parent,
         timeout=_PANDOC_TIMEOUT_SECONDS,
     )
+
+
+def _try_pandoc_brace_balanced(
+    source: Path,
+    out_path: Path,
+    *,
+    resource_dir: Path | None,
+    macros: dict[str, MacroValue] | None,
+) -> bool:
+    """Retry pandoc once after deleting any stray unclosed ``{`` (author typo).
+
+    Returns True iff the repaired source rendered. The temp copy lives beside
+    ``source`` so its ``\\input`` + relative figure paths still resolve;
+    sentinels are preserved (we only delete the typo'd brace character), so
+    chunk anchoring survives the retry.
+    """
+    text = source.read_text(encoding="utf-8", errors="ignore")
+    positions = _unmatched_open_braces(text)
+    if not 0 < len(positions) <= _MAX_BRACE_FIX:
+        return False
+    chars = list(text)
+    for p in sorted(positions, reverse=True):  # reverse so earlier idx stay valid
+        del chars[p]
+    repaired = "".join(chars)
+    balanced = source.with_name(source.stem + ".balanced.tex")
+    try:
+        balanced.write_text(repaired, encoding="utf-8")
+        _render_latex_pandoc(balanced, out_path, resource_dir=resource_dir)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+    finally:
+        balanced.unlink(missing_ok=True)
+    if resource_dir is not None:
+        _externalize_local_images(out_path, resource_dir)
+    _inject_mathjax_macros(out_path, macros)
+    logger.info(
+        "pandoc succeeded on %s after removing %d stray unclosed brace(s)",
+        source, len(positions),
+    )
+    return True
 
 
 def _inject_mathjax_macros(

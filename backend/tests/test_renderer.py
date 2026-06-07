@@ -7,7 +7,38 @@ from unittest.mock import patch
 
 import pytest
 
-from paperhub.pipelines.renderer import render_html
+from paperhub.pipelines.renderer import _unclosed_braces, render_html
+
+
+def test_unclosed_braces_counts_stray_open() -> None:
+    assert _unclosed_braces("balanced {a} {b}") == 0
+    assert _unclosed_braces(r"on \owt{. Additionally") == 1  # the arXiv:2406.07524 typo
+    assert _unclosed_braces("a {b {c}") == 1
+    # Escaped braces and comments must not count.
+    assert _unclosed_braces(r"literal \{ and \}") == 0
+    assert _unclosed_braces("text % a stray { in a comment\nmore") == 0
+
+
+def test_render_latex_balances_stray_brace_and_retries_pandoc(tmp_path: Path) -> None:
+    """An author-typo unclosed brace makes pandoc reject the whole document
+    (arXiv:2406.07524's `\\owt{`). render_html must re-balance + retry pandoc so
+    it produces real structured HTML, not the plain-text <pre> fallback."""
+    if shutil.which("pandoc") is None:
+        pytest.skip("pandoc binary not installed")
+    src = tmp_path / "source.render.tex"
+    src.write_text(
+        "\\section{Introduction}\n"
+        "We evaluate perplexity on \\owt{. Additionally we report results.\n\n"
+        "\\section{Method}\nThe model denoises masked tokens.\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "source.html"
+    render_html(source=src, kind="latex", out_path=out)
+    html = out.read_text(encoding="utf-8")
+    # pandoc succeeded on the balanced retry → heading tags, NOT a <pre> dump.
+    assert "<h1" in html or "<h2" in html
+    assert "<pre" not in html
+    assert "Introduction" in html and "Method" in html
 
 
 def test_render_pdf_uses_pymupdf(tmp_path: Path) -> None:
