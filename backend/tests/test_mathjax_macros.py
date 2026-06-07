@@ -87,6 +87,15 @@ class TestBuildScript:
         # Curated mappings are present.
         assert any("mathbbm" in k for k in CURATED_MACROS)
 
+    def test_capitalized_wide_tilde_maps_to_widetilde(self) -> None:
+        """\\Tilde (used inside author macros, never reaching extract_macros)
+        isn't in MathJax's build; it must map to the native \\widetilde."""
+        script = build_mathjax_config_script()
+        start = script.index("{tex:") + len("{tex:{macros:")
+        end = script.index("}};</script>")
+        macros = json.loads(script[start:end])
+        assert macros.get("Tilde") == [r"\widetilde{#1}", 1]
+
     def test_font_size_switches_are_noop_macros(self) -> None:
         """\\footnotesize etc. aren't in MathJax's default build; they must be
         defined as no-ops so formula annotations like

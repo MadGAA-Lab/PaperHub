@@ -33,6 +33,12 @@ CURATED_MACROS: dict[str, MacroValue] = {
     "bm": [r"\boldsymbol{#1}", 1],
     # isomath — slanted sans; closest native fallback.
     "mathsfit": [r"\mathit{#1}", 1],
+    # Capitalized "wide accent" idiom some preambles use (\Tilde{X} = a tilde
+    # scaled to X). MathJax ships \widetilde but not \Tilde, and papers use it
+    # only INSIDE their own macros (arXiv:2406.07524: \def\Rrevt{\Tilde{R}_t}),
+    # so it never reaches extract_macros and renders as "Undefined control
+    # sequence \Tilde". Map to the native wide tilde.
+    "Tilde": [r"\widetilde{#1}", 1],
     # LaTeX font-size switches are NOT in MathJax's default build (they live in
     # the unshipped `textmacros` extension), so a paper that de-emphasises a
     # formula annotation with `\text{\footnotesize $\because …$}`
