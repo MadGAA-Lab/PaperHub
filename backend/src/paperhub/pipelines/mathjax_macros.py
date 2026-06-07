@@ -57,6 +57,15 @@ CURATED_MACROS: dict[str, MacroValue] = {
     "LARGE": "",
     "huge": "",
     "Huge": "",
+    # Spacing commands that land inside math — authored, or pulled into a \[..\]
+    # block by pandoc grouping (arXiv:2512.04952 renders `\[\vspace{-0.5em}\]`).
+    # MathJax has no \vspace; map \vspace/\hspace to a no-op that consumes the
+    # dimension argument and emits nothing (the bare ones are commonly no-arg).
+    "vspace": ["", 1],
+    "hspace": ["", 1],
+    "smallskip": "",
+    "medskip": "",
+    "bigskip": "",
 }
 
 # Unescaped `%` starts a LaTeX comment to end-of-line; `\%` is a literal.

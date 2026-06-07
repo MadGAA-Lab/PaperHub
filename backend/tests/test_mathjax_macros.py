@@ -137,6 +137,18 @@ class TestBuildScript:
         for size in ("footnotesize", "small", "scriptsize", "tiny", "Large"):
             assert macros.get(size) == "", f"{size} must map to a no-op"
 
+    def test_spacing_commands_are_noops(self) -> None:
+        """\\vspace/\\hspace can land inside math (arXiv:2512.04952 renders
+        \\[\\vspace{-0.5em}\\]); MathJax lacks them. Map to arg-consuming no-ops
+        so the math doesn't error."""
+        script = build_mathjax_config_script()
+        start = script.index("{tex:") + len("{tex:{macros:")
+        end = script.index("}};</script>")
+        macros = json.loads(script[start:end])
+        assert macros.get("vspace") == ["", 1]  # consumes the dimension arg
+        assert macros.get("hspace") == ["", 1]
+        assert macros.get("bigskip") == ""  # bare, no-arg
+
     def test_merges_and_overrides_with_extracted(self) -> None:
         script = build_mathjax_config_script({"Ls": r"\mathcal{L}"})
         # Extract the JSON object from `window.MathJax={tex:{macros:<JSON>}};`.
