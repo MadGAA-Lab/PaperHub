@@ -2,6 +2,7 @@ import io
 import tarfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from urllib.parse import urlparse
 
 import arxiv
 import httpx
@@ -511,7 +512,7 @@ def test_download_arxiv_source_promotes_to_main_mirror_on_export_size_cap(
     def _fake_stream(*args: object, **_kwargs: object) -> object:
         url = args[1] if len(args) > 1 else ""
         seen_urls.append(str(url))
-        if "export.arxiv.org" in str(url):
+        if urlparse(str(url)).hostname == "export.arxiv.org":
             return _ExportStream()
         return _MainStream()
 
@@ -524,9 +525,9 @@ def test_download_arxiv_source_promotes_to_main_mirror_on_export_size_cap(
     )
     # Export tried first, then main mirror.
     assert len(seen_urls) == 2
-    assert "export.arxiv.org" in seen_urls[0]
+    assert urlparse(seen_urls[0]).hostname == "export.arxiv.org"
     assert seen_urls[1] == "https://arxiv.org/src/2503.00200"
-    assert "export.arxiv.org" not in seen_urls[1]
+    assert urlparse(seen_urls[1]).hostname != "export.arxiv.org"
     # Tarball reconstructed + extracted from the main-mirror response.
     assert (source_dir / "main.tex").exists()
     assert (source_dir / "main.tex").read_text(encoding="utf-8") == src_text

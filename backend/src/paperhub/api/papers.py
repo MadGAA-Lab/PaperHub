@@ -7,7 +7,7 @@ import logging
 import mimetypes
 import shutil
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -537,11 +537,16 @@ async def serve_asset(paper_content_id: int, asset_path: str) -> FileResponse:
         row = await cur.fetchone()
     if not row or not row[0]:
         raise HTTPException(404, f"no source dir for paper_content {paper_content_id}")
+    # Reject traversal up front: any absolute segment or `..` in the
+    # client-supplied path is illegal before we ever touch the filesystem.
+    if PurePosixPath(asset_path).is_absolute() or ".." in PurePosixPath(asset_path).parts:
+        raise HTTPException(400, "asset path escapes paper directory")
     # Sync path ops are acceptable here (same scope decision as serve_html/serve_pdf).
     base_dir = Path(row[0]).resolve()  # noqa: ASYNC240
     target = (base_dir / asset_path).resolve()  # noqa: ASYNC240
-    # Containment guard — refuse any ../ escape outside the paper's cache dir.
-    if base_dir != target and base_dir not in target.parents:
+    # Containment guard — the resolved target MUST stay inside the paper's cache
+    # dir (defends against symlinks / normalization the prefix check above misses).
+    if not target.is_relative_to(base_dir):
         raise HTTPException(400, "asset path escapes paper directory")
     if not target.is_file():  # noqa: ASYNC240
         raise HTTPException(404, f"asset not found: {asset_path}")
