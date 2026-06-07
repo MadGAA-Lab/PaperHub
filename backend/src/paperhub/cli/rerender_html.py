@@ -35,6 +35,7 @@ from paperhub.pipelines.figures import (
 from paperhub.pipelines.mathjax_macros import MacroValue, extract_macros_from_dir
 from paperhub.pipelines.renderer import render_html
 from paperhub.pipelines.sentinels import inject_sentinels, postprocess_sentinels
+from paperhub.pipelines.table_figures import rasterize_complex_tables
 from paperhub.pipelines.tikz_figures import rasterize_tikz_figures
 
 _LOG = logging.getLogger("paperhub.rerender_html")
@@ -125,6 +126,10 @@ async def _rerender_one(
     # Pre-rasterise TikZ-drawn figures so pandoc embeds them as <img>
     # instead of dumping raw TikZ source (the survey taxonomy leak).
     marked = rasterize_tikz_figures(
+        marked, preamble=preamble, out_dir=resource_dir,
+    )
+    # Rasterise pandoc-hostile tables (tabular*, \multirow, …) to images.
+    marked = rasterize_complex_tables(
         marked, preamble=preamble, out_dir=resource_dir,
     )
     # Drop LaTeX width hints — pandoc would otherwise emit

@@ -68,6 +68,7 @@ from paperhub.pipelines.paper_asset import write_paper_asset
 from paperhub.pipelines.pymupdf_to_asset import pymupdf_to_asset
 from paperhub.pipelines.renderer import render_html
 from paperhub.pipelines.sentinels import inject_sentinels, postprocess_sentinels
+from paperhub.pipelines.table_figures import rasterize_complex_tables
 from paperhub.pipelines.tikz_figures import rasterize_tikz_figures
 from paperhub.pipelines.title_extract import llm_extract_title
 
@@ -333,6 +334,10 @@ class PaperPipeline:
         marked = rasterize_tikz_figures(
             marked, preamble=ext.preamble, out_dir=source_path.parent,
         )
+        # Rasterise pandoc-hostile tables (tabular*, \multirow, …) to images.
+        marked = rasterize_complex_tables(
+            marked, preamble=ext.preamble, out_dir=source_path.parent,
+        )
         # Drop LaTeX column-width hints — pandoc would otherwise emit
         # style="width:50.0%" on every <img> and shrink high-DPI figures
         # to half-width on the wide Citation Canvas.
@@ -517,6 +522,10 @@ class PaperPipeline:
             )
             marked, _injected = inject_sentinels(full_text, starts)
             marked = rasterize_tikz_figures(
+                marked, preamble=ext.preamble, out_dir=source_path.parent,
+            )
+            # Rasterise pandoc-hostile tables (tabular*, \multirow, …) to images.
+            marked = rasterize_complex_tables(
                 marked, preamble=ext.preamble, out_dir=source_path.parent,
             )
             marked = strip_includegraphics_options(marked)
