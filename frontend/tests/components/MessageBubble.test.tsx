@@ -176,6 +176,46 @@ describe("MessageBubble", () => {
     expect(article?.textContent).not.toContain("$E = mc^2$");
   });
 
+  it("renders \\( ... \\) inline math (issue #5) as KaTeX, not plain text", () => {
+    const { container } = render(
+      <MessageBubble
+        message={{
+          role: "assistant",
+          // The reporter's exact wording from issue #5.
+          content: "The result is \\(E = mc^2\\).",
+          run_id: 1,
+          status: "ok",
+        }}
+      />,
+    );
+    // The TeX-style \( ... \) delimiters must be normalized + rendered by KaTeX.
+    // (KaTeX keeps the LaTeX source in a MathML annotation, so we assert on the
+    // delimiters not surviving — same convention as the $$ / $ tests above.)
+    expect(container.querySelector(".katex")).not.toBeNull();
+    // Inline math, not display: a \( ... \) pair must NOT promote to .katex-display.
+    expect(container.querySelector(".katex-display")).toBeNull();
+    const article = container.querySelector("article");
+    expect(article?.textContent).not.toContain("\\(");
+    expect(article?.textContent).not.toContain("\\)");
+  });
+
+  it("renders \\[ ... \\] display math (issue #5) as KaTeX, not plain text", () => {
+    const { container } = render(
+      <MessageBubble
+        message={{
+          role: "assistant",
+          content: "The objective:\n\n\\[ \\sum_i \\alpha_i x_i \\]\n\nDone.",
+          run_id: 1,
+          status: "ok",
+        }}
+      />,
+    );
+    expect(container.querySelector(".katex-display")).not.toBeNull();
+    const article = container.querySelector("article");
+    expect(article?.textContent).not.toContain("\\[");
+    expect(article?.textContent).not.toContain("\\]");
+  });
+
   it("renders a bare \\begin{equation} environment as KaTeX", () => {
     const { container } = render(
       <MessageBubble
