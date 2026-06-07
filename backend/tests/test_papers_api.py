@@ -1649,6 +1649,40 @@ async def test_serve_asset_blocks_path_traversal(
     assert "top secret" not in r.text
 
 
+async def test_serve_asset_blocks_nested_traversal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A nested ../ escape (valid-looking prefix, then break out) must be refused
+    — the case a naive startswith(base) check misses (CodeQL #3-#5)."""
+    db_path = await _get_db_path(tmp_path, monkeypatch)
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("top secret", encoding="utf-8")
+
+    async with aiosqlite.connect(db_path) as conn:
+        await apply_schema(conn)
+        pc_id = await _seed_paper_content(
+            conn, content_key="arxiv:z", title="T", arxiv_id="z",
+            html_path=str(cache_dir / "source.html"),
+        )
+        await conn.execute(
+            "UPDATE paper_content SET source_dir_path = ? WHERE id = ?",
+            (str(cache_dir), pc_id),
+        )
+        await conn.commit()
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(
+            f"/papers/content/{pc_id}/asset/source/../../secret.txt"
+        )
+
+    assert r.status_code in (400, 404)
+    assert "top secret" not in r.text
+
+
 async def test_serve_asset_404_when_file_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
