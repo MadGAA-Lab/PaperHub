@@ -28,25 +28,23 @@ import pymupdf
 
 logger = logging.getLogger(__name__)
 
-# A plain ``tabular`` is hostile only if its body uses constructs pandoc
-# mishandles; ``tabular*`` / ``tabularx`` are hostile by environment.
-_HOSTILE_BODY_RE = re.compile(r"\\multirow|\\makecell")
-_MULTICOLUMN_RE = re.compile(r"\\multicolumn")
-_CMIDRULE_RE = re.compile(r"\\cmidrule")
+# Environments pandoc CANNOT parse as a table — it emits a garbled
+# ``<div class="tabular*">`` with the column spec + every cell as raw text. A
+# plain ``tabular`` (even with \multirow / \multicolumn / \cmidrule / \makecell)
+# pandoc renders as a real <table>, so it is NOT hostile: rasterising a working
+# table would only degrade it (and risk a blank/garbled image). Only the
+# width-fixed starred / x / y environments qualify.
+_HOSTILE_ENVS = frozenset({"tabular*", "tabularx", "tabulary"})
 
 
-def _is_hostile(env_name: str, body: str) -> bool:
-    """True if a table environment can't be reliably rendered by pandoc."""
-    if env_name in ("tabular*", "tabularx"):
-        return True
-    if _HOSTILE_BODY_RE.search(body):
-        return True
-    return bool(_MULTICOLUMN_RE.search(body) and _CMIDRULE_RE.search(body))
+def _is_hostile(env_name: str, body: str) -> bool:  # noqa: ARG001 — body kept for caller symmetry
+    """True only if pandoc cannot render the environment as a table at all."""
+    return env_name in _HOSTILE_ENVS
 
 
 # Match \begin{<name>} where <name> is a table family env. Order the
-# alternation so the starred / x variants win over the bare "tabular".
-_BEGIN_RE = re.compile(r"\\begin\{(tabular\*|tabularx|tabular)\}")
+# alternation so the starred / x / y variants win over the bare "tabular".
+_BEGIN_RE = re.compile(r"\\begin\{(tabular\*|tabularx|tabulary|tabular)\}")
 
 
 def _matching_end(tex: str, name: str, after: int) -> int:
@@ -211,10 +209,34 @@ def _compile_table_to_png(
             )
         try:
             with pymupdf.open(pdf_path) as doc:  # type: ignore[no-untyped-call]
-                doc.load_page(0).get_pixmap(dpi=dpi).save(str(png_path))
+                pix = doc.load_page(0).get_pixmap(dpi=dpi)
+                if _is_blank_pixmap(pix):
+                    # A PDF that rasterises to all-white means the table didn't
+                    # typeset (a macro/colour quirk swallowed the content —
+                    # arXiv:1810.04805). Never replace a table with a blank
+                    # image; leave the env so pandoc renders something visible.
+                    logger.warning(
+                        "table: rendered image is blank; leaving env as-is"
+                    )
+                    return False
+                pix.save(str(png_path))
         except Exception as exc:  # noqa: BLE001 — pymupdf raises bare exceptions
             logger.warning("table: rasterise failed: %s", exc)
             return False
+    return True
+
+
+def _is_blank_pixmap(pix: pymupdf.Pixmap) -> bool:
+    """True if a rasterised page has no dark content (a coarse grid sample finds
+    only near-white pixels) — the signature of a table that compiled but
+    typeset nothing."""
+    buf, w, h, n = pix.samples, pix.width, pix.height, pix.n
+    for y in range(0, h, max(1, h // 60)):
+        row = y * w * n
+        for x in range(0, w, max(1, w // 60)):
+            i = row + x * n
+            if buf[i] + buf[i + 1] + buf[i + 2] < 600:  # a dark-ish pixel
+                return False
     return True
 
 

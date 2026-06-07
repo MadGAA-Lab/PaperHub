@@ -1,6 +1,7 @@
 import shutil
 from pathlib import Path
 
+import pymupdf
 import pytest
 
 from paperhub.pipelines.table_figures import (
@@ -8,10 +9,21 @@ from paperhub.pipelines.table_figures import (
     _compile_table_to_png,
     _convert_rasterized_table_floats,
     _find_table_envs,
+    _is_blank_pixmap,
     _is_hostile,
     _unwrap_fitting_boxes,
     rasterize_complex_tables,
 )
+
+
+def test_is_blank_pixmap_detects_white_vs_content() -> None:
+    blank = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 80, 80), False)
+    blank.clear_with(255)  # all white
+    assert _is_blank_pixmap(blank) is True
+    content = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 80, 80), False)
+    content.clear_with(255)
+    content.set_pixel(40, 40, (0, 0, 0))  # one black pixel = content
+    assert _is_blank_pixmap(content) is False
 
 
 def test_rasterized_table_float_becomes_figure() -> None:
@@ -70,23 +82,20 @@ def test_unwrap_leaves_non_table_figures_alone() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_starred_and_x_envs_are_hostile() -> None:
+def test_only_width_fixed_envs_are_hostile() -> None:
+    # pandoc can't parse these as a table at all.
     assert _is_hostile("tabular*", "a & b \\\\")
     assert _is_hostile("tabularx", "a & b \\\\")
+    assert _is_hostile("tabulary", "a & b \\\\")
 
 
-def test_plain_tabular_is_not_hostile() -> None:
+def test_plain_tabular_is_never_hostile() -> None:
+    # pandoc renders plain `tabular` as a real <table>, even with constructs we
+    # used to (wrongly) rasterise. Leave working tables as HTML.
     assert not _is_hostile("tabular", "a & b & c \\\\ \\midrule x & 1 & 2 \\\\")
-
-
-def test_multirow_or_makecell_makes_plain_tabular_hostile() -> None:
-    assert _is_hostile("tabular", "\\multirow{2}{*}{a} & b \\\\")
-    assert _is_hostile("tabular", "\\makecell{a\\\\b} & c \\\\")
-
-
-def test_multicolumn_alone_is_not_hostile_but_with_cmidrule_is() -> None:
-    assert not _is_hostile("tabular", "\\multicolumn{2}{c}{a} \\\\")
-    assert _is_hostile("tabular", "\\multicolumn{2}{c}{a} \\\\ \\cmidrule(lr){1-2}")
+    assert not _is_hostile("tabular", "\\multirow{2}{*}{a} & b \\\\")
+    assert not _is_hostile("tabular", "\\makecell{a\\\\b} & c \\\\")
+    assert not _is_hostile("tabular", "\\multicolumn{2}{c}{a} \\\\ \\cmidrule(lr){1-2}")
 
 
 # ---------------------------------------------------------------------------
