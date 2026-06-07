@@ -23,10 +23,18 @@
  * MathJax itself (the CDN script that actually typesets math) is left intact.
  */
 export function stripDeadCdnScripts(html: string): string {
-  return html.replace(
-    /<script\b[^>]*\bsrc="[^"]*(?:polyfill\.io|html5shiv)[^"]*"[^>]*>\s*<\/script>/gi,
-    "",
-  );
+  const re =
+    /<script\b[^>]*\bsrc="[^"]*(?:polyfill\.io|html5shiv)[^"]*"[^>]*>\s*<\/script>/gi;
+  // Apply repeatedly until the markup stops changing: a single pass can let a
+  // removed substring re-form a new match from its surroundings (the classic
+  // incomplete-multi-character-sanitization footgun), so loop to a fixed point.
+  let out = html;
+  let prev: string;
+  do {
+    prev = out;
+    out = out.replace(re, "");
+  } while (out !== prev);
+  return out;
 }
 
 /**

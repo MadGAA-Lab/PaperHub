@@ -65,6 +65,17 @@ describe("withBaseHref", () => {
     expect(out).toContain("mathjax"); // the math typesetter is preserved
   });
 
+  it("strips even when a removed match would re-form a new one (loops to fixed point)", () => {
+    // Overlapping/adjacent tags where a single pass could leave a reconstructed
+    // match behind — the apply-until-stable loop must remove all of them.
+    const dead =
+      '<script src="https://polyfill.io/v3/polyfill.min.js"></script>';
+    const html = `<head>${dead}${dead}<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script></head>`;
+    const out = stripDeadCdnScripts(html);
+    expect(out).not.toContain("polyfill.io");
+    expect(out).toContain("mathjax");
+  });
+
   it("makes a relative asset URL resolve against the backend (DOMParser check)", () => {
     const html = withBaseHref(
       "<html><head></head><body><img src='asset/source/fig.png'></body></html>",
