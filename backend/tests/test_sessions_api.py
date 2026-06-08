@@ -728,3 +728,30 @@ async def test_fork_endpoint_404_on_soft_deleted_session(
         await conn.commit()
     resp = await sessions_client.post("/sessions/1/fork", json={"run_id": r1})
     assert resp.status_code == 404
+
+
+async def test_record_user_message_promotes_fork_placeholder_title(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "paperhub.db"
+    async with aiosqlite.connect(db_path) as conn:
+        await conn.execute("PRAGMA foreign_keys = ON")
+        await apply_schema(conn)
+        await conn.execute(
+            "INSERT INTO chat_sessions (title) VALUES ('Fork of My chat')")
+        c = await conn.execute("INSERT INTO runs (session_id, status) VALUES (1, 'ok')")
+        run_id = int(c.lastrowid)
+        await conn.commit()
+
+        await _record_user_message(conn, 1, "a brand new prompt", run_id)
+
+        async with conn.execute(
+            "SELECT title FROM chat_sessions WHERE id = 1") as cur:
+            assert (await cur.fetchone())[0] == "a brand new prompt"
+
+        # A SECOND send must NOT overwrite the now-real title.
+        c2 = await conn.execute("INSERT INTO runs (session_id, status) VALUES (1, 'ok')")
+        await _record_user_message(conn, 1, "follow up", int(c2.lastrowid))
+        async with conn.execute(
+            "SELECT title FROM chat_sessions WHERE id = 1") as cur:
+            assert (await cur.fetchone())[0] == "a brand new prompt"

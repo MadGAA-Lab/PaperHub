@@ -296,10 +296,12 @@ async def _record_user_message(
         (session_id, content, run_id),
     )
     # Promote the still-default title from the first user message so the
-    # session is identifiable in GET /sessions across devices. Only fires while
-    # the title is the seed 'New chat' — later turns never overwrite it.
+    # session is identifiable in GET /sessions across devices. Fires while the
+    # title is the seed 'New chat' OR a fork placeholder ('Fork of …'); the
+    # rename moves the title off both sentinels so later turns never overwrite it.
     await conn.execute(
-        "UPDATE chat_sessions SET title = ? WHERE id = ? AND title = 'New chat'",
+        "UPDATE chat_sessions SET title = ? "
+        "WHERE id = ? AND (title = 'New chat' OR title LIKE 'Fork of %')",
         (_derive_title(content), session_id),
     )
     await conn.commit()
