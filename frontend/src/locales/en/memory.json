@@ -1,0 +1,28 @@
+{
+  "scope": {
+    "session": "Project (session)",
+    "global": "User (global)"
+  },
+  "row": {
+    "editAria": "Edit memory content",
+    "save": "save",
+    "cancel": "cancel",
+    "edit": "edit",
+    "deactivate": "deactivate",
+    "reactivate": "reactivate",
+    "delete": "delete",
+    "supersedes": "supersedes #{{id}}",
+    "supersededBy": "superseded by #{{id}}"
+  },
+  "compose": {
+    "placeholder": "Add a memory…",
+    "contentAria": "New memory content",
+    "scopeAria": "Memory scope",
+    "sessionDisabledTitle": "Send at least one message to enable project memory",
+    "add": "Add memory",
+    "sessionHint": "Send at least one message to enable project (session) memory.",
+    "gateRefused": "Couldn't save: {{reason}}",
+    "saveFailed": "Couldn't save memory — please try again."
+  },
+  "empty": "No memories yet — facts the assistant learns during your sessions will appear here."
+}

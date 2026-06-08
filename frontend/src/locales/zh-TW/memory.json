@@ -1,0 +1,28 @@
+{
+  "scope": {
+    "session": "專案（工作階段）",
+    "global": "使用者（全域）"
+  },
+  "row": {
+    "editAria": "編輯記憶內容",
+    "save": "儲存",
+    "cancel": "取消",
+    "edit": "編輯",
+    "deactivate": "停用",
+    "reactivate": "重新啟用",
+    "delete": "刪除",
+    "supersedes": "取代 #{{id}}",
+    "supersededBy": "被 #{{id}} 取代"
+  },
+  "compose": {
+    "placeholder": "新增一則記憶…",
+    "contentAria": "新記憶內容",
+    "scopeAria": "記憶範圍",
+    "sessionDisabledTitle": "傳送至少一則訊息以啟用專案記憶",
+    "add": "新增記憶",
+    "sessionHint": "傳送至少一則訊息以啟用專案（工作階段）記憶。",
+    "gateRefused": "無法儲存：{{reason}}",
+    "saveFailed": "無法儲存記憶 — 請再試一次。"
+  },
+  "empty": "尚無記憶 — 助理在你工作階段中學到的事實會顯示在這裡。"
+}

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Pencil, Trash2, Check, X, Plus } from "lucide-react";
 
 import type { MemoryItem, MemoryScope } from "@/types/domain";
@@ -29,6 +30,7 @@ function MemoryRow({
   memory: MemoryItem;
   sessionId: number | null;
 }) {
+  const { t } = useTranslation("memory");
   const patchMemoryLocal = useMemoriesStore((s) => s.patchMemoryLocal);
   const deleteMemoryLocal = useMemoriesStore((s) => s.deleteMemoryLocal);
 
@@ -86,7 +88,7 @@ function MemoryRow({
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             disabled={busy}
-            aria-label="Edit memory content"
+            aria-label={t("row.editAria")}
             className="text-xs min-h-0"
           />
           <div className="flex gap-1 justify-end">
@@ -96,7 +98,7 @@ function MemoryRow({
               variant="default"
               disabled={busy || draft.trim() === ""}
               onClick={() => void handleSave()}
-              aria-label="save"
+              aria-label={t("row.save")}
             >
               <Check className="h-3 w-3" />
             </Button>
@@ -106,7 +108,7 @@ function MemoryRow({
               variant="ghost"
               disabled={busy}
               onClick={handleCancelEdit}
-              aria-label="cancel"
+              aria-label={t("row.cancel")}
             >
               <X className="h-3 w-3" />
             </Button>
@@ -129,12 +131,12 @@ function MemoryRow({
         {/* Supersede chain links */}
         {memory.supersedes !== null && (
           <span className="text-xs text-muted-foreground">
-            supersedes #{memory.supersedes}
+            {t("row.supersedes", { id: memory.supersedes })}
           </span>
         )}
         {memory.superseded_by !== null && (
           <span className="text-xs text-muted-foreground">
-            superseded by #{memory.superseded_by}
+            {t("row.supersededBy", { id: memory.superseded_by })}
           </span>
         )}
 
@@ -150,7 +152,7 @@ function MemoryRow({
               variant="ghost"
               disabled={busy}
               onClick={() => { setDraft(memory.content); setEditing(true); }}
-              aria-label="edit"
+              aria-label={t("row.edit")}
               className="text-muted-foreground hover:text-foreground"
             >
               <Pencil className="h-3 w-3" />
@@ -161,7 +163,7 @@ function MemoryRow({
               variant="ghost"
               disabled={busy}
               onClick={() => void handleToggleStatus()}
-              aria-label={isSuperseded ? "reactivate" : "deactivate"}
+              aria-label={isSuperseded ? t("row.reactivate") : t("row.deactivate")}
               className="text-muted-foreground hover:text-foreground"
             >
               {isSuperseded ? (
@@ -176,7 +178,7 @@ function MemoryRow({
               variant="ghost"
               disabled={busy}
               onClick={() => void handleDelete()}
-              aria-label="delete"
+              aria-label={t("row.delete")}
               className="text-muted-foreground hover:text-destructive"
             >
               <Trash2 className="h-3 w-3" />
@@ -192,6 +194,7 @@ function MemoryRow({
  *  toggle (Project/User), an Add button, and an inline error when the safety
  *  gate refuses the content. */
 function AddMemoryComposer({ sessionId }: { sessionId: number | null }) {
+  const { t } = useTranslation("memory");
   const addMemoryLocal = useMemoriesStore((s) => s.addMemoryLocal);
   // No backend session yet → only global (user) memories can be added; a
   // session memory needs an owning session, which doesn't exist until the
@@ -216,9 +219,9 @@ function AddMemoryComposer({ sessionId }: { sessionId: number | null }) {
       textareaRef.current?.focus();
     } catch (err) {
       if (err instanceof MemoryGateRefused) {
-        setError(`Couldn't save: ${err.reason}`);
+        setError(t("compose.gateRefused", { reason: err.reason }));
       } else {
-        setError("Couldn't save memory — please try again.");
+        setError(t("compose.saveFailed"));
       }
     } finally {
       setBusy(false);
@@ -232,8 +235,8 @@ function AddMemoryComposer({ sessionId }: { sessionId: number | null }) {
         value={content}
         onChange={(e) => setContent(e.target.value)}
         disabled={busy}
-        placeholder="Add a memory…"
-        aria-label="New memory content"
+        placeholder={t("compose.placeholder")}
+        aria-label={t("compose.contentAria")}
         className="text-xs min-h-0 mb-1.5 resize-none"
         rows={2}
       />
@@ -241,7 +244,7 @@ function AddMemoryComposer({ sessionId }: { sessionId: number | null }) {
         {/* Scope toggle */}
         <div
           role="group"
-          aria-label="Memory scope"
+          aria-label={t("compose.scopeAria")}
           className="flex rounded border border-border overflow-hidden text-xs"
         >
           <button
@@ -252,7 +255,7 @@ function AddMemoryComposer({ sessionId }: { sessionId: number | null }) {
             title={
               sessionScopeAvailable
                 ? undefined
-                : "Send at least one message to enable project memory"
+                : t("compose.sessionDisabledTitle")
             }
             className={`px-2 py-0.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
               scope === "session"
@@ -260,7 +263,7 @@ function AddMemoryComposer({ sessionId }: { sessionId: number | null }) {
                 : "text-muted-foreground hover:bg-muted"
             }`}
           >
-            Project (session)
+            {t("scope.session")}
           </button>
           <button
             type="button"
@@ -273,7 +276,7 @@ function AddMemoryComposer({ sessionId }: { sessionId: number | null }) {
                 : "text-muted-foreground hover:bg-muted"
             }`}
           >
-            User (global)
+            {t("scope.global")}
           </button>
         </div>
         <span className="flex-1" />
@@ -283,14 +286,14 @@ function AddMemoryComposer({ sessionId }: { sessionId: number | null }) {
           variant="default"
           disabled={busy || content.trim() === ""}
           onClick={() => void handleAdd()}
-          aria-label="Add memory"
+          aria-label={t("compose.add")}
         >
           <Plus className="h-3 w-3" />
         </Button>
       </div>
       {!sessionScopeAvailable && (
         <p className="mt-1 text-xs text-muted-foreground">
-          Send at least one message to enable project (session) memory.
+          {t("compose.sessionHint")}
         </p>
       )}
       {error !== null && (
@@ -338,6 +341,7 @@ function MemorySection({
  * controls: edit content, toggle active↔superseded, delete.
  */
 export function MemoryManager({ sessionId }: Props) {
+  const { t } = useTranslation("memory");
   const fetchMemories = useMemoriesStore((s) => s.fetchMemories);
   const memories = useMemoriesStore(
     (s) => s.memoriesBySession[sessionId ?? 0] ?? EMPTY_MEMORIES,
@@ -356,18 +360,17 @@ export function MemoryManager({ sessionId }: Props) {
       <AddMemoryComposer sessionId={sessionId} />
       {!hasAny ? (
         <p className="text-xs text-muted-foreground text-center px-4 py-8">
-          No memories yet — facts the assistant learns during your sessions will
-          appear here.
+          {t("empty")}
         </p>
       ) : (
         <>
           <MemorySection
-            label="Project (session)"
+            label={t("scope.session")}
             items={sessionScoped}
             sessionId={sessionId}
           />
           <MemorySection
-            label="User (global)"
+            label={t("scope.global")}
             items={globalScoped}
             sessionId={sessionId}
           />

@@ -7,6 +7,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { MemoryManager } from "@/components/chat/MemoryManager";
 import { useMemoriesStore } from "@/store/memories";
 import { API_BASE_URL } from "@/lib/api";
+import i18n from "@/lib/i18n";
 import type { MemoryItem } from "@/types/domain";
 
 // ---------------------------------------------------------------------------
@@ -389,5 +390,29 @@ describe("MemoryManager", () => {
     const paragraphs = document.querySelectorAll("p");
     const pTexts = Array.from(paragraphs).map((el) => el.textContent ?? "");
     expect(pTexts).not.toContain("my secret password is abc123");
+  });
+
+  it("localizes memory chrome when the UI language switches to Japanese", async () => {
+    server.use(
+      http.get(`${API_BASE_URL}/memories`, () => HttpResponse.json([])),
+    );
+
+    render(<MemoryManager sessionId={7} />);
+
+    // English (source) empty-state renders first.
+    await screen.findByText(/no memories/i);
+
+    try {
+      await i18n.changeLanguage("ja");
+
+      // The Japanese "Add memory" button aria-label proves the namespace is
+      // wired and the catalog resolves.
+      expect(
+        screen.getByRole("button", { name: "メモリを追加" }),
+      ).toBeInTheDocument();
+    } finally {
+      // Reset so other tests keep matching the English source catalog.
+      await i18n.changeLanguage("en");
+    }
   });
 });

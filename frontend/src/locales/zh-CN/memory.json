@@ -1,0 +1,28 @@
+{
+  "scope": {
+    "session": "项目（会话）",
+    "global": "用户（全局）"
+  },
+  "row": {
+    "editAria": "编辑记忆内容",
+    "save": "保存",
+    "cancel": "取消",
+    "edit": "编辑",
+    "deactivate": "停用",
+    "reactivate": "重新启用",
+    "delete": "删除",
+    "supersedes": "取代 #{{id}}",
+    "supersededBy": "被 #{{id}} 取代"
+  },
+  "compose": {
+    "placeholder": "添加一条记忆…",
+    "contentAria": "新记忆内容",
+    "scopeAria": "记忆范围",
+    "sessionDisabledTitle": "发送至少一条消息以启用项目记忆",
+    "add": "添加记忆",
+    "sessionHint": "发送至少一条消息以启用项目（会话）记忆。",
+    "gateRefused": "无法保存：{{reason}}",
+    "saveFailed": "无法保存记忆 — 请重试。"
+  },
+  "empty": "尚无记忆 — 助理在你会话中学到的事实会显示在这里。"
+}

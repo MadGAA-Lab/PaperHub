@@ -1,0 +1,28 @@
+{
+  "scope": {
+    "session": "プロジェクト（セッション）",
+    "global": "ユーザー（グローバル）"
+  },
+  "row": {
+    "editAria": "メモリの内容を編集",
+    "save": "保存",
+    "cancel": "キャンセル",
+    "edit": "編集",
+    "deactivate": "無効化",
+    "reactivate": "再有効化",
+    "delete": "削除",
+    "supersedes": "#{{id}} を置き換え",
+    "supersededBy": "#{{id}} に置き換えられました"
+  },
+  "compose": {
+    "placeholder": "メモリを追加…",
+    "contentAria": "新しいメモリの内容",
+    "scopeAria": "メモリの範囲",
+    "sessionDisabledTitle": "プロジェクトメモリを有効にするにはメッセージを1件以上送信してください",
+    "add": "メモリを追加",
+    "sessionHint": "プロジェクト（セッション）メモリを有効にするにはメッセージを1件以上送信してください。",
+    "gateRefused": "保存できませんでした：{{reason}}",
+    "saveFailed": "メモリを保存できませんでした — もう一度お試しください。"
+  },
+  "empty": "まだメモリはありません — セッション中にアシスタントが学習した事実がここに表示されます。"
+}
