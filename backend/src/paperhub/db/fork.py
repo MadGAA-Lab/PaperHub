@@ -15,6 +15,7 @@ than aborting it.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 from dataclasses import dataclass
@@ -161,6 +162,30 @@ async def fork_session(
     )
 
 
+def _copy_slides_tree(src: Path, dst: Path, *, new_session_id: int) -> bool:
+    """Blocking copy of a session's ``slides/`` artifact dir. Returns True on a
+    successful copy, False if the source is missing or the copy fails
+    (best-effort — the caller leaves the fork deckless). Run via
+    ``asyncio.to_thread`` so the event loop is not stalled during the copy.
+    """
+    try:
+        if not src.exists():
+            _LOG.warning(
+                "fork: source slides dir %s missing; fork %s left deckless",
+                src, new_session_id,
+            )
+            return False
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+        return True
+    except OSError as exc:
+        _LOG.warning(
+            "fork: deck-artifact copy failed (%r); fork %s left deckless",
+            exc, new_session_id,
+        )
+        return False
+
+
 async def _copy_deck(
     conn: aiosqlite.Connection,
     *,
@@ -185,22 +210,13 @@ async def _copy_deck(
     dst_slides = workspace_dir / "chat_session" / str(new_session_id) / "slides"
 
     # Copy the artifact tree FIRST (outside the DB write lock — it can be slow).
+    # Offloaded to a thread so the event loop is not stalled during the copy.
     # If the source dir is missing or the copy fails, bail without inserting
     # deck rows (deckless fork).
-    try:
-        if not src_slides.exists():
-            _LOG.warning(
-                "fork: source slides dir %s missing; fork %s left deckless",
-                src_slides, new_session_id,
-            )
-            return
-        dst_slides.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(src_slides, dst_slides, dirs_exist_ok=True)
-    except OSError as exc:
-        _LOG.warning(
-            "fork: deck-artifact copy failed (%r); fork %s left deckless",
-            exc, new_session_id,
-        )
+    copied = await asyncio.to_thread(
+        _copy_slides_tree, src_slides, dst_slides, new_session_id=new_session_id
+    )
+    if not copied:
         return
 
     # Rewrite the absolute tex/pdf paths to point into the fork's own dir.
