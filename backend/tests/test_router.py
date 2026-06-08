@@ -235,3 +235,23 @@ async def test_routing_accuracy_at_least_80_percent(
         if result["routing_decision"].intent == row["expected"]:
             correct += 1
     assert correct / len(rows) >= 0.80, f"router accuracy {correct}/{len(rows)} < 80 %"
+
+
+async def test_router_surfaces_slide_attached_variable(migrated_db, fake_tracer) -> None:
+    captured: dict[str, object] = {}
+
+    class _Cap:
+        async def structured(self, *, slot, variables, response_model, model, **__):
+            captured.update(variables)
+            return response_model(
+                intent="paper_qa", model_tier="flagship", confidence=1.0,
+                reasoning="x", resolved_query="explain this graph",
+                response_language="English")
+
+    await migrated_db.execute("INSERT INTO chat_sessions DEFAULT VALUES")
+    await migrated_db.commit()
+    state = {"run_id": fake_tracer._run_id, "branch": "", "session_id": 1,  # noqa: SLF001
+             "user_message": "explain this graph", "history": [], "slide_attached": True}
+    await router_node(state, adapter=_Cap(), tracer=fake_tracer, model="m",
+                      conn=migrated_db)
+    assert captured["slide_attached"] is True

@@ -50,7 +50,8 @@ async def test_structured_output_parses_into_model() -> None:
     adapter: LlmAdapter = LiteLlmAdapter()
     decision = await adapter.structured(
         slot="router/v1",
-        variables={"user_message": "Find recent papers on MoE routing", "enabled_refs_count": 0},
+        variables={"user_message": "Find recent papers on MoE routing",
+                   "enabled_refs_count": 0, "slide_attached": False},
         response_model=RoutingDecision,
         model="gpt-4o-mini",
         mock_response='{"intent":"paper_search","model_tier":"small",'
@@ -89,7 +90,8 @@ async def test_structured_uses_json_mode_when_no_native_schema(
     adapter: LlmAdapter = LiteLlmAdapter()
     decision = await adapter.structured(
         slot="router/v1",
-        variables={"user_message": "find papers on MoE", "enabled_refs_count": 0},
+        variables={"user_message": "find papers on MoE", "enabled_refs_count": 0,
+                   "slide_attached": False},
         response_model=RoutingDecision,
         model="deepseek/deepseek-v4-flash",
     )
@@ -118,7 +120,8 @@ async def test_structured_falls_back_when_native_schema_rejected(
     adapter: LlmAdapter = LiteLlmAdapter()
     decision = await adapter.structured(
         slot="router/v1",
-        variables={"user_message": "find papers on MoE", "enabled_refs_count": 0},
+        variables={"user_message": "find papers on MoE", "enabled_refs_count": 0,
+                   "slide_attached": False},
         response_model=RoutingDecision,
         model="deepseek/deepseek-chat",
     )
@@ -161,7 +164,8 @@ async def test_structured_with_history_builds_correct_messages() -> None:
 
     await adapter.structured(
         slot="router/v1",
-        variables={"user_message": "So what did I ask?", "enabled_refs_count": 0},
+        variables={"user_message": "So what did I ask?", "enabled_refs_count": 0,
+                   "slide_attached": False},
         response_model=RoutingDecision,
         model="gpt-4o-mini",
         history=history,

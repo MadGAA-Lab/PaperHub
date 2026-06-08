@@ -36,15 +36,22 @@ async def router_node(
         if row is not None:
             enabled_refs_count = int(row[0])
 
+    slide_attached = bool(state.get("slide_attached"))
+
     async with tracer.step(agent="router", tool="classify", model=model) as step:
         step.record_args(
-            {"user_message": user_message, "enabled_refs_count": enabled_refs_count},
+            {
+                "user_message": user_message,
+                "enabled_refs_count": enabled_refs_count,
+                "slide_attached": slide_attached,
+            },
         )
         decision = await adapter.structured(
             slot="router/v1",
             variables={
                 "user_message": user_message,
                 "enabled_refs_count": enabled_refs_count,
+                "slide_attached": slide_attached,
             },
             response_model=RoutingDecision,
             model=model,
