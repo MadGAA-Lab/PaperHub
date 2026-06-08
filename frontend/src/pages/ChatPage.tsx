@@ -112,6 +112,24 @@ export function ChatPage() {
   const isStreaming =
     activeSession?.messages.some((m) => m.status === "streaming") ?? false;
 
+  const deckForChip = useSlidesStore((s) =>
+    backendSessionId === null ? undefined : s.deckBySession[backendSessionId]);
+  const currentPageForChip = useSlidesStore((s) =>
+    backendSessionId === null ? 1 : (s.currentPageBySession[backendSessionId] ?? 1));
+  const slideAttached = useSlidesStore((s) =>
+    backendSessionId === null ? true
+      : (s.slideAttachedBySession[backendSessionId] ?? true));
+  const setSlideAttached = useSlidesStore((s) => s.setSlideAttached);
+
+  const slideChip =
+    backendSessionId !== null && deckForChip
+      ? {
+          page: currentPageForChip,
+          attached: slideAttached,
+          onToggle: () => setSlideAttached(backendSessionId, !slideAttached),
+        }
+      : null;
+
   // A slides generate/edit turn in flight for the active session: drives the
   // Slides-panel editing mask (mask + hold the current deck) and the
   // reload-on-complete. The streaming message's trace gives the live stage.
@@ -230,6 +248,7 @@ export function ChatPage() {
           canvasOpen={canvasOpen}
           slidesOpen={slidesOpen}
           onToggleSlides={handleToggleSlides}
+          slideChip={slideChip}
         />
       </div>
       {/* Right panel — shared slot for Citation Canvas and Memory Manager.

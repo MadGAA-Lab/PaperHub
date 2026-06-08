@@ -8,6 +8,8 @@ import {
   Send,
 } from "lucide-react";
 
+import { SlideContextChip } from "@/components/chat/SlideContextChip";
+
 import { Button } from "@/components/ui/button";
 import {
   Tooltip,
@@ -38,6 +40,10 @@ interface Props {
   slidesOpen?: boolean;
   /** Called when the user clicks the Slides button to toggle the panel. */
   onToggleSlides?: () => void;
+  /** When the session has a deck in view, the active-slide chip state; null
+   *  hides the chip. Content (page) tracks the active slide; attached is the
+   *  sticky toggle. */
+  slideChip?: { page: number; attached: boolean; onToggle: () => void } | null;
 }
 
 interface Capability {
@@ -63,6 +69,7 @@ export function Composer({
   canvasOpen: canvasOpenProp,
   slidesOpen = false,
   onToggleSlides,
+  slideChip = null,
 }: Props) {
   const draft = useChatStore((s) => s.composerDraft);
   const setDraft = useChatStore((s) => s.setComposerDraft);
@@ -168,6 +175,15 @@ export function Composer({
         {/* Single rounded container — textarea on top, tool row + send on bottom.
             focus-within ring unifies the visual treatment across child focus. */}
         <div className="rounded-2xl border border-input bg-background shadow-sm transition-shadow focus-within:ring-2 focus-within:ring-ring">
+          {slideChip && (
+            <div className="px-3 pt-2">
+              <SlideContextChip
+                page={slideChip.page}
+                attached={slideChip.attached}
+                onToggle={slideChip.onToggle}
+              />
+            </div>
+          )}
           <textarea
             ref={ref}
             value={value}
