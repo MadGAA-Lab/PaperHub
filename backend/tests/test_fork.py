@@ -141,3 +141,91 @@ async def test_fork_first_message_yields_empty_history(tmp_path: Path) -> None:
             "SELECT COUNT(*) FROM messages WHERE session_id = ?",
             (res.new_session_id,)) as cur:
             assert (await cur.fetchone())[0] == 0
+
+
+async def _seed_deck(conn, *, session_id, run_id, slides_dir: Path) -> int:
+    slides_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240
+    (slides_dir / "deck.tex").write_text("\\documentclass{beamer}", encoding="utf-8")
+    (slides_dir / "deck.pdf").write_bytes(b"%PDF-1.5 fake")
+    (slides_dir / "edit_history").mkdir(exist_ok=True)
+    (slides_dir / "edit_history" / "version_x.json").write_text("{}", encoding="utf-8")
+    cur = await conn.execute(
+        "INSERT INTO decks (session_id, run_id, tex_path, pdf_path, page_count, "
+        "current_version_id, status) VALUES (?, ?, ?, ?, 2, 'version_x', 'ok')",
+        (session_id, run_id, str(slides_dir / "deck.tex"), str(slides_dir / "deck.pdf")),
+    )
+    deck_id = int(cur.lastrowid)
+    for i in range(2):
+        await conn.execute(
+            "INSERT INTO deck_slides (deck_id, slide_index, frame_tex, page_start, "
+            "page_end) VALUES (?, ?, ?, ?, ?)",
+            (deck_id, i, f"\\begin{{frame}}{{S{i}}}\\end{{frame}}", i + 1, i + 1))
+    await conn.commit()
+    return deck_id
+
+
+async def test_fork_copies_deck_with_rewritten_paths(tmp_path: Path) -> None:
+    db = tmp_path / "t.db"
+    async with aiosqlite.connect(db) as conn:
+        await conn.execute("PRAGMA foreign_keys = ON")
+        await apply_schema(conn)
+        await conn.execute("INSERT INTO chat_sessions (title) VALUES ('Orig')")
+        await conn.commit()
+        r1 = await _turn(conn, 1, "make slides", "done", routing='{"intent":"slides"}')
+        src_slides = tmp_path / "chat_session" / "1" / "slides"
+        await _seed_deck(conn, session_id=1, run_id=r1, slides_dir=src_slides)
+        r2 = await _turn(conn, 1, "next", "ok")
+
+        res = await fork_session(
+            conn, source_session_id=1, fork_run_id=r2, workspace_dir=tmp_path)
+
+        async with conn.execute(
+            "SELECT tex_path, pdf_path, page_count, current_version_id "
+            "FROM decks WHERE session_id = ?", (res.new_session_id,)) as cur:
+            drow = await cur.fetchone()
+        assert drow is not None
+        fork_slides = tmp_path / "chat_session" / str(res.new_session_id) / "slides"
+        assert drow[0] == str(fork_slides / "deck.tex")
+        assert drow[1] == str(fork_slides / "deck.pdf")
+        assert drow[2] == 2 and drow[3] == "version_x"
+        async with conn.execute(
+            "SELECT COUNT(*) FROM deck_slides d JOIN decks k ON k.id = d.deck_id "
+            "WHERE k.session_id = ?", (res.new_session_id,)) as cur:
+            assert (await cur.fetchone())[0] == 2
+        assert (fork_slides / "deck.tex").exists()
+        assert (fork_slides / "edit_history" / "version_x.json").exists()
+
+
+async def test_fork_deck_artifact_failure_yields_deckless_fork(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """If copying the slides dir fails, the fork still succeeds WITHOUT a deck."""
+    import paperhub.db.fork as fork_mod
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(fork_mod.shutil, "copytree", _boom)
+
+    db = tmp_path / "t.db"
+    async with aiosqlite.connect(db) as conn:
+        await conn.execute("PRAGMA foreign_keys = ON")
+        await apply_schema(conn)
+        await conn.execute("INSERT INTO chat_sessions (title) VALUES ('Orig')")
+        await conn.commit()
+        r1 = await _turn(conn, 1, "make slides", "done")
+        src_slides = tmp_path / "chat_session" / "1" / "slides"
+        await _seed_deck(conn, session_id=1, run_id=r1, slides_dir=src_slides)
+        r2 = await _turn(conn, 1, "next", "ok")
+
+        res = await fork_session(
+            conn, source_session_id=1, fork_run_id=r2, workspace_dir=tmp_path)
+
+        async with conn.execute(
+            "SELECT COUNT(*) FROM decks WHERE session_id = ?",
+            (res.new_session_id,)) as cur:
+            assert (await cur.fetchone())[0] == 0
+        async with conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?",
+            (res.new_session_id,)) as cur:
+            assert (await cur.fetchone())[0] == 2

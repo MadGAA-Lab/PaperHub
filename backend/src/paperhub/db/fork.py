@@ -15,12 +15,16 @@ than aborting it.
 """
 from __future__ import annotations
 
+import logging
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 import aiosqlite
 
 from paperhub.db.connection import write_transaction
+
+_LOG = logging.getLogger(__name__)
 
 _FORK_TITLE_PREFIX = "Fork of "
 
@@ -145,8 +149,84 @@ async def fork_session(
             (new_sid, source_session_id),
         )
 
-    # Deck copy (best-effort) is added in Task 2.
+    await _copy_deck(
+        conn,
+        source_session_id=source_session_id,
+        new_session_id=new_sid,
+        workspace_dir=workspace_dir,
+    )
 
     return ForkResult(
         new_session_id=new_sid, forked_message=forked_text, title=new_title
     )
+
+
+async def _copy_deck(
+    conn: aiosqlite.Connection,
+    *,
+    source_session_id: int,
+    new_session_id: int,
+    workspace_dir: Path,
+) -> None:
+    """Best-effort: copy the source deck (decks + deck_slides rows + the whole
+    slides/ artifact dir) into the fork. On ANY failure, leave the fork deckless
+    — never raise, so a deck problem can't abort an otherwise-good fork."""
+    async with conn.execute(
+        "SELECT id, run_id, tex_path, pdf_path, speaker_notes_json, plan_json, "
+        "page_count, current_version_id, contributing_paper_ids_json, status "
+        "FROM decks WHERE session_id = ?",
+        (source_session_id,),
+    ) as cur:
+        deck = await cur.fetchone()
+    if deck is None:
+        return  # no deck to copy
+
+    src_slides = workspace_dir / "chat_session" / str(source_session_id) / "slides"
+    dst_slides = workspace_dir / "chat_session" / str(new_session_id) / "slides"
+
+    # Copy the artifact tree FIRST (outside the DB write lock — it can be slow).
+    # If the source dir is missing or the copy fails, bail without inserting
+    # deck rows (deckless fork).
+    try:
+        if not src_slides.exists():
+            _LOG.warning(
+                "fork: source slides dir %s missing; fork %s left deckless",
+                src_slides, new_session_id,
+            )
+            return
+        dst_slides.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src_slides, dst_slides, dirs_exist_ok=True)
+    except OSError as exc:
+        _LOG.warning(
+            "fork: deck-artifact copy failed (%r); fork %s left deckless",
+            exc, new_session_id,
+        )
+        return
+
+    # Rewrite the absolute tex/pdf paths to point into the fork's own dir.
+    new_tex = str(dst_slides / "deck.tex")
+    new_pdf = str(dst_slides / "deck.pdf") if deck[3] else None
+
+    async with write_transaction(conn):
+        await conn.execute(
+            "INSERT INTO decks (session_id, run_id, tex_path, pdf_path, "
+            "speaker_notes_json, plan_json, page_count, current_version_id, "
+            "contributing_paper_ids_json, status) "
+            "VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (new_session_id, new_tex, new_pdf, deck[4], deck[5], deck[6], deck[7],
+             deck[8], deck[9]),
+        )
+        async with conn.execute(
+            "SELECT id FROM decks WHERE session_id = ?", (new_session_id,)
+        ) as cur:
+            deck_row = await cur.fetchone()
+        assert deck_row is not None
+        new_deck_id = int(deck_row[0])
+
+        await conn.execute(
+            "INSERT INTO deck_slides (deck_id, slide_index, frame_tex, note_text, "
+            "note_language, page_start, page_end) "
+            "SELECT ?, slide_index, frame_tex, note_text, note_language, "
+            "page_start, page_end FROM deck_slides WHERE deck_id = ?",
+            (new_deck_id, deck[0]),
+        )
