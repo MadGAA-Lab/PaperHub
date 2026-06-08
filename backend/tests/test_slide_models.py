@@ -12,3 +12,10 @@ def test_slide_plan_parses() -> None:
     assert plan.title == "MoE Routing"
     assert len(plan.sections) == 2
     assert plan.sections[0].paper_content_ids == [1, 2]
+
+
+def test_deck_command_accepts_qa_action() -> None:
+    from paperhub.models.domain import DeckCommand
+    cmd = DeckCommand(action="qa")
+    assert cmd.action == "qa"
+    assert cmd.target_scope == "all"  # default unchanged

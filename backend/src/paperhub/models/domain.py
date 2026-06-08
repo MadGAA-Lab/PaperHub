@@ -101,7 +101,7 @@ class DeckCommand(BaseModel):
 
     action: Literal[
         "generate_notes", "edit_notes", "edit_slides",
-        "edit_title", "edit_preamble", "regenerate",
+        "edit_title", "edit_preamble", "regenerate", "qa",
     ]
     target_scope: Literal["current", "page", "all"] = "all"
     target_page: int | None = None
@@ -194,6 +194,12 @@ class AgentState(TypedDict, total=False):
     # Report (slides) subgraph fields (Plan F v2.18):
     # ------------------------------------------------------------------
     current_view_page: int       # v2.18: slide on screen (frontend-supplied; Phase 2 uses it)
+    # v2.29 slide-aware QA. slide_attached: the composer chip's eye toggle —
+    # deterministic "this turn references the on-screen slide". slide_context:
+    # the active-slide block built by agents/slide_context.build_slide_context
+    # (None when not attached / no deck → plain paper_qa, no regression).
+    slide_attached: bool
+    slide_context: str | None
     report_deck_id: int          # v2.18: set by sl_emit
     report_papers: list[dict[str, Any]]  # v2.18: enabled papers loaded by sl_resolve
     report_budget: SlideBudget   # v2.21 (F4): GENERATE length budget
