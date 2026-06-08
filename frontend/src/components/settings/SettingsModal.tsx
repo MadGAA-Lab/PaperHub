@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 
 import type { SettingsField } from "../../lib/api";
 import { useSettingsStore } from "../../store/settings";
@@ -24,11 +25,14 @@ export function SettingsModal() {
       className="fixed inset-0 z-50 grid place-items-center bg-black/40"
       role="dialog"
       aria-modal="true"
+      aria-labelledby="settings-title"
     >
       <div className="flex h-[70vh] w-[840px] max-w-[92vw] overflow-hidden rounded-lg border bg-background shadow-xl">
         {/* Left nav */}
         <nav className="w-56 shrink-0 overflow-y-auto border-r p-2">
-          <h2 className="px-2 py-1 text-sm font-semibold">{t("common:settings")}</h2>
+          <h2 id="settings-title" className="px-2 py-1 text-sm font-semibold">
+            {t("common:settings")}
+          </h2>
           {config?.categories.map((c) => (
             <button
               key={c.key}
@@ -63,7 +67,9 @@ export function SettingsModal() {
                 onSave={save}
               />
             ) : (
-              current?.fields.map((f) => <FieldRow key={f.key} field={f} onSave={save} />)
+              current?.fields.map((f) => (
+                <FieldRow key={`${f.key}:${f.value ?? ""}`} field={f} onSave={save} />
+              ))
             )}
           </div>
         </div>
@@ -79,15 +85,18 @@ function FieldRow({
   field: SettingsField;
   onSave: (patch: Record<string, string | null>) => Promise<void>;
 }) {
-  const { t } = useTranslation("common");
+  const { t } = useTranslation(["common", "settings"]);
   const [draft, setDraft] = useState<string>(field.value ?? "");
   const [replacing, setReplacing] = useState(false);
 
   if (field.read_only) {
     return (
       <div className="mb-4">
-        <label className="text-sm font-medium">{field.label}</label>
+        <label htmlFor={field.key} className="text-sm font-medium">
+          {field.label}
+        </label>
         <input
+          id={field.key}
           readOnly
           value={field.value ?? ""}
           className="mt-1 w-full rounded border bg-muted px-2 py-1 text-sm"
@@ -100,19 +109,28 @@ function FieldRow({
   if (field.secret) {
     return (
       <div className="mb-4">
-        <label className="text-sm font-medium">
+        <label htmlFor={field.key} className="text-sm font-medium">
           {field.label} {field.restart_required && <RestartBadge />}
         </label>
         {replacing ? (
           <div className="mt-1 flex gap-2">
             <input
+              id={field.key}
               type="password"
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               className="w-full rounded border px-2 py-1 text-sm"
             />
             <button
-              onClick={() => void onSave({ [field.key]: draft }).then(() => setReplacing(false))}
+              onClick={() =>
+                void onSave({ [field.key]: draft })
+                  .then(() => setReplacing(false))
+                  .catch((e: unknown) =>
+                    toast.error(
+                      e instanceof Error ? e.message : t("settings:saveFailed", "Couldn't save the setting"),
+                    ),
+                  )
+              }
               className="rounded bg-primary px-3 text-sm text-primary-foreground"
             >
               {t("save")}
@@ -136,12 +154,13 @@ function FieldRow({
   // string / int / email / enum / bool
   return (
     <div className="mb-4">
-      <label className="text-sm font-medium">
+      <label htmlFor={field.key} className="text-sm font-medium">
         {field.label} {field.restart_required && <RestartBadge />}
       </label>
       <div className="mt-1 flex gap-2">
         {field.type === "enum" ? (
           <select
+            id={field.key}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             className="w-full rounded border px-2 py-1 text-sm"
@@ -154,6 +173,7 @@ function FieldRow({
           </select>
         ) : field.type === "bool" ? (
           <select
+            id={field.key}
             value={draft || "0"}
             onChange={(e) => setDraft(e.target.value)}
             className="w-full rounded border px-2 py-1 text-sm"
@@ -163,6 +183,7 @@ function FieldRow({
           </select>
         ) : (
           <input
+            id={field.key}
             type={field.type === "int" ? "number" : "text"}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
@@ -170,7 +191,13 @@ function FieldRow({
           />
         )}
         <button
-          onClick={() => void onSave({ [field.key]: draft === "" ? null : draft })}
+          onClick={() =>
+            void onSave({ [field.key]: draft === "" ? null : draft }).catch((e: unknown) =>
+              toast.error(
+                e instanceof Error ? e.message : t("settings:saveFailed", "Couldn't save the setting"),
+              ),
+            )
+          }
           className="rounded bg-primary px-3 text-sm text-primary-foreground"
         >
           {t("save")}
@@ -199,7 +226,7 @@ function CredentialEditor({
   fields: SettingsField[];
   onSave: (patch: Record<string, string | null>) => Promise<void>;
 }) {
-  const { t } = useTranslation("settings");
+  const { t } = useTranslation(["settings", "common"]);
   const [newKey, setNewKey] = useState("");
   const [newVal, setNewVal] = useState("");
   return (
@@ -212,7 +239,13 @@ function CredentialEditor({
           >
             <span className="font-mono">{f.key}</span>
             <button
-              onClick={() => void onSave({ [f.key]: null })}
+              onClick={() =>
+                void onSave({ [f.key]: null }).catch((e: unknown) =>
+                  toast.error(
+                    e instanceof Error ? e.message : t("settings:saveFailed", "Couldn't save the setting"),
+                  ),
+                )
+              }
               className="text-xs text-red-600"
             >
               {t("remove", "Remove")}
@@ -223,6 +256,7 @@ function CredentialEditor({
       <div className="flex gap-2">
         <input
           list="cred-suggestions"
+          aria-label={t("providerKeyPlaceholder", "PROVIDER_API_KEY")}
           placeholder={t("providerKeyPlaceholder", "PROVIDER_API_KEY")}
           value={newKey}
           onChange={(e) => setNewKey(e.target.value.toUpperCase())}
@@ -235,6 +269,7 @@ function CredentialEditor({
         </datalist>
         <input
           type="password"
+          aria-label={t("valuePlaceholder", "value")}
           placeholder={t("valuePlaceholder", "value")}
           value={newVal}
           onChange={(e) => setNewVal(e.target.value)}
@@ -243,10 +278,16 @@ function CredentialEditor({
         <button
           disabled={!newKey || !newVal}
           onClick={() =>
-            void onSave({ [newKey]: newVal }).then(() => {
-              setNewKey("");
-              setNewVal("");
-            })
+            void onSave({ [newKey]: newVal })
+              .then(() => {
+                setNewKey("");
+                setNewVal("");
+              })
+              .catch((e: unknown) =>
+                toast.error(
+                  e instanceof Error ? e.message : t("settings:saveFailed", "Couldn't save the setting"),
+                ),
+              )
           }
           className="rounded bg-primary px-3 text-sm text-primary-foreground disabled:opacity-50"
         >
