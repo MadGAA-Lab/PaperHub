@@ -1,0 +1,208 @@
+# Slide-aware QA benchmark (SRS v2.29) — behaviour gate for the slide-context
+# feature. Each case targets a REAL slide of an EXISTING deck in the workspace
+# DB (so the "ground truth" is the actual slide content) and sends the
+# deterministic chip flag (slide_attached) + current_view_page. The rubric
+# encodes exactly what is on the slide so the LLM-judge can score grounding
+# WITHOUT seeing the slide LaTeX — the discriminating test is whether the
+# answer explains EXACTLY the formula/figure on the slide (not a different one
+# from the paper, which was the run-415 bug).
+#
+# Reuses existing sessions via `session_id` (skips session-create + attach):
+#   - session 242: 13-page ZH multi-paper deck (FASTer + OptimusVLA + ADP)
+#   - session 244: 12-page EN deck (FASTer only)
+#   - session 250:  5-page deck (unified bidirectional Transformer / BERT)
+#
+# Run (from backend/):  scripts/run-benchmark.ps1 -Config benchmark/cases.slides-qa.toml -Judge
+# (Requires those sessions/decks to exist in workspace/paperhub.db.)
+
+[benchmark]
+name = "paperhub-slide-qa"
+base_url = "http://127.0.0.1:8000"
+db_path = "workspace/paperhub.db"
+
+# ───────────────────────── formula slides (the bug class) ─────────────────────
+
+[[cases]]
+id = "qa-242-p5-bar-vrr"
+session_id = 242
+current_view_page = 5
+slide_attached = true
+expect_intent = "paper_qa"
+prompt = "可以幫我解釋一下這個公式的參數各個意義是什麼？"
+rubric = """The slide (FASTer) shows TWO formulas: the Block-wise Autoregression loss \
+L_BAR = -ΣΣ log p_θ(c_{j,i} | C_{<j}, I_t, s_t, x), and VRR = N_valid / N_total. \
+A correct answer must explain the parameters of THESE: J (number of blocks), B \
+(block size), c_{j,i} (the i-th action token of block j), C_{<j} (previously \
+decoded blocks / context), I_t (image observation), s_t (proprioceptive state), \
+x (instruction); and/or the VRR terms (N_valid, N_total, reconstruction error \
+tolerance). Score 0 if it instead explains the VQ RECONSTRUCTION loss \
+(||a - â||_1, DCT term, commitment λ||z - sg(z_q)||) — that is a DIFFERENT \
+slide's formula and was the original bug."""
+
+[[cases]]
+id = "qa-244-p6-vq-loss"
+session_id = 244
+current_view_page = 6
+slide_attached = true
+expect_intent = "paper_qa"
+prompt = "Explain what each term in this loss function means."
+rubric = """The slide (VQ Reconstruction Loss) shows \
+L = ||a_{t:t+H} - â_{t:t+H}||_1 + ||DCT(a) - DCT(â)||_1 + λ||z - sg(z_q)||_2^2. \
+A correct answer explains: the L1 reconstruction term (a = raw action, â = \
+reconstructed action), the DCT (discrete cosine transform) term capturing the \
+trend, and the commitment term λ||z - sg(z_q)|| (z = latent embedding, z_q = \
+quantized embedding, sg = stop-gradient, λ = weight). It must explain THIS \
+reconstruction/commitment loss, NOT the block-wise autoregression loss or VRR."""
+
+[[cases]]
+id = "qa-244-p7-vrr"
+session_id = 244
+current_view_page = 7
+slide_attached = true
+expect_intent = "paper_qa"
+prompt = "What does this metric measure, and what are its components?"
+rubric = """The slide (Valid Reconstruction Rate) shows \
+VRR = N_valid / N_total with N_valid = Σ 1(||a_i^recon - a_i^gt||_2 < σ). A \
+correct answer explains VRR as the fraction of reconstructed actions within a \
+physical error tolerance σ: N_total (total actions), N_valid (actions whose \
+reconstruction error is below σ), a^recon (predicted), a^gt (ground-truth). It \
+must explain THIS metric, not a loss function."""
+
+[[cases]]
+id = "qa-244-p9-bar"
+session_id = 244
+current_view_page = 9
+slide_attached = true
+expect_intent = "paper_qa"
+prompt = "Explain the two formulas on this slide and how they differ."
+rubric = """The slide (Block-wise Autoregression Loss) shows the standard \
+autoregressive loss L_AR = -Σ log p_θ(c_i | c_{<i}, ...) and the block-wise \
+variant L_BAR = -ΣΣ log p_θ(c_{j,i} | C_{<j}, ...). A correct answer explains \
+that standard AR decodes one token at a time (sequential / inefficient) while \
+BAR decodes J blocks of size B in parallel (~3x speedup), and identifies J and \
+B. It must be about THESE autoregression losses, not the VQ reconstruction loss."""
+
+[[cases]]
+id = "qa-242-p8-optimusvla"
+session_id = 242
+current_view_page = 8
+slide_attached = true
+expect_intent = "paper_qa"
+prompt = "解釋這張投影片上的公式在做什麼。"
+rubric = """The slide is from the OptimusVLA paper (diffusion dual-memory). It \
+shows the Global Prior Module sampling X̂_t = μ + λ(ε ⊙ √Var), ε ~ N(0, I), and \
+the Latent Correction X_t = X̂_t + B_t. A correct answer explains: μ and Var as \
+the global-prior statistics, λ scaling the noise (controlling NFE / sampling), \
+and B_t as the local correction term added to the prior estimate. It MUST \
+attribute this to OptimusVLA — score 0 if it explains a FASTer formula (BAR / \
+VQ loss) or an ADP formula instead (this is a multi-paper deck)."""
+
+[[cases]]
+id = "qa-242-p11-adp"
+session_id = 242
+current_view_page = 11
+slide_attached = true
+expect_intent = "paper_qa"
+prompt = "解釋這個公式在計算什麼。"
+rubric = """The slide is from the ADP paper (token pruning). It shows the visual-\
+token importance Φ^(l)(v) = mean over attention heads and text tokens of the \
+attention A^(l)_{h,t,v} to visual token v, and a piecewise prune-state update \
+s_{i+1} = 1 if δ_i ≥ U^(i), 0 if δ_i ≤ V^(i), else s_i (hysteresis thresholds). \
+A correct answer explains the attention-based importance score and the \
+keep/drop/hold state logic. It MUST be about ADP pruning — score 0 if it \
+explains a FASTer or OptimusVLA formula instead."""
+
+# ───────────────────────────── figure slides ─────────────────────────────────
+
+[[cases]]
+id = "qa-244-p5-fig-arch"
+session_id = 244
+current_view_page = 5
+slide_attached = true
+expect_intent = "paper_qa"
+prompt = "Explain the architecture shown in the figure on this slide."
+rubric = """The slide (FASTerVQ Architecture) shows the action-tokenizer \
+architecture. A correct answer describes the action patchifier (partitions the \
+action sequence both temporally and dimensionally) and the coarse-to-fine \
+residual vector quantization (RVQ) that stabilizes training / improves \
+representational efficiency. It must be about the FASTerVQ tokenizer \
+architecture, not the VLA decoder or a loss function."""
+
+[[cases]]
+id = "qa-244-p4-fig-framework"
+session_id = 244
+current_view_page = 4
+slide_attached = true
+expect_intent = "paper_qa"
+prompt = "Walk me through this framework diagram."
+rubric = """The slide (FASTer Framework Overview) shows the two-part pipeline: \
+FASTerVQ compresses actions into tokens via a neural action tokenizer, and \
+FASTerVLA decodes action blocks in parallel for efficiency. A correct answer \
+explains both stages (tokenize then block-parallel decode). On-topic to the \
+FASTer framework."""
+
+[[cases]]
+id = "qa-250-p4-fig-arch"
+session_id = 250
+current_view_page = 4
+slide_attached = true
+expect_intent = "paper_qa"
+prompt = "Explain the architecture diagram on this slide."
+rubric = """The slide (Unified Architecture) shows a multi-layer bidirectional \
+Transformer that uses the SAME architecture for pre-training and fine-tuning, \
+adapting to downstream tasks with just one additional output layer. A correct \
+answer conveys the unified bidirectional-Transformer idea and the \
+pretrain/fine-tune symmetry."""
+
+# ───────────────────────────── text / bullet slides ──────────────────────────
+
+[[cases]]
+id = "qa-244-p2-exec-summary"
+session_id = 244
+current_view_page = 2
+slide_attached = true
+expect_intent = "paper_qa"
+prompt = "What are the headline results reported on this slide?"
+rubric = """The slide (Executive Summary) states: Problem = high inference \
+latency from long sequences; Method = FASTerVQ tokenization + FASTerVLA block-\
+parallel decoding; Performance = 97.9% success on LIBERO and 87.9% zero-shot on \
+Simpler-Bridge; Efficiency = 112ms latency, up to 3x faster. This is a \
+'what is ON THIS SLIDE' question, so the SLIDE is the authoritative source: \
+the numbers 97.9% / 87.9% / 112ms / 3x are printed on the slide (the deck was \
+generated from the paper). Reporting them accurately is CORRECT and counts as \
+grounded-by-the-slide — do NOT penalize a slide-stated number merely because \
+the retrieved paper chunk did not happen to repeat it. Score 1 if the slide's \
+headline numbers are reported accurately and nothing is fabricated; score 0 \
+only if it invents/contradicts a number."""
+
+[[cases]]
+id = "qa-244-p3-motivation"
+session_id = 244
+current_view_page = 3
+slide_attached = true
+expect_intent = "paper_qa"
+prompt = "What problem motivates this work?"
+rubric = """The slide (Motivation) argues sequence length is the bottleneck in \
+autoregressive VLA models — sequential token generation forces full forward \
+passes through large transformers (scaling poorly), while robot control needs \
+both high action fidelity and low latency; the goal is to compress action \
+representations and parallelize decoding without losing accuracy. A correct \
+answer reflects this efficiency/latency motivation."""
+
+# ───────────────────────────── chip-OFF control ──────────────────────────────
+# Same slide as qa-244-p6 but with the chip DETACHED: build_slide_context must
+# NOT fire, so this is a plain paper_qa turn. It should still answer on-topic
+# (no regression), but the answer is not anchored to "this slide".
+
+[[cases]]
+id = "qa-244-p6-chip-off-control"
+session_id = 244
+current_view_page = 6
+slide_attached = false
+expect_intent = "paper_qa"
+prompt = "Explain the VQ reconstruction loss used to train the action tokenizer."
+rubric = """Chip is OFF, so no slide context is injected — this is plain \
+paper_qa. The question names the VQ reconstruction loss explicitly, so a correct \
+answer explains that loss (L1 reconstruction + DCT trend term + commitment term) \
+grounded in the paper. Score 1 for a correct, grounded explanation; this case \
+verifies the chip-off path still works (no regression)."""

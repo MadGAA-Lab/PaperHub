@@ -70,7 +70,11 @@ async def build_slide_context(
         "user's question about EXACTLY what is on THIS slide (the specific "
         "equation, figure, or statement shown), grounding details in the "
         "paper(s). Do NOT substitute a different equation/figure from the paper "
-        "than the one on the slide.",
+        "than the one on the slide. You MAY report a value/name shown on the "
+        "slide as being on the slide. Do NOT assert specific details (units, "
+        "numeric values, definitions) that are neither shown on the slide NOR "
+        "supported by the retrieved paper text — if the slide does not specify "
+        "something, say so rather than inventing it.",
         "--- BEGIN SLIDE LATEX ---",
         row.frame_tex.strip(),
         "--- END SLIDE LATEX ---",

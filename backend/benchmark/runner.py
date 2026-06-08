@@ -55,17 +55,26 @@ class CaseResult:
 
 def run_case(cfg: BenchmarkConfig, case: Case, sessions: dict[str, int]) -> CaseResult:
     driver.BASE = cfg.base_url
-    if case.session_group and case.session_group in sessions:
-        session_id = sessions[case.session_group]
+    if case.session_id is not None:
+        # Slide-aware QA: reuse an existing session that already has a built
+        # deck + enabled refs. Skip session creation + paper attach entirely.
+        session_id = case.session_id
+        attached: list[str] = []
     else:
-        session_id = driver.create_session()
-        if case.session_group:
-            sessions[case.session_group] = session_id
-
-    attached = [_attach_one(cfg, session_id, k) for k in case.papers]
+        if case.session_group and case.session_group in sessions:
+            session_id = sessions[case.session_group]
+        else:
+            session_id = driver.create_session()
+            if case.session_group:
+                sessions[case.session_group] = session_id
+        attached = [_attach_one(cfg, session_id, k) for k in case.papers]
 
     t0 = time.monotonic()
-    chat = driver.chat(session_id, case.prompt, current_view_page=case.current_view_page)
+    chat = driver.chat(
+        session_id, case.prompt,
+        current_view_page=case.current_view_page,
+        slide_attached=case.slide_attached,
+    )
     elapsed = time.monotonic() - t0
 
     g = grounding_for(

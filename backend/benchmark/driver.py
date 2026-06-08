@@ -75,6 +75,7 @@ def chat(
     user_message: str,
     *,
     current_view_page: int = 0,
+    slide_attached: bool = False,
     timeout: float = 1800.0,
 ) -> ChatResult:
     res = ChatResult(session_id=session_id)
@@ -83,6 +84,7 @@ def chat(
         "session_id": session_id,
         "user_message": user_message,
         "current_view_page": current_view_page,
+        "slide_attached": slide_attached,
     }
     with httpx.stream(
         "POST", f"{BASE}/chat", json=payload, timeout=timeout

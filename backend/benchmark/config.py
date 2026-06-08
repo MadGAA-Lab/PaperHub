@@ -23,6 +23,11 @@ class Case:
     rubric: str = ""
     session_group: str | None = None   # cases sharing a group run as one chat
     current_view_page: int = 0
+    # Slide-aware QA (v2.29): reuse an EXISTING session (with its already-built
+    # deck) instead of creating a fresh one + attaching papers, and send the
+    # deterministic chip flag so build_slide_context fires.
+    session_id: int | None = None
+    slide_attached: bool = False
 
 
 @dataclass
@@ -70,6 +75,8 @@ def load_config(path: str | Path) -> BenchmarkConfig:
                 rubric=str(c.get("rubric", "")),
                 session_group=(str(c["session_group"]) if c.get("session_group") else None),
                 current_view_page=int(c.get("current_view_page", 0)),
+                session_id=(int(c["session_id"]) if c.get("session_id") is not None else None),
+                slide_attached=bool(c.get("slide_attached", False)),
             )
         )
 
