@@ -14,8 +14,8 @@ Multi-agent tool routing · in-repo RAG knowledge base · agentic per-paper retr
 ![Vite](https://img.shields.io/badge/Vite-Tailwind-646CFF?logo=vite&logoColor=white)
 ![Lint](https://img.shields.io/badge/lint-ruff-261230?logo=ruff&logoColor=white)
 ![Types](https://img.shields.io/badge/types-mypy%20--strict-2A6DB2)
-![Tests](https://img.shields.io/badge/tests-1062%20backend%20%2B%20362%20frontend-brightgreen)
-![Status](https://img.shields.io/badge/Plan%20F-merged%20(SRS%20v2.28.1)-success)
+![Tests](https://img.shields.io/badge/tests-1104%20backend%20%2B%20386%20frontend-brightgreen)
+![Status](https://img.shields.io/badge/release-v2.30.0%20(SRS%20v2.30)-success)
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue)
 
 </div>
@@ -34,7 +34,8 @@ PaperHub is built **UX-first**. Every retrieved chunk has a clickable provenance
 - **🧭 Visible routing + tracing.** A badge shows which agent + model handled each turn; an expandable trace panel replays every model/MCP/pipeline step from SQLite.
 - **🌐 Discovery via web + Semantic Scholar.** `paper_search` resolves even vague references ("that diffusion paper everyone cites") to a citable hit.
 - **📎 Bring your own papers.** Attach by arXiv ID, URL, or PDF upload — deduplicated + cached; a background **Marker** worker upgrades PDFs to real figures + captions + equations→LaTeX.
-- **🖼️ Conference-grade slides.** Generate a grounded **Beamer deck** that **never cites a figure that doesn't exist**. Speaker notes are an **opt-in**, any-language follow-up; **diff-edit a single slide** by chat ("make slide 3 more concise") — never a full regen.
+- **🖼️ Conference-grade slides.** Generate a grounded **Beamer deck** that **never cites a figure that doesn't exist**. Speaker notes are an **opt-in**, any-language follow-up; **diff-edit a single slide** by chat ("make slide 3 more concise") — never a full regen. Ask about the **on-screen slide** ("explain this diagram") and it's answered from the paper **without mutating the deck**.
+- **🔱 Fork & rewind.** Branch a new chat from any of your past messages — the original is left intact. The forked message is **prefilled, editable, not auto-sent**: edit it to re-prompt, or send as-is to retry. Forks carry over the enabled references, session memories, and the deck, and **nest under their parent** in the sidebar.
 - **➗ Math renders.** LaTeX in answers (`$…$`, `$$…$$`) renders as real equations via KaTeX.
 - **💾 Pick up on any device.** Sessions and their full chat record live in the backend, not the browser — open the app anywhere. Deleting a chat removes it everywhere (with Undo).
 - **🔌 MCP-native.** The agent's own tools are served over MCP (`/mcp`); external clients (Claude Desktop, Cursor) reach the same surface.
@@ -256,7 +257,8 @@ Full architecture lives in the [SRS](docs/superpowers/specs/2026-05-17-paperhub-
 | **E** | SQL Agent + `library_stats` (sqlite MCP) + session/global memory governance (gate, conflict-supersede, Memory Manager UI) | ✅ complete — merged (SRS v2.17) |
 | **F** | Slide Pipeline + Report Agent — Marker ingestion (F2/F2.1), PhD-grade slide agent (F3), decoupled opt-in notes + diff-editing + length budget (F4), conference-grade metadata title page + title/style customization (F4.2) | ✅ complete — merged (SRS v2.22) |
 | **F5** | Slide presentation mode (audience pop-up window + `BroadcastChannel` sync + presenter cockpit) + Q&A-during-talk + composer voice input | ✅ complete — merged (SRS v2.26) |
-| **G** | Compare view + filesystem / `paperhub.*` MCP | 🔜 planned |
+| **G** | Frontend UI internationalization (i18n: `en` / `zh-TW` / `zh-CN` / `ja`) + account-menu language switcher | 🔜 planned (SRS v2.31) |
+| **H** | Compare view + filesystem / `paperhub.*` MCP | 🔜 planned |
 
 Each plan ships working, testable software on its own. Plans live under [`docs/superpowers/plans/`](docs/superpowers/plans/).
 
@@ -269,7 +271,7 @@ PaperHub is built spec → plan → TDD, with subagent-driven implementation and
 **Backend gates** (from `backend/`):
 
 ```bash
-uv run pytest          # 831 tests, hermetic
+uv run pytest          # 1104 tests, hermetic
 uv run ruff check src tests
 uv run mypy src        # --strict
 ```
@@ -277,7 +279,7 @@ uv run mypy src        # --strict
 **Frontend gates** (from `frontend/`):
 
 ```bash
-npm test               # Vitest + RTL + MSW (309 tests)
+npm test               # Vitest + RTL + MSW (386 tests)
 npm run typecheck      # tsc --strict
 npm run lint           # ESLint flat config
 npm run build          # Vite production build
@@ -308,7 +310,7 @@ scripts/run-benchmark.ps1 -Resume <prior.json>   # retry only failed cases after
 .
 ├── backend/
 │   ├── src/paperhub/         # FastAPI app · agents · pipelines · mcp · tracer
-│   ├── tests/                # pytest suite (831 tests, hermetic)
+│   ├── tests/                # pytest suite (1104 tests, hermetic)
 │   ├── benchmark/            # config-driven real-API e2e benchmark + LLM-as-Judge
 │   └── pyproject.toml        # uv project · mypy --strict · ruff
 ├── frontend/                 # React 19 + Vite + Tailwind + Zustand
@@ -326,7 +328,7 @@ scripts/run-benchmark.ps1 -Resume <prior.json>   # retry only failed cases after
 
 ## 📖 Documentation
 
-- **[System Requirements Specification](docs/superpowers/specs/2026-05-17-paperhub-srs.md)** — authoritative architecture, schema, scope, and acceptance criteria (currently **v2.28.1**).
+- **[System Requirements Specification](docs/superpowers/specs/2026-05-17-paperhub-srs.md)** — authoritative architecture, schema, scope, and acceptance criteria (shipped through **v2.30**; v2.31 i18n is spec'd but not yet built).
 - **[Implementation plans](docs/superpowers/plans/)** — one per sub-project, each executed via TDD.
 - **[Backend developer docs](backend/README.md)** — backend-specific notes.
 
