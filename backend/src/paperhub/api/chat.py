@@ -287,6 +287,33 @@ async def _process_search_results(
     return enriched
 
 
+async def _resolve_history(
+    conn: aiosqlite.Connection,
+    session_id: int,
+    history: list[HistoryEntry],
+) -> list[dict[str, str]]:
+    """Resolve the conversational history for this turn.
+
+    Normally the client sends the prior turns in ``req.history`` (built from its
+    local store). But a freshly FORKED session (SRS v2.30) is created with empty
+    local messages and hydrates the copied history asynchronously; if the user
+    resends before hydration lands, ``req.history`` is empty even though the DB
+    holds the copied turns. So when the client sends NO history but the session
+    already has persisted messages, reconstruct it from the DB. MUST be called
+    BEFORE the current user message is persisted, so that message is excluded.
+    """
+    if history:
+        return [h.model_dump() for h in history]
+    async with conn.execute(
+        "SELECT role, content FROM messages "
+        "WHERE session_id = ? AND role IN ('user', 'assistant') "
+        "ORDER BY id",
+        (session_id,),
+    ) as cur:
+        rows = await cur.fetchall()
+    return [{"role": str(r[0]), "content": str(r[1])} for r in rows]
+
+
 async def _record_user_message(
     conn: aiosqlite.Connection, session_id: int, content: str, run_id: int
 ) -> None:
@@ -558,12 +585,17 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> EventSourceRespon
             sess_evt = SessionEvent(run_id=run_id, session_id=session_id)
             yield {"event": sess_evt.type,
                    "data": sess_evt.model_dump_json(exclude={"type"})}
+            # Resolve history BEFORE persisting the current user message so it is
+            # not double-counted. Falls back to DB-reconstructed history for a
+            # freshly forked/cross-device session whose client store hasn't
+            # hydrated yet (SRS v2.30 fork race).
+            resolved_history = await _resolve_history(conn, session_id, req.history)
             await _record_user_message(conn, session_id, req.user_message, run_id)
             tracer = Tracer(conn, run_id=run_id, branch="")
             state: AgentState = {
                 "run_id": run_id, "branch": "", "session_id": session_id,
                 "user_message": req.user_message,
-                "history": [h.model_dump() for h in req.history],
+                "history": resolved_history,
                 "current_view_page": req.current_view_page,
                 "slide_attached": req.slide_attached,
             }

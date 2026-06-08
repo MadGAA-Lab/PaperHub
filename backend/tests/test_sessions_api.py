@@ -8,7 +8,13 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
-from paperhub.api.chat import _derive_title, _ensure_session, _record_user_message
+from paperhub.api.chat import (
+    HistoryEntry,
+    _derive_title,
+    _ensure_session,
+    _record_user_message,
+    _resolve_history,
+)
 from paperhub.app import create_app
 from paperhub.db.migrate import apply_schema
 
@@ -755,3 +761,73 @@ async def test_record_user_message_promotes_fork_placeholder_title(
         async with conn.execute(
             "SELECT title FROM chat_sessions WHERE id = 1") as cur:
             assert (await cur.fetchone())[0] == "a brand new prompt"
+
+
+# ---------------------------------------------------------------------------
+# _resolve_history — fork race / cross-device fallback
+# ---------------------------------------------------------------------------
+
+
+async def test_resolve_history_uses_client_history_when_present(tmp_path: Path) -> None:
+    db_path = tmp_path / "paperhub.db"
+    async with aiosqlite.connect(db_path) as conn:
+        await apply_schema(conn)
+        await conn.execute("INSERT INTO chat_sessions (title) VALUES ('S')")
+        # DB has a stale message, but the client sent its own history → client wins.
+        await conn.execute(
+            "INSERT INTO messages (session_id, role, content) "
+            "VALUES (1, 'user', 'db-only')")
+        await conn.commit()
+        client = [HistoryEntry(role="user", content="from client")]
+        result = await _resolve_history(conn, 1, client)
+        assert result == [{"role": "user", "content": "from client"}]
+
+
+async def test_resolve_history_reconstructs_from_db_when_client_empty(
+    tmp_path: Path,
+) -> None:
+    """The fork race: client sends no history but the forked session already has
+    copied turns in the DB → reconstruct them (user+assistant, in order)."""
+    db_path = tmp_path / "paperhub.db"
+    async with aiosqlite.connect(db_path) as conn:
+        await apply_schema(conn)
+        await conn.execute("INSERT INTO chat_sessions (title) VALUES ('Fork of S')")
+        await conn.execute(
+            "INSERT INTO messages (session_id, role, content) "
+            "VALUES (1, 'user', 'q1')")
+        await conn.execute(
+            "INSERT INTO messages (session_id, role, content) "
+            "VALUES (1, 'assistant', 'a1')")
+        await conn.commit()
+        result = await _resolve_history(conn, 1, [])
+        assert result == [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+        ]
+
+
+async def test_resolve_history_empty_for_fresh_session(tmp_path: Path) -> None:
+    """No client history AND no prior DB messages → empty (unchanged behavior
+    for a brand-new session's first turn)."""
+    db_path = tmp_path / "paperhub.db"
+    async with aiosqlite.connect(db_path) as conn:
+        await apply_schema(conn)
+        await conn.execute("INSERT INTO chat_sessions (title) VALUES ('New chat')")
+        await conn.commit()
+        assert await _resolve_history(conn, 1, []) == []
+
+
+async def test_resolve_history_excludes_system_messages(tmp_path: Path) -> None:
+    db_path = tmp_path / "paperhub.db"
+    async with aiosqlite.connect(db_path) as conn:
+        await apply_schema(conn)
+        await conn.execute("INSERT INTO chat_sessions (title) VALUES ('S')")
+        await conn.execute(
+            "INSERT INTO messages (session_id, role, content) "
+            "VALUES (1, 'system', 'sys')")
+        await conn.execute(
+            "INSERT INTO messages (session_id, role, content) "
+            "VALUES (1, 'user', 'q1')")
+        await conn.commit()
+        assert await _resolve_history(conn, 1, []) == [
+            {"role": "user", "content": "q1"}]
