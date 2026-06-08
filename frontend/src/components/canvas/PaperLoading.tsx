@@ -1,4 +1,5 @@
 import { Loader2 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 // Varied line widths so the skeleton reads like a page of prose, not a grid.
 const LINE_WIDTHS = [
@@ -24,7 +25,9 @@ interface Props {
  * swap interlude (DeferredRemount) and while react-pdf parses a PDF, so every
  * "paper is loading" moment looks the same.
  */
-export function PaperLoading({ label = "Loading paper…" }: Props) {
+export function PaperLoading({ label }: Props) {
+  const { t } = useTranslation("canvas");
+  const text = label ?? t("loading.paper");
   return (
     <div className="flex h-full w-full flex-1 flex-col items-center justify-center gap-5 overflow-hidden p-6">
       <div className="w-full max-w-md space-y-3 rounded-lg border border-border bg-background/50 p-6 shadow-sm">
@@ -43,7 +46,7 @@ export function PaperLoading({ label = "Loading paper…" }: Props) {
       </div>
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        <span>{label}</span>
+        <span>{text}</span>
       </div>
     </div>
   );

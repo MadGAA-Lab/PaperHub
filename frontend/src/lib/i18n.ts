@@ -2,21 +2,25 @@ import i18n from "i18next";
 import LanguageDetector from "i18next-browser-languagedetector";
 import { initReactI18next } from "react-i18next";
 
+import enCanvas from "../locales/en/canvas.json";
 import enChat from "../locales/en/chat.json";
 import enCommon from "../locales/en/common.json";
 import enMemory from "../locales/en/memory.json";
 import enReferences from "../locales/en/references.json";
 import enSettings from "../locales/en/settings.json";
+import jaCanvas from "../locales/ja/canvas.json";
 import jaChat from "../locales/ja/chat.json";
 import jaCommon from "../locales/ja/common.json";
 import jaMemory from "../locales/ja/memory.json";
 import jaReferences from "../locales/ja/references.json";
 import jaSettings from "../locales/ja/settings.json";
+import zhCNCanvas from "../locales/zh-CN/canvas.json";
 import zhCNChat from "../locales/zh-CN/chat.json";
 import zhCNCommon from "../locales/zh-CN/common.json";
 import zhCNMemory from "../locales/zh-CN/memory.json";
 import zhCNReferences from "../locales/zh-CN/references.json";
 import zhCNSettings from "../locales/zh-CN/settings.json";
+import zhTWCanvas from "../locales/zh-TW/canvas.json";
 import zhTWChat from "../locales/zh-TW/chat.json";
 import zhTWCommon from "../locales/zh-TW/common.json";
 import zhTWMemory from "../locales/zh-TW/memory.json";
@@ -42,6 +46,7 @@ const resources = {
     chat: enChat,
     memory: enMemory,
     references: enReferences,
+    canvas: enCanvas,
   },
   "zh-TW": {
     common: zhTWCommon,
@@ -49,6 +54,7 @@ const resources = {
     chat: zhTWChat,
     memory: zhTWMemory,
     references: zhTWReferences,
+    canvas: zhTWCanvas,
   },
   "zh-CN": {
     common: zhCNCommon,
@@ -56,6 +62,7 @@ const resources = {
     chat: zhCNChat,
     memory: zhCNMemory,
     references: zhCNReferences,
+    canvas: zhCNCanvas,
   },
   ja: {
     common: jaCommon,
@@ -63,6 +70,7 @@ const resources = {
     chat: jaChat,
     memory: jaMemory,
     references: jaReferences,
+    canvas: jaCanvas,
   },
 } as const;
 
@@ -73,7 +81,7 @@ void i18n
     resources,
     fallbackLng: "en",
     supportedLngs: [...SUPPORTED_LANGUAGES],
-    ns: ["common", "settings", "chat", "memory", "references"],
+    ns: ["common", "settings", "chat", "memory", "references", "canvas"],
     defaultNS: "common",
     interpolation: { escapeValue: false },
     detection: {

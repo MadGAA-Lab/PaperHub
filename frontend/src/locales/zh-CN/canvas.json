@@ -1,0 +1,38 @@
+{
+  "panel": {
+    "label": "引用画布",
+    "morePapers": "更多论文",
+    "viewingTitle": "{{title}} — 查看中（非使用中的参考文献）",
+    "addToReferences": "加入参考文献（纳入未来的回答）",
+    "add": "加入",
+    "close": "关闭画布"
+  },
+  "stale": "此引用的段落已不再可用——该论文可能已重新建立索引。",
+  "error": {
+    "loadPaper": "无法加载这篇论文。",
+    "renderPdf": "无法呈现这份 PDF。"
+  },
+  "loading": {
+    "paper": "加载论文中…",
+    "pdf": "加载 PDF 中…"
+  },
+  "lightbox": {
+    "zoomIn": "放大",
+    "zoomOut": "缩小",
+    "resetZoom": "重置缩放",
+    "fitToScreen": "适应屏幕",
+    "close": "关闭图片预览",
+    "closeEsc": "关闭（Esc）",
+    "imagePreviewWithAlt": "图片预览：{{alt}}",
+    "imagePreview": "图片预览"
+  },
+  "marker": {
+    "citationAria": "引用 {{ordinal}}"
+  },
+  "toast": {
+    "loadCitedPaperFailed": "无法加载引用的论文",
+    "addPaperFailed": "无法将这篇论文加入参考文献",
+    "passageNotFoundHtml": "在论文中找不到这个段落",
+    "passageNotFoundPdf": "在 PDF 中找不到这个段落"
+  }
+}

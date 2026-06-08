@@ -1,0 +1,38 @@
+{
+  "panel": {
+    "label": "引用キャンバス",
+    "morePapers": "他の論文",
+    "viewingTitle": "{{title}} — 閲覧中（有効な参考文献ではありません）",
+    "addToReferences": "参考文献に追加（今後の回答に含める）",
+    "add": "追加",
+    "close": "キャンバスを閉じる"
+  },
+  "stale": "この引用の箇所は利用できなくなりました——論文が再インデックスされた可能性があります。",
+  "error": {
+    "loadPaper": "この論文を読み込めませんでした。",
+    "renderPdf": "この PDF を表示できませんでした。"
+  },
+  "loading": {
+    "paper": "論文を読み込み中…",
+    "pdf": "PDF を読み込み中…"
+  },
+  "lightbox": {
+    "zoomIn": "拡大",
+    "zoomOut": "縮小",
+    "resetZoom": "ズームをリセット",
+    "fitToScreen": "画面に合わせる",
+    "close": "画像プレビューを閉じる",
+    "closeEsc": "閉じる（Esc）",
+    "imagePreviewWithAlt": "画像プレビュー：{{alt}}",
+    "imagePreview": "画像プレビュー"
+  },
+  "marker": {
+    "citationAria": "引用 {{ordinal}}"
+  },
+  "toast": {
+    "loadCitedPaperFailed": "引用された論文を読み込めませんでした",
+    "addPaperFailed": "この論文を参考文献に追加できませんでした",
+    "passageNotFoundHtml": "この箇所を論文内で見つけられませんでした",
+    "passageNotFoundPdf": "この箇所を PDF 内で見つけられませんでした"
+  }
+}

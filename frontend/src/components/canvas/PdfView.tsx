@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Document, Page, pdfjs } from "react-pdf";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import "react-pdf/dist/Page/AnnotationLayer.css";
@@ -72,6 +73,7 @@ export function PdfView({
   nonce = 0,
   onHighlightMiss,
 }: Props) {
+  const { t } = useTranslation("canvas");
   // F2.1 A2': a non-null page + a well-formed length-4 bbox means we draw the
   // highlight exactly from the chunk's stored geometry (no text search).
   const useGeometric = hasGeometricRegion({ page: bboxPage, bbox });
@@ -233,10 +235,10 @@ export function PdfView({
           pageTextRef.current = null;
           setNumPages(pdf.numPages);
         }}
-        loading={<PaperLoading label="Loading PDF…" />}
+        loading={<PaperLoading label={t("loading.pdf")} />}
         error={
           <div className="p-4 text-xs text-destructive">
-            Couldn&apos;t render this PDF.
+            {t("error.renderPdf")}
           </div>
         }
       >

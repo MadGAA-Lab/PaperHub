@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
+import { useTranslation } from "react-i18next";
 
 import { applyIframeTheme } from "@/lib/applyIframeTheme";
 import {
@@ -54,6 +55,7 @@ export function HtmlView({
   scrollBehavior = "smooth",
   onImageActivate,
 }: Props) {
+  const { t } = useTranslation("canvas");
   const ref = useRef<HTMLIFrameElement>(null);
   // Keep the latest callback in a ref so the delegated click handler (attached
   // once per iframe load) always calls the current one without re-binding.
@@ -148,7 +150,7 @@ export function HtmlView({
   return (
     <iframe
       ref={ref}
-      title="Citation Canvas"
+      title={t("panel.label")}
       srcDoc={html}
       onLoad={handleLoad}
       sandbox="allow-scripts allow-same-origin"

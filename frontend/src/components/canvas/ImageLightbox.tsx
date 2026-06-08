@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { RefObject } from "react";
+import { useTranslation } from "react-i18next";
 import { createPortal } from "react-dom";
 import { Maximize2, Minus, Plus, X } from "lucide-react";
 import {
@@ -25,6 +26,7 @@ const ZOOM_STEP = 0.2;
  *  zoom handlers via `useControls`. `stopPropagation` keeps a control click from
  *  bubbling to the backdrop dismiss handler. */
 function Controls({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation("canvas");
   const { zoomIn, zoomOut, resetTransform } = useControls();
   const btn =
     "rounded p-1.5 text-white/90 hover:bg-white/15 hover:text-white";
@@ -37,8 +39,8 @@ function Controls({ onClose }: { onClose: () => void }) {
       <button
         type="button"
         onClick={() => zoomIn(ZOOM_STEP)}
-        aria-label="Zoom in"
-        title="Zoom in"
+        aria-label={t("lightbox.zoomIn")}
+        title={t("lightbox.zoomIn")}
         className={btn}
       >
         <Plus className="h-4 w-4" />
@@ -46,8 +48,8 @@ function Controls({ onClose }: { onClose: () => void }) {
       <button
         type="button"
         onClick={() => zoomOut(ZOOM_STEP)}
-        aria-label="Zoom out"
-        title="Zoom out"
+        aria-label={t("lightbox.zoomOut")}
+        title={t("lightbox.zoomOut")}
         className={btn}
       >
         <Minus className="h-4 w-4" />
@@ -55,8 +57,8 @@ function Controls({ onClose }: { onClose: () => void }) {
       <button
         type="button"
         onClick={() => resetTransform()}
-        aria-label="Reset zoom"
-        title="Fit to screen"
+        aria-label={t("lightbox.resetZoom")}
+        title={t("lightbox.fitToScreen")}
         className={btn}
       >
         <Maximize2 className="h-4 w-4" />
@@ -65,8 +67,8 @@ function Controls({ onClose }: { onClose: () => void }) {
       <button
         type="button"
         onClick={onClose}
-        aria-label="Close image preview"
-        title="Close (Esc)"
+        aria-label={t("lightbox.close")}
+        title={t("lightbox.closeEsc")}
         className={btn}
       >
         <X className="h-4 w-4" />
@@ -155,6 +157,7 @@ function DoubleClickZoom({
  * bounds); only the wheel is hand-driven for a predictable step (see WheelZoom).
  */
 export function ImageLightbox({ src, alt, onClose }: Props) {
+  const { t } = useTranslation("canvas");
   const overlayRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   // react-zoom-pan-pinch pans with pointer events and RETARGETS the trailing
@@ -189,7 +192,9 @@ export function ImageLightbox({ src, alt, onClose }: Props) {
       ref={overlayRef}
       role="dialog"
       aria-modal="true"
-      aria-label={alt ? `Image preview: ${alt}` : "Image preview"}
+      aria-label={
+        alt ? t("lightbox.imagePreviewWithAlt", { alt }) : t("lightbox.imagePreview")
+      }
       className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-sm"
       onPointerDownCapture={(e) => {
         // A press on a control (zoom/close) is handled by the control itself.

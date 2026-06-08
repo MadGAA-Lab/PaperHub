@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Plus, X } from "lucide-react";
 import { toast } from "sonner";
 import { useTheme } from "next-themes";
+import { useTranslation } from "react-i18next";
 
 import { useCanvasStore } from "@/store/canvas";
 import { useChatStore } from "@/store/chat";
@@ -41,6 +42,7 @@ interface DocEntry {
 }
 
 export function CitationCanvas() {
+  const { t } = useTranslation("canvas");
   const open = useCanvasStore((s) => s.open);
   const requestedChunkId = useCanvasStore((s) => s.requestedChunkId);
   const requestNonce = useCanvasStore((s) => s.requestNonce);
@@ -191,7 +193,7 @@ export function CitationCanvas() {
           setActiveChunk(null);
           setStale(true);
         } else {
-          toast.error("Couldn't load the cited paper");
+          toast.error(t("toast.loadCitedPaperFailed"));
         }
       })
       .finally(() => {
@@ -266,7 +268,7 @@ export function CitationCanvas() {
       await toggleReference(papersId, true);
     } catch {
       patchReferenceEnabled(backendSessionId, papersId, false);
-      toast.error("Couldn't add this paper to references");
+      toast.error(t("toast.addPaperFailed"));
     }
   };
 
@@ -290,7 +292,7 @@ export function CitationCanvas() {
 
   return (
     <aside
-      aria-label="Citation Canvas"
+      aria-label={t("panel.label")}
       aria-hidden={!open}
       inert={!open ? true : undefined}
       className="flex h-full w-full flex-col border-l border-border bg-card"
@@ -321,7 +323,7 @@ export function CitationCanvas() {
                   <button
                     type="button"
                     className="rounded px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
-                    aria-label="More papers"
+                    aria-label={t("panel.morePapers")}
                   />
                 }
               >
@@ -357,7 +359,7 @@ export function CitationCanvas() {
             <span className="flex shrink-0 items-center gap-1 rounded border border-dashed border-border bg-muted/40 pl-2 text-xs">
               <span
                 className="max-w-[9rem] truncate italic text-muted-foreground"
-                title={`${transientRef.title} — viewing (not an active reference)`}
+                title={t("panel.viewingTitle", { title: transientRef.title })}
               >
                 {transientRef.title}
               </span>
@@ -365,10 +367,10 @@ export function CitationCanvas() {
                 type="button"
                 onClick={() => void enableReference()}
                 className="flex items-center gap-0.5 rounded px-1.5 py-1 font-medium text-primary hover:bg-primary/10"
-                title="Add to references (include in future answers)"
+                title={t("panel.addToReferences")}
               >
                 <Plus className="h-3 w-3" />
-                Add
+                {t("panel.add")}
               </button>
             </span>
           )}
@@ -379,7 +381,7 @@ export function CitationCanvas() {
           size="icon"
           variant="ghost"
           className="h-7 w-7 shrink-0"
-          aria-label="Close canvas"
+          aria-label={t("panel.close")}
           onClick={closeCanvas}
         >
           <X className="h-4 w-4" />
@@ -393,15 +395,14 @@ export function CitationCanvas() {
             role="status"
             className="m-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
           >
-            This citation&apos;s passage is no longer available — the paper may
-            have been re-indexed.
+            {t("stale")}
           </div>
         )}
 
         {/* Error for the active paper (loading is covered by the swap spinner). */}
         {activeDoc?.status === "error" && (
           <div className="p-4 text-xs text-destructive">
-            Couldn&apos;t load this paper.
+            {t("error.loadPaper")}
           </div>
         )}
 
@@ -447,7 +448,7 @@ export function CitationCanvas() {
                     : null
                 }
                 onHighlightMiss={() =>
-                  toast.message("Couldn't locate this passage in the paper")
+                  toast.message(t("toast.passageNotFoundHtml"))
                 }
                 onImageActivate={(src, alt) => setLightbox({ src, alt })}
               />
@@ -486,7 +487,7 @@ export function CitationCanvas() {
                     : 0
                 }
                 onHighlightMiss={() =>
-                  toast.message("Couldn't locate this passage in the PDF")
+                  toast.message(t("toast.passageNotFoundPdf"))
                 }
               />
             </DeferredRemount>

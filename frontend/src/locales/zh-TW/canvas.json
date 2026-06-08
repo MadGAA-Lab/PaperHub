@@ -1,0 +1,38 @@
+{
+  "panel": {
+    "label": "引用畫布",
+    "morePapers": "更多論文",
+    "viewingTitle": "{{title}} — 檢視中（非使用中的參考文獻）",
+    "addToReferences": "加入參考文獻（納入未來的回答）",
+    "add": "加入",
+    "close": "關閉畫布"
+  },
+  "stale": "此引用的段落已不再可用——該論文可能已重新建立索引。",
+  "error": {
+    "loadPaper": "無法載入這篇論文。",
+    "renderPdf": "無法呈現這份 PDF。"
+  },
+  "loading": {
+    "paper": "載入論文中…",
+    "pdf": "載入 PDF 中…"
+  },
+  "lightbox": {
+    "zoomIn": "放大",
+    "zoomOut": "縮小",
+    "resetZoom": "重設縮放",
+    "fitToScreen": "符合螢幕",
+    "close": "關閉圖片預覽",
+    "closeEsc": "關閉（Esc）",
+    "imagePreviewWithAlt": "圖片預覽：{{alt}}",
+    "imagePreview": "圖片預覽"
+  },
+  "marker": {
+    "citationAria": "引用 {{ordinal}}"
+  },
+  "toast": {
+    "loadCitedPaperFailed": "無法載入引用的論文",
+    "addPaperFailed": "無法將這篇論文加入參考文獻",
+    "passageNotFoundHtml": "在論文中找不到這個段落",
+    "passageNotFoundPdf": "在 PDF 中找不到這個段落"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "panel": {
+    "label": "Citation Canvas",
+    "morePapers": "More papers",
+    "viewingTitle": "{{title}} — viewing (not an active reference)",
+    "addToReferences": "Add to references (include in future answers)",
+    "add": "Add",
+    "close": "Close canvas"
+  },
+  "stale": "This citation's passage is no longer available — the paper may have been re-indexed.",
+  "error": {
+    "loadPaper": "Couldn't load this paper.",
+    "renderPdf": "Couldn't render this PDF."
+  },
+  "loading": {
+    "paper": "Loading paper…",
+    "pdf": "Loading PDF…"
+  },
+  "lightbox": {
+    "zoomIn": "Zoom in",
+    "zoomOut": "Zoom out",
+    "resetZoom": "Reset zoom",
+    "fitToScreen": "Fit to screen",
+    "close": "Close image preview",
+    "closeEsc": "Close (Esc)",
+    "imagePreviewWithAlt": "Image preview: {{alt}}",
+    "imagePreview": "Image preview"
+  },
+  "marker": {
+    "citationAria": "citation {{ordinal}}"
+  },
+  "toast": {
+    "loadCitedPaperFailed": "Couldn't load the cited paper",
+    "addPaperFailed": "Couldn't add this paper to references",
+    "passageNotFoundHtml": "Couldn't locate this passage in the paper",
+    "passageNotFoundPdf": "Couldn't locate this passage in the PDF"
+  }
+}
