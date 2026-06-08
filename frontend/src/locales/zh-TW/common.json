@@ -1,0 +1,14 @@
+{
+  "appName": "PaperHub",
+  "language": "語言",
+  "theme": "主題",
+  "themeLight": "淺色",
+  "themeDark": "深色",
+  "themeSystem": "跟隨系統",
+  "settings": "設定",
+  "about": "關於",
+  "account": "帳號",
+  "save": "儲存",
+  "cancel": "取消",
+  "close": "關閉"
+}

@@ -1,6 +1,13 @@
 import "@testing-library/jest-dom/vitest";
-import { afterEach } from "vitest";
+import { afterEach, beforeEach } from "vitest";
 import { cleanup } from "@testing-library/react";
+
+import i18n from "../src/lib/i18n";
+
+// Existing getByText assertions match the English source catalog.
+beforeEach(() => {
+  void i18n.changeLanguage("en");
+});
 
 // jsdom does not implement window.matchMedia — provide a minimal stub
 // so next-themes and other media-query-dependent code can run in tests.

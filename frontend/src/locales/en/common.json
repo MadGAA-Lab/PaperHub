@@ -1,0 +1,14 @@
+{
+  "appName": "PaperHub",
+  "language": "Language",
+  "theme": "Theme",
+  "themeLight": "Light",
+  "themeDark": "Dark",
+  "themeSystem": "System",
+  "settings": "Settings",
+  "about": "About",
+  "account": "Account",
+  "save": "Save",
+  "cancel": "Cancel",
+  "close": "Close"
+}

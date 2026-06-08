@@ -1,0 +1,14 @@
+{
+  "appName": "PaperHub",
+  "language": "言語",
+  "theme": "テーマ",
+  "themeLight": "ライト",
+  "themeDark": "ダーク",
+  "themeSystem": "システム",
+  "settings": "設定",
+  "about": "情報",
+  "account": "アカウント",
+  "save": "保存",
+  "cancel": "キャンセル",
+  "close": "閉じる"
+}
