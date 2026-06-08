@@ -183,9 +183,9 @@ export function MessageBubble({
           <div className="opacity-0 group-hover/bubble:opacity-100 focus-within:opacity-100 transition-opacity absolute -top-3 -right-2 z-10">
             <Button
               type="button"
-              size="icon"
-              variant="outline"
-              className="h-7 w-7 rounded-full bg-background shadow-sm"
+              size="icon-sm"
+              variant="secondary"
+              className="rounded-full border border-border shadow-sm"
               aria-label="Fork from this message"
               title="Fork from here — branch a new chat and edit this message"
               onClick={onFork}
