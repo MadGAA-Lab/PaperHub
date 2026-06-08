@@ -170,6 +170,14 @@ export interface SessionSummary {
   message_count: number;
 }
 
+/** Result of POST /sessions/{id}/fork — the new session + the forked message
+ *  text to prefill into the composer (editable, not auto-sent). */
+export interface ForkResult {
+  session_id: number;
+  forked_message: string;
+  title: string;
+}
+
 /** One persisted message replayed from GET /sessions/{id}/messages. */
 export interface BackendMessage {
   role: "user" | "assistant" | "system";

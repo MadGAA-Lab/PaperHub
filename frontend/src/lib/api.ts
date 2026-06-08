@@ -11,6 +11,7 @@ import type {
   MemoryScope,
   DeckMeta,
   ToolCallRecord,
+  ForkResult,
 } from "@/types/domain";
 
 export const API_BASE_URL: string =
@@ -140,6 +141,20 @@ export async function deleteBackendSession(sessionId: number): Promise<void> {
 export async function restoreBackendSession(sessionId: number): Promise<void> {
   await apiFetch<undefined>(`/sessions/${sessionId}/restore`, {
     method: "POST",
+  });
+}
+
+/** Fork a session at a chosen user message. `runId` is that message's turn
+ *  run_id; the backend copies everything strictly above it (messages, enabled
+ *  references, session memories, deck) into a new session and returns the
+ *  forked message text for the composer prefill. */
+export async function forkSession(
+  sessionId: number,
+  runId: number,
+): Promise<ForkResult> {
+  return apiFetch<ForkResult>(`/sessions/${sessionId}/fork`, {
+    method: "POST",
+    body: JSON.stringify({ run_id: runId }),
   });
 }
 
