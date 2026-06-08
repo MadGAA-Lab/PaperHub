@@ -26,6 +26,11 @@ interface ChatState {
   composerFocusSeq: number;
   referencesBySession: Record<number, ReferenceItem[]>;
   newSession: () => number;
+  /** Add a session created by POST /sessions/{id}/fork: it already has a
+   *  backend row (with copied history), so insert it with backend_session_id
+   *  set + select it (useSessionsSync hydrates its messages on activation).
+   *  Returns the local id. Idempotent on an already-present backend id. */
+  addForkedSession: (backendId: number, title: string) => number;
   selectSession: (id: number) => void;
   appendMessage: (sessionId: number, message: ChatMessage) => void;
   setRouting: (
@@ -140,6 +145,26 @@ export const useChatStore = create<ChatState>()(
           sessions: [
             ...s.sessions,
             { id, title: "New chat", messages: [], backend_session_id: null },
+          ],
+          activeSessionId: id,
+          _nextId: s._nextId + 1,
+        }));
+        return id;
+      },
+
+      addForkedSession: (backendId, title) => {
+        const existing = get().sessions.find(
+          (s) => s.backend_session_id === backendId,
+        );
+        if (existing) {
+          set({ activeSessionId: existing.id });
+          return existing.id;
+        }
+        const id = get()._nextId;
+        set((s) => ({
+          sessions: [
+            { id, title, messages: [], backend_session_id: backendId },
+            ...s.sessions,
           ],
           activeSessionId: id,
           _nextId: s._nextId + 1,
