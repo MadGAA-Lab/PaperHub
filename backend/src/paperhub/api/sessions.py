@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from paperhub.config import load_settings
 from paperhub.db.connection import open_db
+from paperhub.db.fork import fork_session
 from paperhub.db.tool_calls import drain_tool_calls_since
 from paperhub.models.domain import ToolCallRecord
 from paperhub.models.events import SearchCandidateModel
@@ -22,6 +23,19 @@ router = APIRouter()
 
 class CreateSessionResponse(BaseModel):
     session_id: int
+
+
+class ForkSessionRequest(BaseModel):
+    # The forked user message's run_id — the fork copies everything strictly
+    # before that message. The frontend resolves it from the clicked user
+    # message (or its paired assistant message).
+    run_id: int
+
+
+class ForkSessionResponse(BaseModel):
+    session_id: int
+    forked_message: str
+    title: str
 
 
 class SessionSummary(BaseModel):
@@ -381,3 +395,41 @@ async def restore_session(session_id: int) -> None:
         if cur.rowcount == 0:
             raise HTTPException(404, f"chat_sessions row {session_id} not found")
         await conn.commit()
+
+
+@router.post(
+    "/sessions/{session_id}/fork",
+    response_model=ForkSessionResponse,
+    status_code=201,
+)
+async def fork_session_endpoint(
+    session_id: int, req: ForkSessionRequest
+) -> ForkSessionResponse:
+    """Branch a NEW session from the point ABOVE a chosen user message.
+
+    Copies every message strictly before the forked message (remapped runs),
+    the session's enabled references, active session memories, and the deck
+    (best-effort). The original session is untouched; the forked message text
+    is returned so the frontend can prefill the composer (editable, not sent).
+    """
+    settings = load_settings()
+    async with open_db(settings.db_path) as conn:
+        async with conn.execute(
+            "SELECT 1 FROM chat_sessions WHERE id = ?", (session_id,)
+        ) as cur:
+            if await cur.fetchone() is None:
+                raise HTTPException(404, f"chat_sessions row {session_id} not found")
+        try:
+            result = await fork_session(
+                conn,
+                source_session_id=session_id,
+                fork_run_id=req.run_id,
+                workspace_dir=settings.workspace_dir,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    return ForkSessionResponse(
+        session_id=result.new_session_id,
+        forked_message=result.forked_message,
+        title=result.title,
+    )

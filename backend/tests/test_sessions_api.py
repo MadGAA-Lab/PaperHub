@@ -643,3 +643,67 @@ async def test_get_run_trace_empty_when_no_steps(
     resp = await sessions_client.get("/sessions/1/runs/5/trace")
     assert resp.status_code == 200
     assert resp.json() == []
+
+
+# ---------------------------------------------------------------------------
+# POST /sessions/{id}/fork — branch a new session from a chosen message
+# ---------------------------------------------------------------------------
+
+
+async def test_fork_endpoint_creates_session_and_returns_prefill(
+    sessions_client: AsyncClient, tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "paperhub.db"
+    async with aiosqlite.connect(db_path) as conn:
+        await conn.execute("PRAGMA foreign_keys = ON")
+        await conn.execute("INSERT INTO chat_sessions (title) VALUES ('My chat')")
+        c1 = await conn.execute("INSERT INTO runs (session_id, status) VALUES (1, 'ok')")
+        r1 = int(c1.lastrowid)
+        await conn.execute(
+            "INSERT INTO messages (session_id, role, content, run_id) "
+            "VALUES (1, 'user', 'first', ?)", (r1,))
+        await conn.execute(
+            "INSERT INTO messages (session_id, role, content, run_id) "
+            "VALUES (1, 'assistant', 'a1', ?)", (r1,))
+        c2 = await conn.execute("INSERT INTO runs (session_id, status) VALUES (1, 'ok')")
+        r2 = int(c2.lastrowid)
+        await conn.execute(
+            "INSERT INTO messages (session_id, role, content, run_id) "
+            "VALUES (1, 'user', 'second', ?)", (r2,))
+        await conn.execute(
+            "INSERT INTO messages (session_id, role, content, run_id) "
+            "VALUES (1, 'assistant', 'a2', ?)", (r2,))
+        await conn.commit()
+
+    resp = await sessions_client.post("/sessions/1/fork", json={"run_id": r2})
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["forked_message"] == "second"
+    assert body["title"] == "Fork of My chat"
+    new_sid = body["session_id"]
+    assert new_sid != 1
+
+    msgs = (await sessions_client.get(f"/sessions/{new_sid}/messages")).json()
+    assert [(m["role"], m["content"]) for m in msgs] == [
+        ("user", "first"), ("assistant", "a1")]
+
+    listed = {s["id"] for s in (await sessions_client.get("/sessions")).json()}
+    assert new_sid in listed
+
+
+async def test_fork_endpoint_404_on_unknown_session(
+    sessions_client: AsyncClient,
+) -> None:
+    resp = await sessions_client.post("/sessions/9999/fork", json={"run_id": 1})
+    assert resp.status_code == 404
+
+
+async def test_fork_endpoint_400_on_bad_run_id(
+    sessions_client: AsyncClient, tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "paperhub.db"
+    async with aiosqlite.connect(db_path) as conn:
+        await conn.execute("INSERT INTO chat_sessions (title) VALUES ('X')")
+        await conn.commit()
+    resp = await sessions_client.post("/sessions/1/fork", json={"run_id": 4242})
+    assert resp.status_code == 400
