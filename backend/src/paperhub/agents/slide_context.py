@@ -20,7 +20,9 @@ from paperhub.db.decks import get_deck
 from paperhub.pipelines.slide_pipeline.figure_inventory import build_inventory
 
 _FRAMETITLE_RE = re.compile(r"\\frametitle\{([^}]*)\}")
-_BEGINFRAME_TITLE_RE = re.compile(r"\\begin\{frame\}\{([^}]*)\}")
+_BEGINFRAME_TITLE_RE = re.compile(
+    r"\\begin\{frame\}\s*(?:<[^>]*>)?\s*(?:\[[^\]]*\])?\s*\{([^}]*)\}"
+)
 _GRAPHICS_RE = re.compile(r"\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}")
 _ITEM_RE = re.compile(r"\\item\s+(.+)")
 
@@ -31,7 +33,7 @@ def _frame_title(frame_tex: str) -> str:
 
 
 def _strip_latex(s: str) -> str:
-    s = re.sub(r"\\[a-zA-Z]+\*?(\[[^\]]*\])?", " ", s)
+    s = re.sub(r"\\[a-zA-Z]+\*?(?:\[[^\]]*\])?", " ", s)
     s = s.replace("{", " ").replace("}", " ")
     return re.sub(r"\s+", " ", s).strip()
 

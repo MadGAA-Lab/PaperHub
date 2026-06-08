@@ -1,12 +1,8 @@
-import pytest
-
 from paperhub.agents.slide_context import build_slide_context, slide_aware_query
 from paperhub.db.connection import open_db
 from paperhub.db.deck_slides import DeckSlideInput, replace_deck_slides
 from paperhub.db.decks import get_deck, upsert_deck
 from paperhub.db.migrate import apply_schema
-
-pytestmark = pytest.mark.asyncio
 
 
 async def _seed_deck(conn, *, page_count: int) -> int:
@@ -70,6 +66,36 @@ async def test_page_out_of_range_returns_none(tmp_path) -> None:
             DeckSlideInput(slide_index=0, frame_tex="\\begin{frame}{A}\\end{frame}",
                            page_start=1, page_end=1)])
         assert await build_slide_context(conn, session_id=1, current_view_page=9) is None
+
+
+async def test_frame_title_extracted_with_option_and_overlay_specs(tmp_path) -> None:
+    """Regression: _BEGINFRAME_TITLE_RE must match option/overlay variants."""
+    async with open_db(str(tmp_path / "t.db")) as conn:
+        await apply_schema(conn)
+        deck_id = await _seed_deck(conn, page_count=3)
+        await replace_deck_slides(conn, deck_id=deck_id, slides=[
+            # [plain] option only
+            DeckSlideInput(slide_index=0,
+                           frame_tex="\\begin{frame}[plain]{Methodology}\\end{frame}",
+                           page_start=1, page_end=1),
+            # overlay spec + option
+            DeckSlideInput(slide_index=1,
+                           frame_tex="\\begin{frame}<2->[fragile]{Implementation}\\end{frame}",
+                           page_start=2, page_end=2),
+            # option only (different option)
+            DeckSlideInput(slide_index=2,
+                           frame_tex="\\begin{frame}[t]{Results}\\end{frame}",
+                           page_start=3, page_end=3),
+        ])
+        ctx1 = await build_slide_context(conn, session_id=1, current_view_page=1)
+        ctx2 = await build_slide_context(conn, session_id=1, current_view_page=2)
+        ctx3 = await build_slide_context(conn, session_id=1, current_view_page=3)
+        assert ctx1 is not None and "Methodology" in ctx1
+        assert "(untitled slide)" not in (ctx1 or "")
+        assert ctx2 is not None and "Implementation" in ctx2
+        assert "(untitled slide)" not in (ctx2 or "")
+        assert ctx3 is not None and "Results" in ctx3
+        assert "(untitled slide)" not in (ctx3 or "")
 
 
 async def test_figure_frame_resolves_caption(tmp_path, monkeypatch) -> None:
