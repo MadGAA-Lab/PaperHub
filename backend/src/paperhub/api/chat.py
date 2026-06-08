@@ -29,6 +29,7 @@ from paperhub.agents.research_tools import (
     add_paper_to_session_dispatch,
 )
 from paperhub.agents.router import router_node
+from paperhub.agents.slide_context import build_slide_context
 from paperhub.agents.sql_agent import sql_agent_stream
 from paperhub.agents.state import AgentState
 from paperhub.agents.stubs import stub_response
@@ -89,6 +90,10 @@ class ChatRequest(BaseModel):
     # (1-based). The Report Agent's deck-command classifier reads this to
     # resolve "edit this slide" to the visible page. 0 = no deck open.
     current_view_page: int = 0
+    # Set by the composer's "Slide" chip when the user wants slide-aware QA.
+    # When True the active-slide context block is built and threaded into
+    # AgentState so paper_qa can anchor its answer to the visible slide.
+    slide_attached: bool = False
 
 
 async def _ensure_session(conn: aiosqlite.Connection, session_id: int | None) -> int:
@@ -532,6 +537,7 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> EventSourceRespon
                 "user_message": req.user_message,
                 "history": [h.model_dump() for h in req.history],
                 "current_view_page": req.current_view_page,
+                "slide_attached": req.slide_attached,
             }
             last_emitted_step = -1
             # Outbound MCP-client headers: any `MCPClient.call_tool` made
@@ -556,6 +562,20 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> EventSourceRespon
                     yield {"event": "tool_step",
                            "data": json.dumps({"record": rec}, separators=(',', ':'))}
                     last_emitted_step = rec["step_index"]
+                # Slide-aware QA: build the active-slide context ONLY when the
+                # composer chip is attached (deterministic). Both the paper_qa
+                # branch and the slides action="qa" guard read state.slide_context.
+                state = {
+                    **state,
+                    "slide_context": (
+                        await build_slide_context(
+                            conn, session_id=session_id,
+                            current_view_page=req.current_view_page,
+                        )
+                        if req.slide_attached
+                        else None
+                    ),
+                }
                 decision = state["routing_decision"]
                 evt = RoutingDecisionEvent(run_id=run_id, branch="", decision=decision)
                 yield {"event": evt.type,

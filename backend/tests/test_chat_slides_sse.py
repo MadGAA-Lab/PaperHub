@@ -272,3 +272,16 @@ async def test_chat_sse_slides_tool_step_events_forwarded(
     assert all(idx < final_idx for idx in tool_step_indexes), (
         "All tool_step events must precede the final event"
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 4: ChatRequest.slide_attached field + active-slide context gate
+# ---------------------------------------------------------------------------
+
+def test_chat_request_defaults_slide_attached_false() -> None:
+    from paperhub.api.chat import ChatRequest
+
+    req = ChatRequest(user_message="hi")
+    assert req.slide_attached is False
+    req2 = ChatRequest(user_message="hi", slide_attached=True, current_view_page=5)
+    assert req2.slide_attached is True
