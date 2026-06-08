@@ -248,10 +248,28 @@ async def test_router_surfaces_slide_attached_variable(migrated_db, fake_tracer)
                 reasoning="x", resolved_query="explain this graph",
                 response_language="English")
 
-    await migrated_db.execute("INSERT INTO chat_sessions DEFAULT VALUES")
-    await migrated_db.commit()
-    state = {"run_id": fake_tracer._run_id, "branch": "", "session_id": 1,  # noqa: SLF001
+    # fake_tracer fixture already inserted chat_sessions id=1; no extra INSERT needed.
+    state = {"run_id": fake_tracer.run_id, "branch": "", "session_id": 1,
              "user_message": "explain this graph", "history": [], "slide_attached": True}
     await router_node(state, adapter=_Cap(), tracer=fake_tracer, model="m",
                       conn=migrated_db)
     assert captured["slide_attached"] is True
+
+
+async def test_router_slide_attached_defaults_false(migrated_db, fake_tracer) -> None:
+    """When state has no slide_attached key, the router passes slide_attached=False."""
+    captured: dict[str, object] = {}
+
+    class _Cap:
+        async def structured(self, *, slot, variables, response_model, model, **__):
+            captured.update(variables)
+            return response_model(
+                intent="chitchat", model_tier="small", confidence=1.0,
+                reasoning="x", resolved_query="hi", response_language="English")
+
+    # State intentionally omits slide_attached — bool(state.get(...)) must yield False.
+    state = {"run_id": fake_tracer.run_id, "branch": "", "session_id": 1,
+             "user_message": "hi", "history": []}
+    await router_node(state, adapter=_Cap(), tracer=fake_tracer, model="m",
+                      conn=migrated_db)
+    assert captured["slide_attached"] is False

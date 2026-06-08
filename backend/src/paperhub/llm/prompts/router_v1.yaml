@@ -78,7 +78,7 @@ system: |
     mean", "why did they choose X" — route to `paper_qa`, NOT `slides`. Only an
     instruction to modify / translate / recreate the deck is `slides`.
     Example: slide_attached=true, "可以幫我更詳細解釋這個圖嗎" → intent: paper_qa,
-    resolved_query: "explain in more detail the graph shown on the current slide".
+    resolved_query: "詳細解釋目前投影片上顯示的圖表".
     Example: slide_attached=true, "把整份簡報換成英文" → intent: slides.
 
   Pick `model_tier`:
