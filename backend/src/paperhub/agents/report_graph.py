@@ -101,6 +101,10 @@ _NO_LATEX_MSG = (
     "Slide generation needs a LaTeX distribution (TeX Live or MikTeX) with "
     "pdflatex on PATH. Install one and try again."
 )
+_QA_UNAVAILABLE = (
+    "I can answer questions about this slide, but the answerer isn't "
+    "wired in this context. Please ask again as a normal question."
+)
 
 
 def _pdflatex_available() -> bool:
@@ -354,7 +358,7 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
     async def _resolve(state: AgentState) -> AgentState:
         papers = await _enabled_papers(deps.conn, state["session_id"])
         out: AgentState = {**state, "report_papers": papers}
-        # Guards run in _route; only classify/budget when we will actually act.
+        # Guards run in _route_deck_command; only classify/budget when we will actually act.
         if not papers or not _pdflatex_available():
             return out
 
@@ -412,11 +416,6 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
         if lang:
             out["report_slide_language"] = lang
         return out
-
-    _QA_UNAVAILABLE = (
-        "I can answer questions about this slide, but the answerer isn't "
-        "wired in this context. Please ask again as a normal question."
-    )
 
     async def _sl_qa(state: AgentState) -> AgentState:
         """Answer a question about the on-screen slide via the shared paper_qa

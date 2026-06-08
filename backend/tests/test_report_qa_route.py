@@ -14,11 +14,7 @@ Adaptations from the task spec:
   in CI (no pdflatex required for qa routing).
 """
 
-import pytest
-
 from paperhub.models.domain import DeckCommand
-
-pytestmark = pytest.mark.asyncio
 
 
 def test_route_qa_goes_to_sl_qa(monkeypatch) -> None:
@@ -128,6 +124,16 @@ async def test_sl_qa_delegates_to_answer_callback(monkeypatch, tmp_path) -> None
         assert final == "The graph shows X [chunk:101]."
         rows = await get_deck_slides(conn, deck_id=deck.id)
         assert rows[0].frame_tex == "\\begin{frame}{A}b\\end{frame}"  # untouched
+
+
+def test_route_genuinely_unknown_action_falls_through_to_qa(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from paperhub.agents import report_graph as rg
+    monkeypatch.setattr(rg, "_pdflatex_available", lambda: True)
+    state = {"report_papers": [{"id": 1}],
+             "report_command": SimpleNamespace(action="some_future_action")}
+    assert rg._route_deck_command(state) == "qa"  # NEVER "edit_slides"
 
 
 async def _async_return(val):
