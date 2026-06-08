@@ -31,6 +31,7 @@ import asyncio
 import json
 import re
 import shutil
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -228,6 +229,12 @@ class ReportDeps:
     # ``chat.py`` (still passed by callers) but unused by the F4.5 generate
     # path. Marked optional + defaulted so test harnesses can omit it.
     slide_style_profile_name: str = field(default="default")
+    # v2.29 slide-aware QA: a qa deck-command delegates here (wired in chat.py
+    # to run the paper_qa subgraph with the active-slide context). None → a
+    # graceful fallback message.
+    answer_slide_question: Callable[[AgentState], Awaitable[str]] | None = field(
+        default=None
+    )
 
 
 async def _enabled_papers(
@@ -313,6 +320,36 @@ async def _stage_figures(
     return await asyncio.to_thread(_stage_all)
 
 
+def _route_deck_command(state: AgentState) -> str:
+    """Map a resolved deck-command state to a report-graph node name.
+
+    qa is checked BEFORE the no_latex guard so a content question is answered
+    even on a host without pdflatex. An unknown action is answered (qa), NEVER
+    routed to edit_slides — that default fallback is what rewrote the slide in
+    run 412.
+    """
+    if not state.get("report_papers"):
+        return "empty"
+    cmd = state.get("report_command")
+    if cmd is not None and cmd.action == "qa":
+        return "qa"        # qa never needs latex
+    if not _pdflatex_available():
+        return "no_latex"  # every other path (create/edit/notes) needs latex
+    if cmd is None:
+        return "create"
+    if cmd.action == "regenerate":
+        return "create"
+    if cmd.action in ("generate_notes", "edit_notes"):
+        return "notes"
+    if cmd.action == "edit_title":
+        return "edit_title"
+    if cmd.action == "edit_preamble":
+        return "edit_preamble"
+    if cmd.action == "edit_slides":
+        return "edit_slides"
+    return "qa"  # unknown/unhandled action is answered, never silently edited
+
+
 def build_report_subgraph(deps: ReportDeps) -> Any:
     async def _resolve(state: AgentState) -> AgentState:
         papers = await _enabled_papers(deps.conn, state["session_id"])
@@ -351,6 +388,7 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
                 instruction=instruction,
                 current_view_page=state.get("current_view_page") or 1,
                 deck_outline=outline,
+                slide_attached=bool(state.get("slide_attached")),
             ),
             detect_slide_language(
                 adapter=deps.adapter,
@@ -375,23 +413,17 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
             out["report_slide_language"] = lang
         return out
 
-    def _route(state: AgentState) -> str:
-        if not state.get("report_papers"):
-            return "empty"
-        if not _pdflatex_available():
-            return "no_latex"
-        cmd = state.get("report_command")
-        if cmd is None:
-            return "create"
-        if cmd.action == "regenerate":
-            return "create"
-        if cmd.action in ("generate_notes", "edit_notes"):
-            return "notes"
-        if cmd.action == "edit_title":
-            return "edit_title"
-        if cmd.action == "edit_preamble":
-            return "edit_preamble"
-        return "edit_slides"
+    _QA_UNAVAILABLE = (
+        "I can answer questions about this slide, but the answerer isn't "
+        "wired in this context. Please ask again as a normal question."
+    )
+
+    async def _sl_qa(state: AgentState) -> AgentState:
+        """Answer a question about the on-screen slide via the shared paper_qa
+        flow. NEVER recompiles and NEVER touches deck_slides."""
+        if deps.answer_slide_question is None:
+            return {**state, "final_response": _QA_UNAVAILABLE}
+        return {**state, "final_response": await deps.answer_slide_question(state)}
 
     async def _empty(state: AgentState) -> AgentState:
         return {**state, "final_response": _EMPTY_MSG}
@@ -1364,10 +1396,11 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
     g.add_node("sl_edit_slides", _edit_slides)
     g.add_node("sl_edit_title", _edit_title)
     g.add_node("sl_edit_preamble", _edit_preamble)
+    g.add_node("sl_qa", _sl_qa)
     g.add_edge(START, "sl_resolve")
     g.add_conditional_edges(
         "sl_resolve",
-        _route,
+        _route_deck_command,
         {
             "empty": "sl_empty",
             "no_latex": "sl_no_latex",
@@ -1376,6 +1409,7 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
             "edit_slides": "sl_edit_slides",
             "edit_title": "sl_edit_title",
             "edit_preamble": "sl_edit_preamble",
+            "qa": "sl_qa",
         },
     )
     g.add_edge("sl_empty", END)
@@ -1385,4 +1419,5 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
     g.add_edge("sl_edit_slides", END)
     g.add_edge("sl_edit_title", END)
     g.add_edge("sl_edit_preamble", END)
+    g.add_edge("sl_qa", END)
     return g.compile()
