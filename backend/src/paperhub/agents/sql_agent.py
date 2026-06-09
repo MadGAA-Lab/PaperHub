@@ -9,7 +9,9 @@ import aiosqlite
 
 from paperhub.agents._mcp_result import normalize_mcp_result
 from paperhub.agents.memory_recall import build_active_memory_block
+from paperhub.agents.research import ToolStepYield
 from paperhub.agents.state import AgentState, effective_query, response_language
+from paperhub.db.tool_calls import drain_tool_calls_since
 from paperhub.llm.adapter import LlmAdapter
 from paperhub.tracing.tracer import Tracer
 
@@ -82,13 +84,39 @@ async def sql_agent_stream(
     answer_mock: str | None = None,
     conn: aiosqlite.Connection | None = None,
     recall_enabled: bool = True,
-) -> AsyncIterator[str]:
+    emit_tool_steps: bool = False,
+) -> AsyncIterator[str | ToolStepYield]:
     question = effective_query(state)
     language = response_language(state)
     session_id = state.get("session_id")
 
+    # Progressive trace-streaming (FR-02): when ``emit_tool_steps`` is set the
+    # caller (chat.py) wants each agent step to surface as a ``tool_step`` SSE
+    # event AS IT COMMITS — not in one batch at end-of-turn via the post-stream
+    # drain. The Tracer only writes to the DB (no live channel), so we drain
+    # newly-committed rows after each step and yield them. Start after the
+    # current max step so the router's already-emitted step 0 isn't re-sent.
+    _emitted_step = -1
+    if emit_tool_steps:
+        async with tracer.connection.execute(
+            "SELECT COALESCE(MAX(step_index), -1) FROM tool_calls WHERE run_id = ?",
+            (tracer.run_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        _emitted_step = int(row[0]) if row is not None else -1
+
+    async def _drain_new_steps() -> AsyncIterator[ToolStepYield]:
+        nonlocal _emitted_step
+        if not emit_tool_steps:
+            return
+        for rec in await drain_tool_calls_since(tracer.connection, tracer.run_id, _emitted_step):
+            _emitted_step = rec["step_index"]
+            yield ToolStepYield(record=rec)
+
     pc_schema = await _mcp_call(tracer, registry, "sql.describe", {"table": "paper_content"})
     p_schema = await _mcp_call(tracer, registry, "sql.describe", {"table": "papers"})
+    async for ev in _drain_new_steps():
+        yield ev
 
     def _cols(schema: Any) -> str:
         # ``sql.describe`` returns ``{"columns": [{name, type}, ...]}`` (the
@@ -110,8 +138,12 @@ async def sql_agent_stream(
         variables={"session_id": session_id, "question": question, "table_schemas": table_schemas},
         mock=planner_mock,
     )
+    async for ev in _drain_new_steps():
+        yield ev
 
     result = await _mcp_call(tracer, registry, "sql.query", {"sql": sql})
+    async for ev in _drain_new_steps():
+        yield ev
     rows = result.get("rows") if isinstance(result, dict) else None
     if (not isinstance(result, dict)) or ("error" in result) or (not rows):
         repaired = await _plan_sql(
@@ -132,8 +164,12 @@ async def sql_agent_stream(
             },
             mock=repair_mock if repair_mock is not None else planner_mock,
         )
+        async for ev in _drain_new_steps():
+            yield ev
         sql = repaired
         result = await _mcp_call(tracer, registry, "sql.query", {"sql": sql})
+        async for ev in _drain_new_steps():
+            yield ev
         rows = result.get("rows") if isinstance(result, dict) else []
 
     columns = result.get("columns", []) if isinstance(result, dict) else []
@@ -175,3 +211,8 @@ async def sql_agent_stream(
             "length": sum(len(c) for c in collected),
             "recall_hit": bool(memory_context),
         })
+    # Stream the answer step's record now that it's committed (its tokens
+    # already streamed above). Any remainder is caught by chat.py's
+    # post-stream drain — which is now a no-op for the happy path.
+    async for ev in _drain_new_steps():
+        yield ev

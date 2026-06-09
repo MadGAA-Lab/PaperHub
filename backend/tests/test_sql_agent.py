@@ -699,3 +699,47 @@ async def test_planner_sees_columns_from_dict_wrapped_describe(migrated_db) -> N
     assert "ingested_at" in table_schemas, (
         f"real column names missing from planner schema: {table_schemas!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Hotfix — SQL agent must stream tool_step records progressively, not at end
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sql_agent_streams_tool_steps_before_answer(migrated_db) -> None:
+    """Run 522 trace showed every SQL tool_step (describe/plan/query) surfacing
+    in one batch AFTER the answer — the chat layer's post-stream drain — because
+    ``sql_agent_stream`` yielded only answer tokens. With ``emit_tool_steps=True``
+    it must interleave ``ToolStepYield`` records as each step commits, so at least
+    the describe + query steps arrive BEFORE the first answer token.
+    """
+    from paperhub.agents.research import ToolStepYield
+
+    await migrated_db.execute("INSERT INTO chat_sessions DEFAULT VALUES")
+    await migrated_db.execute("INSERT INTO runs (session_id) VALUES (1)")
+    await migrated_db.commit()
+    tracer = Tracer(migrated_db, run_id=1, branch="")
+    items: list = []
+    async for item in sql_agent_stream(
+        {"run_id": 1, "session_id": 1, "user_message": "how many papers?",
+         "effective_query": "how many papers?", "response_language": "English"},
+        adapter=LiteLlmAdapter(), tracer=tracer, registry=_FakeRegistry(),
+        planner_model="gpt-4o-mini", answer_model="gpt-4o-mini",
+        emit_tool_steps=True,
+        planner_mock="SELECT count(*) AS n FROM paper_content",
+        answer_mock="You have 3 papers.\n```sql\nSELECT count(*) AS n FROM paper_content\n```",
+    ):
+        items.append(item)
+
+    first_token = next((i for i, x in enumerate(items) if isinstance(x, str)), len(items))
+    steps_before = [x for x in items[:first_token] if isinstance(x, ToolStepYield)]
+    tools_before = {x.record["tool"] for x in steps_before}
+    assert "sql.describe" in tools_before, (
+        f"describe step did not stream before the answer; got {tools_before}"
+    )
+    assert "sql.query" in tools_before, (
+        f"query step did not stream before the answer; got {tools_before}"
+    )
+    # Tokens still stream as plain strings.
+    assert any(isinstance(x, str) for x in items), "no answer tokens streamed"
