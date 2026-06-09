@@ -797,16 +797,28 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> EventSourceRespon
                         sql_stream_kwargs["planner_mock"] = sql_planner_mock
                     if sql_answer_mock is not None:
                         sql_stream_kwargs["answer_mock"] = sql_answer_mock
-                    async for token in sql_agent_stream(
+                    async for item in sql_agent_stream(
                         state, adapter=adapter, tracer=tracer, registry=registry,
                         planner_model=settings.sql_agent_model,
                         answer_model=settings.sql_answer_model,
                         conn=conn,
                         recall_enabled=settings.memory_recall_enabled,
+                        emit_tool_steps=True,
                         **sql_stream_kwargs,
                     ):
-                        sql_chunks.append(token)
-                        token_evt = TokenEvent(run_id=run_id, branch="", text=token)
+                        if isinstance(item, ToolStepYield):
+                            # Forward each agent step as it commits so the trace
+                            # panel fills progressively instead of all-at-end via
+                            # the post-stream drain (matches paper_search/qa).
+                            yield {"event": "tool_step",
+                                   "data": json.dumps({"record": item.record},
+                                                      separators=(',', ':'))}
+                            last_emitted_step = max(
+                                last_emitted_step, item.record["step_index"],
+                            )
+                            continue
+                        sql_chunks.append(item)
+                        token_evt = TokenEvent(run_id=run_id, branch="", text=item)
                         yield {"event": "token",
                                "data": token_evt.model_dump_json(exclude={"type"})}
                     final_content = "".join(sql_chunks)

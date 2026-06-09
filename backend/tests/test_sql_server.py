@@ -39,7 +39,11 @@ async def test_list_tables_returns_allowlist(sql_ctx) -> None:
 
 @pytest.mark.asyncio
 async def test_describe_returns_columns(sql_ctx) -> None:
-    cols = await _describe_handler("papers")
+    # describe returns a {"columns": [...]} dict — NOT a top-level list — so the
+    # payload survives the MCP wire as one valid-JSON TextContent (run-517 fix).
+    out = await _describe_handler("papers")
+    assert isinstance(out, dict) and "columns" in out
+    cols = out["columns"]
     names = {c["name"] for c in cols}
     assert {"session_id", "paper_content_id", "enabled"} <= names
     assert all("name" in c and "type" in c for c in cols)

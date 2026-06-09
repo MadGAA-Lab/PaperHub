@@ -210,14 +210,22 @@ class LiteLlmAdapter:
         # only catches errors BEFORE the stream starts; mid-stream
         # ``MidStreamFallbackError`` / ``APIConnectionError`` / 5xx are not
         # retried by litellm itself because the partial stream can't be
-        # resumed. Wrap the whole stream in a retry loop: on transient mid-
-        # stream failure, discard any partial yield and restart from scratch.
+        # resumed.
+        #
+        # We yield tokens to the caller AS THEY ARRIVE (real streaming — the UI
+        # renders the answer progressively). Retry-from-start is only safe
+        # while NOTHING has been emitted yet: once a token reaches the caller,
+        # restarting would duplicate output, so a mid-stream transient failure
+        # propagates instead. In practice transient failures cluster at stream
+        # SETUP (connect / first chunk / initial 5xx) — exactly the window
+        # where restart is still safe — so this keeps the resilience that
+        # matters while removing the buffer that defeated streaming.
         # Permanent errors (bad request, auth) propagate immediately.
         max_attempts = 3
         backoff_base = 1.0  # 1s, 2s, 4s
         last_exc: BaseException | None = None
         for attempt in range(1, max_attempts + 1):
-            buffered: list[str] = []
+            emitted_any = False
             try:
                 response = await litellm.acompletion(
                     model=model,
@@ -228,18 +236,18 @@ class LiteLlmAdapter:
                 async for chunk in response:
                     delta = chunk["choices"][0].get("delta", {}).get("content") or ""
                     if delta:
-                        buffered.append(delta)
-                # Stream completed successfully; flush buffered tokens to the
-                # caller in one go. (We could not yield incrementally because
-                # the caller would already have consumed partial tokens if we
-                # then had to retry. Buffering trades a small latency hit for
-                # crash-free resilience.)
-                for tok in buffered:
-                    yield tok
+                        emitted_any = True
+                        yield delta
                 return
             except Exception as exc:
                 last_exc = exc
-                if attempt >= max_attempts or not _is_transient_stream_error(exc):
+                # Can't restart once partial output reached the caller; and
+                # don't retry non-transient / exhausted-attempt errors.
+                if (
+                    emitted_any
+                    or attempt >= max_attempts
+                    or not _is_transient_stream_error(exc)
+                ):
                     raise
                 await asyncio.sleep(backoff_base * (2 ** (attempt - 1)))
         # Defensive — the loop above either returns or raises.

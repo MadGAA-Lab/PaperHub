@@ -78,6 +78,77 @@ async def test_stream_yields_tokens() -> None:
     assert "".join(chunks) == "Hello there!"
 
 
+def _chunk(content: str) -> dict[str, Any]:
+    return {"choices": [{"delta": {"content": content}}]}
+
+
+async def _no_sleep(_seconds: float) -> None:
+    """Skip the retry backoff in tests."""
+    return None
+
+
+_CHITCHAT_VARS = {"user_message": "hi", "response_language": "English", "memory_context": ""}
+
+
+async def test_stream_emits_tokens_live_not_buffered(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Streaming must reach the caller token-by-token, not buffered and flushed
+    all-at-once at end-of-stream (the 'instant message, no streaming' bug).
+
+    Detection: a fake upstream records each chunk as it is produced. After the
+    caller pulls only the FIRST token, a live adapter has pulled exactly one
+    chunk from upstream; a buffering adapter has already drained all of them.
+    """
+    produced: list[str] = []
+
+    async def fake_acompletion(**kwargs: Any):  # noqa: ANN003
+        async def gen():
+            for c in ["A", "B", "C"]:
+                produced.append(c)
+                yield _chunk(c)
+        return gen()
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    adapter = LiteLlmAdapter()
+    agen = adapter.stream(slot="chitchat/v1", variables=_CHITCHAT_VARS, model="gpt-4o-mini")
+    first = await agen.__anext__()
+    assert first == "A"
+    assert produced == ["A"], (
+        f"adapter buffered the whole stream before yielding the first token: {produced}"
+    )
+    rest = [t async for t in agen]
+    assert "".join([first, *rest]) == "ABC"
+
+
+async def test_stream_retries_transient_error_before_first_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resilience preserved: a transient failure BEFORE any token reaches the
+    caller is still retried from scratch (restart is safe — nothing emitted)."""
+    attempts = {"n": 0}
+
+    async def fake_acompletion(**kwargs: Any):  # noqa: ANN003
+        attempts["n"] += 1
+
+        async def gen():
+            if attempts["n"] == 1:
+                raise litellm.APIConnectionError(
+                    message="Connection error.", model="gpt-4o-mini", llm_provider="openai",
+                )
+                yield  # pragma: no cover - unreachable, makes gen an async generator
+            for c in ["X", "Y"]:
+                yield _chunk(c)
+        return gen()
+
+    monkeypatch.setattr("asyncio.sleep", _no_sleep)
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    adapter = LiteLlmAdapter()
+    out = [t async for t in adapter.stream(
+        slot="chitchat/v1", variables=_CHITCHAT_VARS, model="gpt-4o-mini",
+    )]
+    assert "".join(out) == "XY"
+    assert attempts["n"] == 2, "transient pre-token error should have retried once"
+
+
 async def test_structured_uses_json_mode_when_no_native_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -2,7 +2,7 @@
 
 Tools (namespace ``sql.*``):
   * list_tables()        -> list[str]            (the §III-6 allowlist)
-  * describe(table)       -> list[{name,type}]    (PRAGMA table_info, allowlisted)
+  * describe(table)       -> {columns: [{name,type}]} (PRAGMA table_info, allowlisted)
   * query(sql)            -> {columns, rows}       (sqlglot-validated SELECT/WITH)
 
 Rejections (non-allowlisted table / non-SELECT verb) are returned as
@@ -38,10 +38,18 @@ async def _list_tables_handler() -> list[str]:
 
 
 async def _describe_handler(table: str) -> Any:
-    """Return [{name, type}] column metadata for one allowlisted table.
+    """Return ``{"columns": [{name, type}, ...]}`` for one allowlisted table.
 
     Rejects non-allowlisted table names with a structured error payload so the
     calling agent can mark its tracer step as rejected rather than raising.
+
+    The columns are wrapped in a ``{"columns": ...}`` dict rather than returned
+    as a top-level list ON PURPOSE: FastMCP serialises a list return as one
+    TextContent *per element*, which ``MCPClient.call_tool`` joins into a
+    newline-delimited string of pretty-printed JSON objects — not a single
+    valid JSON document, so the SQL Agent's ``normalize_mcp_result`` can't
+    parse it back and the planner saw ``(unavailable)`` (the run-517 bug). A
+    single dict serialises to one valid-JSON TextContent and survives the wire.
 
     Note: ``table`` is interpolated into a PRAGMA statement. This is safe
     ONLY because we gate on ALLOWED_TABLES membership first — those are
@@ -52,7 +60,7 @@ async def _describe_handler(table: str) -> Any:
     ctx = require_request_context()
     async with ctx.conn.execute(f"PRAGMA table_info({table})") as cur:
         rows = await cur.fetchall()
-    return [{"name": r[1], "type": r[2]} for r in rows]
+    return {"columns": [{"name": r[1], "type": r[2]} for r in rows]}
 
 
 async def _query_handler(sql: str) -> Any:

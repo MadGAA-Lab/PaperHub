@@ -22,7 +22,7 @@ class _FakeRegistry:
         if name == "sql.describe":
             table = args.get("table", "")
             if table == "paper_content":
-                return [
+                return {"columns": [
                     {"name": "id", "type": "INTEGER"},
                     {"name": "content_key", "type": "TEXT"},
                     {"name": "kind", "type": "TEXT"},
@@ -35,17 +35,17 @@ class _FakeRegistry:
                     {"name": "sections_json", "type": "TEXT"},
                     {"name": "source_path", "type": "TEXT"},
                     {"name": "ingested_at", "type": "TEXT"},
-                ]
+                ]}
             if table == "papers":
-                return [
+                return {"columns": [
                     {"name": "id", "type": "INTEGER"},
                     {"name": "session_id", "type": "INTEGER"},
                     {"name": "paper_content_id", "type": "INTEGER"},
                     {"name": "enabled", "type": "INTEGER"},
                     {"name": "added_at", "type": "TEXT"},
-                ]
+                ]}
             # fallback for any other table
-            return [{"name": "id", "type": "INTEGER"}]
+            return {"columns": [{"name": "id", "type": "INTEGER"}]}
         if name == "sql.query":
             return {"columns": ["n"], "rows": [[3]]}
         raise AssertionError(name)
@@ -95,7 +95,7 @@ class _RepairRegistry:
         if name == "sql.list_tables":
             return ["papers"]
         if name == "sql.describe":
-            return [{"name": "id", "type": "INTEGER"}]
+            return {"columns": [{"name": "id", "type": "INTEGER"}]}
         if name == "sql.query":
             self._query_n += 1
             if self._query_n == 1:
@@ -146,7 +146,7 @@ class _RejectedRegistry:
         if name == "sql.list_tables":
             return ["papers"]
         if name == "sql.describe":
-            return [{"name": "id", "type": "INTEGER"}]
+            return {"columns": [{"name": "id", "type": "INTEGER"}]}
         if name == "sql.query":
             return {"error": "rejected", "reason": "not allowed"}
         raise AssertionError(name)
@@ -472,7 +472,7 @@ class _QueryFailedRegistry:
         if name == "sql.list_tables":
             return ["papers"]
         if name == "sql.describe":
-            return [{"name": "id", "type": "INTEGER"}, {"name": "session_id", "type": "INTEGER"}]
+            return {"columns": [{"name": "id", "type": "INTEGER"}, {"name": "session_id", "type": "INTEGER"}]}
         if name == "sql.query":
             self._query_n += 1
             if self._query_n == 1:
@@ -599,3 +599,147 @@ async def test_planner_receives_column_schema(migrated_db) -> None:
     schema_text = str(captured[0].get("schema", "")) + str(captured[0].get("table_schemas", ""))
     assert "paper_content" in schema_text
     assert "title" in schema_text
+
+
+# ---------------------------------------------------------------------------
+# Hotfix — describe schema must reach the planner over the REAL wire shape
+# ---------------------------------------------------------------------------
+
+
+class _ProdShapeDescribeRegistry:
+    """``sql.describe`` returns the dict-wrapped ``{"columns": [...]}`` payload
+    the real ``/mcp-sql`` server emits after the wire-fix — NOT a bare Python
+    list.
+
+    A bare list is only ever produced by in-test stubs. In production a
+    top-level list return is flattened by ``MCPClient.call_tool`` into a
+    newline-joined string of pretty-printed JSON objects (one TextContent per
+    element), which is not a single valid JSON document — so
+    ``normalize_mcp_result`` can't parse it and ``_cols`` saw a ``str`` →
+    ``(unavailable)``. The dict shape serialises to one valid-JSON TextContent
+    and survives the wire. This stub mirrors that prod shape so the test
+    actually guards prod.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    async def call(self, name: str, args: dict):
+        self.calls.append((name, args))
+        if name == "sql.list_tables":
+            return ["papers", "paper_content"]
+        if name == "sql.describe":
+            table = args.get("table", "")
+            if table == "paper_content":
+                return {
+                    "columns": [
+                        {"name": "id", "type": "INTEGER"},
+                        {"name": "title", "type": "TEXT"},
+                        {"name": "ingested_at", "type": "TEXT"},
+                    ]
+                }
+            return {
+                "columns": [
+                    {"name": "id", "type": "INTEGER"},
+                    {"name": "added_at", "type": "TEXT"},
+                ]
+            }
+        if name == "sql.query":
+            return {"columns": ["n"], "rows": [[3]]}
+        raise AssertionError(name)
+
+
+@pytest.mark.asyncio
+async def test_planner_sees_columns_from_dict_wrapped_describe(migrated_db) -> None:
+    """Run 517 regression: the planner must receive real column names — not
+    ``(unavailable)`` — when ``sql.describe`` returns the prod dict shape.
+
+    Before the hotfix ``_cols`` did ``isinstance(schema, list)`` on the
+    describe result; the prod payload is a dict (or an unparseable flattened
+    string), never a bare list, so it fell through to ``(unavailable)``. The
+    planner then hallucinated a non-existent ``created_at`` column and every
+    generated query failed with ``no such column``.
+    """
+    await migrated_db.execute("INSERT INTO chat_sessions DEFAULT VALUES")
+    await migrated_db.execute("INSERT INTO runs (session_id) VALUES (1)")
+    await migrated_db.commit()
+    captured: list[dict] = []
+    import paperhub.agents.sql_agent as sa_mod
+    original = sa_mod._plan_sql
+
+    async def capture_plan_sql(adapter, tracer, *, slot, model, variables, mock=None):
+        captured.append(variables)
+        return await original(adapter, tracer, slot=slot, model=model, variables=variables, mock=mock)
+
+    sa_mod._plan_sql = capture_plan_sql
+    try:
+        tracer = Tracer(migrated_db, run_id=1, branch="")
+        state: AgentState = {
+            "run_id": 1, "session_id": 1,
+            "user_message": "how many papers added this month?",
+            "effective_query": "how many papers added this month?",
+            "response_language": "English",
+        }
+        async for _ in sql_agent_stream(
+            state, adapter=LiteLlmAdapter(), tracer=tracer,
+            registry=_ProdShapeDescribeRegistry(),
+            planner_model="gpt-4o-mini", answer_model="gpt-4o-mini",
+            planner_mock="SELECT count(*) AS n FROM paper_content",
+            answer_mock="You have 3 papers.\n```sql\nSELECT count(*) AS n FROM paper_content\n```",
+        ):
+            pass
+    finally:
+        sa_mod._plan_sql = original
+
+    assert captured, "planner was never called"
+    table_schemas = str(captured[0].get("table_schemas", ""))
+    assert "(unavailable)" not in table_schemas, (
+        f"planner received unusable schema: {table_schemas!r}"
+    )
+    assert "ingested_at" in table_schemas, (
+        f"real column names missing from planner schema: {table_schemas!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hotfix — SQL agent must stream tool_step records progressively, not at end
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sql_agent_streams_tool_steps_before_answer(migrated_db) -> None:
+    """Run 522 trace showed every SQL tool_step (describe/plan/query) surfacing
+    in one batch AFTER the answer — the chat layer's post-stream drain — because
+    ``sql_agent_stream`` yielded only answer tokens. With ``emit_tool_steps=True``
+    it must interleave ``ToolStepYield`` records as each step commits, so at least
+    the describe + query steps arrive BEFORE the first answer token.
+    """
+    from paperhub.agents.research import ToolStepYield
+
+    await migrated_db.execute("INSERT INTO chat_sessions DEFAULT VALUES")
+    await migrated_db.execute("INSERT INTO runs (session_id) VALUES (1)")
+    await migrated_db.commit()
+    tracer = Tracer(migrated_db, run_id=1, branch="")
+    items: list = []
+    async for item in sql_agent_stream(
+        {"run_id": 1, "session_id": 1, "user_message": "how many papers?",
+         "effective_query": "how many papers?", "response_language": "English"},
+        adapter=LiteLlmAdapter(), tracer=tracer, registry=_FakeRegistry(),
+        planner_model="gpt-4o-mini", answer_model="gpt-4o-mini",
+        emit_tool_steps=True,
+        planner_mock="SELECT count(*) AS n FROM paper_content",
+        answer_mock="You have 3 papers.\n```sql\nSELECT count(*) AS n FROM paper_content\n```",
+    ):
+        items.append(item)
+
+    first_token = next((i for i, x in enumerate(items) if isinstance(x, str)), len(items))
+    steps_before = [x for x in items[:first_token] if isinstance(x, ToolStepYield)]
+    tools_before = {x.record["tool"] for x in steps_before}
+    assert "sql.describe" in tools_before, (
+        f"describe step did not stream before the answer; got {tools_before}"
+    )
+    assert "sql.query" in tools_before, (
+        f"query step did not stream before the answer; got {tools_before}"
+    )
+    # Tokens still stream as plain strings.
+    assert any(isinstance(x, str) for x in items), "no answer tokens streamed"
