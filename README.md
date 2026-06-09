@@ -14,8 +14,8 @@ Multi-agent tool routing · in-repo RAG knowledge base · agentic per-paper retr
 ![Vite](https://img.shields.io/badge/Vite-Tailwind-646CFF?logo=vite&logoColor=white)
 ![Lint](https://img.shields.io/badge/lint-ruff-261230?logo=ruff&logoColor=white)
 ![Types](https://img.shields.io/badge/types-mypy%20--strict-2A6DB2)
-![Tests](https://img.shields.io/badge/tests-1104%20backend%20%2B%20386%20frontend-brightgreen)
-![Status](https://img.shields.io/badge/release-v2.30.0%20(SRS%20v2.30)-success)
+![Tests](https://img.shields.io/badge/tests-1130%20backend%20%2B%20426%20frontend-brightgreen)
+![Status](https://img.shields.io/badge/release-v2.31.0%20(SRS%20v2.31)-success)
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue)
 
 </div>
@@ -328,7 +328,7 @@ scripts/run-benchmark.ps1 -Resume <prior.json>   # retry only failed cases after
 
 ## 📖 Documentation
 
-- **[System Requirements Specification](docs/superpowers/specs/2026-05-17-paperhub-srs.md)** — authoritative architecture, schema, scope, and acceptance criteria (shipped through **v2.30**; v2.31 i18n is spec'd but not yet built).
+- **[System Requirements Specification](docs/superpowers/specs/2026-05-17-paperhub-srs.md)** — authoritative architecture, schema, scope, and acceptance criteria (shipped through **v2.31**).
 - **[Implementation plans](docs/superpowers/plans/)** — one per sub-project, each executed via TDD.
 - **[Backend developer docs](backend/README.md)** — backend-specific notes.
 
