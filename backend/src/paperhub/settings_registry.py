@@ -14,7 +14,10 @@ from typing import Literal
 
 FieldType = Literal["string", "int", "bool", "email", "enum", "secret"]
 
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Domain labels exclude '.' so the dot separators are unambiguous — this avoids
+# the polynomial-backtracking overlap CodeQL flags (py/polynomial-redos) when
+# two adjacent '.'-matching quantifiers straddle a literal '\.'.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+$")
 
 
 @dataclass(frozen=True)
