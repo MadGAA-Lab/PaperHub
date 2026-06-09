@@ -1,10 +1,14 @@
 import { Dialog } from "@base-ui/react/dialog";
+import { Check, Pencil, Plus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import type { SettingsField } from "../../lib/api";
 import { useSettingsStore } from "../../store/settings";
+import { Button } from "../ui/button";
+import { Select } from "../ui/select";
+import { Switch } from "../ui/switch";
 
 export function SettingsModal() {
   const { t } = useTranslation(["common", "settings"]);
@@ -132,7 +136,8 @@ function FieldRow({
               onChange={(e) => setDraft(e.target.value)}
               className="w-full rounded border px-2 py-1 text-sm"
             />
-            <button
+            <Button
+              size="sm"
               onClick={() =>
                 void onSave({ [field.key]: draft })
                   .then(() => setReplacing(false))
@@ -142,19 +147,20 @@ function FieldRow({
                     ),
                   )
               }
-              className="rounded bg-primary px-3 text-sm text-primary-foreground"
             >
+              <Check />
               {t("save")}
-            </button>
+            </Button>
           </div>
         ) : (
           <div className="mt-1 flex items-center gap-2 text-sm">
             <span className={field.is_set ? "text-green-600" : "text-muted-foreground"}>
               {field.is_set ? t("setIndicator", "••• set") : t("notSet", "not set")}
             </span>
-            <button onClick={() => setReplacing(true)} className="rounded border px-2 py-0.5 text-xs">
+            <Button variant="outline" size="xs" onClick={() => setReplacing(true)}>
+              <Pencil />
               {t("replace", "Replace")}
-            </button>
+            </Button>
           </div>
         )}
         {field.help && <p className="mt-1 text-xs text-muted-foreground">{field.help}</p>}
@@ -162,7 +168,32 @@ function FieldRow({
     );
   }
 
-  // string / int / email / enum / bool
+  // bool renders as an immediate-save Switch (toggles persist on change).
+  if (field.type === "bool") {
+    return (
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <label htmlFor={field.key} className="text-sm font-medium">
+            {field.label} {field.restart_required && <RestartBadge />}
+          </label>
+          {field.help && <p className="mt-1 text-xs text-muted-foreground">{field.help}</p>}
+        </div>
+        <Switch
+          id={field.key}
+          checked={field.value === "1"}
+          onCheckedChange={(checked) =>
+            void onSave({ [field.key]: checked ? "1" : "0" }).catch((e: unknown) =>
+              toast.error(
+                e instanceof Error ? e.message : t("settings:saveFailed", "Couldn't save the setting"),
+              ),
+            )
+          }
+        />
+      </div>
+    );
+  }
+
+  // string / int / email / enum
   return (
     <div className="mb-4">
       <label htmlFor={field.key} className="text-sm font-medium">
@@ -170,38 +201,24 @@ function FieldRow({
       </label>
       <div className="mt-1 flex gap-2">
         {field.type === "enum" ? (
-          <select
+          <Select
             id={field.key}
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            className="w-full rounded border px-2 py-1 text-sm"
-          >
-            {field.choices?.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
-        ) : field.type === "bool" ? (
-          <select
-            id={field.key}
-            value={draft || "0"}
-            onChange={(e) => setDraft(e.target.value)}
-            className="w-full rounded border px-2 py-1 text-sm"
-          >
-            <option value="1">on</option>
-            <option value="0">off</option>
-          </select>
+            onValueChange={setDraft}
+            options={(field.choices ?? []).map((c) => ({ value: c, label: c }))}
+            className="w-full"
+          />
         ) : (
           <input
             id={field.key}
             type={field.type === "int" ? "number" : "text"}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            className="w-full rounded border px-2 py-1 text-sm"
+            className="w-full rounded-md border border-border bg-background px-2.5 py-1 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50"
           />
         )}
-        <button
+        <Button
+          size="sm"
           onClick={() =>
             void onSave({ [field.key]: draft === "" ? null : draft }).catch((e: unknown) =>
               toast.error(
@@ -209,10 +226,10 @@ function FieldRow({
               ),
             )
           }
-          className="rounded bg-primary px-3 text-sm text-primary-foreground"
         >
+          <Check />
           {t("save")}
-        </button>
+        </Button>
       </div>
       {field.help && <p className="mt-1 text-xs text-muted-foreground">{field.help}</p>}
     </div>
@@ -246,10 +263,14 @@ function CredentialEditor({
         {fields.map((f) => (
           <li
             key={f.key}
-            className="flex items-center justify-between rounded border px-2 py-1 text-sm"
+            className="flex items-center justify-between rounded-md border border-border px-2 py-1 text-sm"
           >
-            <span className="font-mono">{f.key}</span>
-            <button
+            <span className="truncate font-mono">{f.key}</span>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label={t("remove", "Remove")}
+              className="text-destructive hover:text-destructive"
               onClick={() =>
                 void onSave({ [f.key]: null }).catch((e: unknown) =>
                   toast.error(
@@ -257,10 +278,9 @@ function CredentialEditor({
                   ),
                 )
               }
-              className="text-xs text-red-600"
             >
-              {t("remove", "Remove")}
-            </button>
+              <Trash2 />
+            </Button>
           </li>
         ))}
       </ul>
@@ -271,7 +291,7 @@ function CredentialEditor({
           placeholder={t("providerKeyPlaceholder", "PROVIDER_API_KEY")}
           value={newKey}
           onChange={(e) => setNewKey(e.target.value.toUpperCase())}
-          className="w-1/2 rounded border px-2 py-1 font-mono text-sm"
+          className="w-1/2 rounded-md border border-border bg-background px-2.5 py-1 font-mono text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50"
         />
         <datalist id="cred-suggestions">
           {suggestions.map((s) => (
@@ -284,9 +304,10 @@ function CredentialEditor({
           placeholder={t("valuePlaceholder", "value")}
           value={newVal}
           onChange={(e) => setNewVal(e.target.value)}
-          className="w-1/2 rounded border px-2 py-1 text-sm"
+          className="w-1/2 rounded-md border border-border bg-background px-2.5 py-1 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50"
         />
-        <button
+        <Button
+          size="sm"
           disabled={!newKey || !newVal}
           onClick={() =>
             void onSave({ [newKey]: newVal })
@@ -300,10 +321,10 @@ function CredentialEditor({
                 ),
               )
           }
-          className="rounded bg-primary px-3 text-sm text-primary-foreground disabled:opacity-50"
         >
+          <Plus />
           {t("add", "Add")}
-        </button>
+        </Button>
       </div>
     </div>
   );
