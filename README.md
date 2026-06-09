@@ -334,6 +334,22 @@ scripts/run-benchmark.ps1 -Resume <prior.json>   # retry only failed cases after
 
 ---
 
+## 📚 Citation
+
+If you use PaperHub in your research or build on it, please cite it:
+
+```bibtex
+@software{paperhub,
+  author  = {Ren-Di, Wu},
+  title   = {{PaperHub: A Provenance-First Multi-Agent Research Assistant for Grounded Paper Q\&A and Slide Generation}},
+  year    = {2026},
+  url     = {https://github.com/whats2000/PaperHub},
+  version = {2.31.0}
+}
+```
+
+---
+
 ## 📄 License
 
 [Apache License 2.0](LICENSE) — © PaperHub contributors. You may use, modify, and distribute this software under the terms of the license, which includes an express grant of patent rights from contributors.
