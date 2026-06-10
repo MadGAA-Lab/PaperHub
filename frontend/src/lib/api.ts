@@ -503,3 +503,41 @@ export async function patchSettings(
     body: JSON.stringify(patch),
   });
 }
+
+export interface SettingsReadiness {
+  /** True iff both gate models are runnable right now (composer unlock). */
+  ready: boolean;
+  /** Whether ≥1 provider credential is set. */
+  credentials_set: boolean;
+  models: {
+    small: SettingsModelCheck;
+    flagship: SettingsModelCheck;
+  };
+}
+
+export interface SettingsModelCheck {
+  model: string;
+  /** The model's provider has its required key(s) in the environment. */
+  key_ok: boolean;
+  /** Env var names LiteLLM still needs for this model's provider. */
+  missing_keys: string[];
+}
+
+/** First-run gate: are the small + flagship models usable? Drives the composer
+ * lock + onboarding tour. Cheap (no network on the backend); safe on boot. */
+export async function getReadiness(): Promise<SettingsReadiness> {
+  return apiFetch<SettingsReadiness>("/settings/readiness");
+}
+
+export interface SettingsModelOptions {
+  /** Providers derived from the set credential keys. */
+  providers: string[];
+  /** Usable model ids per provider (live-discovered or static fallback). */
+  options: Record<string, string[]>;
+}
+
+/** Autocomplete suggestions for the model-name fields, per configured provider.
+ * Best-effort — the model name stays free text, so this never blocks. */
+export async function getModelOptions(): Promise<SettingsModelOptions> {
+  return apiFetch<SettingsModelOptions>("/settings/model-options");
+}
