@@ -80,7 +80,7 @@ export function MessageBubble({
       data-role={message.role}
       // Reserve space under a user bubble so its hover action row (absolute
       // -bottom-7) sits within the message's own section, not over the next one.
-      className={`flex w-full ${isUser ? "justify-end pb-8" : "justify-start"}`}
+      className={`flex w-full ${isUser ? "justify-end pb-6" : "justify-start"}`}
     >
       <div
         className={`group/bubble relative ${
@@ -192,7 +192,7 @@ export function MessageBubble({
             which would imply destructive in-place editing). */}
         {(canCopy || showFork) && (
           <div
-            className={`opacity-0 group-hover/bubble:opacity-100 focus-within:opacity-100 transition-opacity absolute -bottom-7 flex gap-1 ${
+            className={`opacity-0 group-hover/bubble:opacity-100 focus-within:opacity-100 transition-opacity absolute -bottom-6 flex gap-1 ${
               isUser ? "right-0" : "right-8 sm:right-12"
             }`}
           >
