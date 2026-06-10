@@ -79,9 +79,9 @@ export function MessageBubble({
       className={`flex w-full ${isUser ? "justify-end" : "justify-start"}`}
     >
       <div
-        className={`group/bubble relative ${isUser ? "max-w-[80%]" : "w-full pr-8 sm:pr-12"} ${
-          isStreamingEmpty ? "min-w-[64px]" : ""
-        }`}
+        className={`group/bubble relative ${
+          isUser ? "max-w-[80%]" : "w-full pl-1 pr-8 sm:pl-2 sm:pr-12"
+        } ${isStreamingEmpty ? "min-w-[64px]" : ""}`}
       >
         <div
           className={
