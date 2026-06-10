@@ -78,7 +78,9 @@ export function MessageBubble({
   return (
     <article
       data-role={message.role}
-      className={`flex w-full ${isUser ? "justify-end" : "justify-start"}`}
+      // Reserve space under a user bubble so its hover action row (absolute
+      // -bottom-7) sits within the message's own section, not over the next one.
+      className={`flex w-full ${isUser ? "justify-end pb-8" : "justify-start"}`}
     >
       <div
         className={`group/bubble relative ${
