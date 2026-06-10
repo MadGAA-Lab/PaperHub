@@ -352,7 +352,8 @@ def test_table_pixmap_falls_back_to_only_full_page_content() -> None:
 
 def test_snippet_has_bedrock_and_document() -> None:
     snip = _build_snippet("\\begin{tabular}{c}a\\\\\\end{tabular}", preamble="", body_prefix="")
-    assert "\\documentclass[border={34pt 10pt 10pt 10pt}]{standalone}" in snip
+    assert "\\documentclass[border=20pt]{standalone}" in snip
+    assert "\\setlength{\\textwidth}{80cm}" in snip  # huge -> natural width, no clip
     assert "\\usepackage{booktabs}" in snip
     assert "\\begin{document}" in snip and "\\end{document}" in snip
     assert "\\begin{tabular}{c}a" in snip
@@ -474,6 +475,10 @@ def test_compile_stubs_missing_sty_and_retries(
     monkeypatch.setattr("paperhub.pipelines.table_figures.subprocess.run", fake_run)
     monkeypatch.setattr(
         "paperhub.pipelines.table_figures._table_pixmap", lambda doc, dpi: _FakePix()
+    )
+    # _crop_and_pad needs a real pixmap; bypass it (return the fake, which saves).
+    monkeypatch.setattr(
+        "paperhub.pipelines.table_figures._crop_and_pad", lambda pix, pad: pix
     )
     monkeypatch.setattr(
         "paperhub.pipelines.table_figures.pymupdf.open", fake_open

@@ -41,6 +41,7 @@ import tempfile
 from pathlib import Path
 
 import pymupdf
+from PIL import Image, ImageChops, ImageOps
 
 logger = logging.getLogger(__name__)
 
@@ -592,9 +593,17 @@ _LAYOUT_PACKAGE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Border is asymmetric {left bottom right top}: a wide table flush against the
-# page's left edge would otherwise clip; the extra left margin re-centres it.
-_TABLE_BEDROCK_PREAMBLE = r"""\documentclass[border={34pt 10pt 10pt 10pt}]{standalone}
+# A generous symmetric border (all sides) — every rasterised table must show
+# whitespace on the left AND right, which is the visual proof it rendered FULLY
+# (content flush to the image edge means it was clipped). \textwidth is
+# deliberately HUGE so a wide table (e.g. arXiv:2407.15595's NiceTabular, whose
+# \resizebox we unwrapped) typesets at its TRUE natural width with NO \hsize
+# Overfull spilling past the page edge to be clipped; standalone then crops the
+# page to that full natural width + border, so the whole table is captured with
+# margins on both sides. The image may be wide — the Canvas scales it to fit.
+# (We do NOT use adjustbox max-width: it scales nicematrix tables unreliably —
+# fine on a narrow one, still clipping a wider sibling — arXiv:2407.15595.)
+_TABLE_BEDROCK_PREAMBLE = r"""\documentclass[border=20pt]{standalone}
 \usepackage{booktabs}
 \usepackage{multirow}
 \usepackage{makecell}
@@ -604,7 +613,7 @@ _TABLE_BEDROCK_PREAMBLE = r"""\documentclass[border={34pt 10pt 10pt 10pt}]{stand
 \usepackage{colortbl}
 \usepackage{amsmath,amssymb,amsfonts}
 \usepackage{graphicx}
-\setlength{\textwidth}{18cm}
+\setlength{\textwidth}{80cm}
 """
 
 _PDFLATEX_TIMEOUT_SECONDS = 60
@@ -766,6 +775,43 @@ def _table_pixmap(doc: pymupdf.Document, dpi: int) -> pymupdf.Pixmap | None:
     return fallback
 
 
+# Uniform white margin added around the tight-cropped table (px), as a fraction
+# of dpi (~2mm at 300dpi) so the table image always has whitespace on the left
+# AND right — the visual proof it rendered fully (no x-edge content = not clipped).
+def _table_margin_px(dpi: int) -> int:
+    return max(16, round(dpi * 0.08))
+
+
+# Cap the rasterised table image width. A genuinely wide table (the paper scaled
+# it with \resizebox; we typeset at full natural width so nothing clips) can be
+# ~70cm = 8000px at 300dpi — illegible + heavy. Scale the FULL (un-clipped) image
+# down to this instead, so it stays complete AND bounded.
+_TABLE_MAX_PX = 3600
+
+
+def _crop_and_pad(pix: pymupdf.Pixmap, pad: int, max_px: int = _TABLE_MAX_PX) -> Image.Image:
+    """Tight-crop the rasterised page to its non-white content, scale it DOWN if
+    it is wider than ``max_px`` (a wide table stays complete, just smaller), then
+    add a uniform white margin — so the image FITS the table width with equal
+    left/right (and top/bottom) margins. Removes the standalone crop's asymmetric
+    border (a wide table left-aligned in a huge \\textwidth otherwise lands flush
+    against the right edge)."""
+    mode = "RGBA" if pix.alpha else "RGB"
+    img = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
+    if mode != "RGB":
+        img = img.convert("RGB")
+    bbox = ImageChops.difference(
+        img, Image.new("RGB", img.size, (255, 255, 255))
+    ).getbbox()
+    if bbox is not None:
+        img = img.crop(bbox)
+    if img.width > max_px:
+        img = img.resize(
+            (max_px, max(1, round(img.height * max_px / img.width))), Image.LANCZOS
+        )
+    return ImageOps.expand(img, border=pad, fill=(255, 255, 255))
+
+
 def _compile_table_to_png(
     env_text: str,
     *,
@@ -870,7 +916,7 @@ def _compile_table_to_png(
                 if pix is None:
                     logger.warning("table: rendered image is blank; leaving env as-is")
                     return False
-                pix.save(str(png_path))  # type: ignore[no-untyped-call]
+                _crop_and_pad(pix, _table_margin_px(dpi)).save(str(png_path))
         except Exception as exc:  # noqa: BLE001 — pymupdf raises bare exceptions
             logger.warning("table: rasterise failed: %s", exc)
             return False
