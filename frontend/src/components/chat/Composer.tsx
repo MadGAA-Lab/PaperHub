@@ -217,40 +217,10 @@ export function Composer({
             disabled={disabled}
             aria-label={t("composer.messageAria")}
           />
-          <div className="flex items-center justify-between gap-1 px-2 pb-2">
-            <TooltipProvider>
+          <TooltipProvider>
+            <div className="flex items-center justify-between gap-1 px-2 pb-2">
               <div className="flex items-center gap-0.5">
                 <AttachPaperMenu />
-                {speechSupported && (
-                  <Tooltip>
-                    <TooltipTrigger
-                      render={<span tabIndex={0} className="inline-flex" />}
-                    >
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        onClick={toggleVoice}
-                        aria-pressed={listening}
-                        className={
-                          listening
-                            ? "h-8 w-8 bg-accent text-foreground"
-                            : "h-8 w-8 text-muted-foreground hover:text-foreground"
-                        }
-                        aria-label={t("composer.voice")}
-                      >
-                        <Mic className="h-4 w-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="top">
-                      <p>
-                        {listening
-                          ? t("composer.voiceListening")
-                          : t("composer.voiceDictate")}
-                      </p>
-                    </TooltipContent>
-                  </Tooltip>
-                )}
                 <Tooltip>
                   <TooltipTrigger
                     render={<span tabIndex={0} className="inline-flex" />}
@@ -345,17 +315,51 @@ export function Composer({
                   </Tooltip>
                 ))}
               </div>
-            </TooltipProvider>
-            <Button
-              type="submit"
-              size="icon"
-              disabled={disabled || value.trim().length === 0}
-              aria-label={t("composer.send")}
-              className="h-8 w-8 rounded-full"
-            >
-              <Send className="h-4 w-4" />
-            </Button>
-          </div>
+              {/* Right cluster: voice + send — input actions, set apart from
+                  the left-side panel toggles. */}
+              <div className="flex items-center gap-1">
+                {speechSupported && (
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={<span tabIndex={0} className="inline-flex" />}
+                    >
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        onClick={toggleVoice}
+                        aria-pressed={listening}
+                        className={
+                          listening
+                            ? "h-8 w-8 bg-accent text-foreground"
+                            : "h-8 w-8 text-muted-foreground hover:text-foreground"
+                        }
+                        aria-label={t("composer.voice")}
+                      >
+                        <Mic className="h-4 w-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">
+                      <p>
+                        {listening
+                          ? t("composer.voiceListening")
+                          : t("composer.voiceDictate")}
+                      </p>
+                    </TooltipContent>
+                  </Tooltip>
+                )}
+                <Button
+                  type="submit"
+                  size="icon"
+                  disabled={disabled || value.trim().length === 0}
+                  aria-label={t("composer.send")}
+                  className="h-8 w-8 rounded-full"
+                >
+                  <Send className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          </TooltipProvider>
         </div>
       </div>
     </form>
