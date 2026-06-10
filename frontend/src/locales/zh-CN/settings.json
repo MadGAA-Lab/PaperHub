@@ -50,6 +50,10 @@
     "integrations": "集成服务",
     "system": "系统"
   },
+  "group": {
+    "paper_sources": "论文搜索与开放获取",
+    "marker": "Marker（PDF 解析）"
+  },
   "field": {
     "PAPERHUB_MODEL_SMALL": {
       "label": "小型层级模型",

@@ -50,6 +50,10 @@
     "integrations": "整合服務",
     "system": "系統"
   },
+  "group": {
+    "paper_sources": "論文搜尋與開放取用",
+    "marker": "Marker（PDF 解析）"
+  },
   "field": {
     "PAPERHUB_MODEL_SMALL": {
       "label": "小型層級模型",

@@ -50,6 +50,10 @@
     "integrations": "連携サービス",
     "system": "システム"
   },
+  "group": {
+    "paper_sources": "論文検索とオープンアクセス",
+    "marker": "Marker（PDF 取り込み）"
+  },
   "field": {
     "PAPERHUB_MODEL_SMALL": {
       "label": "小型ティアのモデル",

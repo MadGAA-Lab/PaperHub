@@ -1,6 +1,6 @@
 import { Dialog } from "@base-ui/react/dialog";
 import { Check, ExternalLink, Loader2, Pencil, Plus, Trash2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -44,6 +44,21 @@ export function SettingsModal() {
       modelChecking={readinessChecking && f.key in modelChecks}
     />
   );
+
+  // Render fields with a heading whenever a new (contiguous) sub-group starts.
+  // Ungrouped fields render inline as before.
+  const renderFields = (fields: SettingsField[]) => {
+    let lastGroup: string | undefined;
+    const out: ReactNode[] = [];
+    for (const f of fields) {
+      if (f.group && f.group !== lastGroup) {
+        out.push(<GroupHeading key={`group:${f.group}`} group={f.group} />);
+      }
+      lastGroup = f.group || undefined;
+      out.push(renderField(f));
+    }
+    return out;
+  };
 
   // Derive the effective category: an explicit selection, else the first one.
   // Deriving (rather than syncing via an effect) avoids cascading renders.
@@ -112,7 +127,7 @@ export function SettingsModal() {
                 <CredentialEditor credentials={current.credentials} onSave={save} />
               </div>
             )}
-            {current?.fields.filter((f) => !f.advanced).map(renderField)}
+            {current && renderFields(current.fields.filter((f) => !f.advanced))}
             {current?.fields.some((f) => f.advanced) && (
               <details className="mt-2 rounded-md border border-border">
                 <summary className="cursor-pointer select-none px-3 py-2 text-sm font-medium text-muted-foreground">
@@ -359,6 +374,15 @@ function FieldRow({
       {helpText && <p className="mt-1 text-xs text-muted-foreground">{helpText}</p>}
       {field.docs_url && <DocsLink url={field.docs_url} />}
     </div>
+  );
+}
+
+function GroupHeading({ group }: { group: string }) {
+  const { t } = useTranslation("settings");
+  return (
+    <h3 className="mb-3 mt-6 border-b border-border pb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground first:mt-0">
+      {t(`group.${group}`, group)}
+    </h3>
   );
 }
 

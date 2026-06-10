@@ -41,6 +41,9 @@ class SettingField:
     # Optional "where to get this" link (e.g. a provider's API-key page), shown
     # under the field. The frontend localizes the link label, not the URL.
     docs_url: str = ""
+    # Optional sub-group key within a category — the panel renders a heading per
+    # contiguous group (the frontend localizes the title). Empty = ungrouped.
+    group: str = ""
 
 
 # Curated set of known LiteLLM provider env vars (offered as autocomplete in
@@ -188,13 +191,14 @@ SETTINGS_REGISTRY: list[SettingField] = [
     # NOTE: PAPERHUB_MEMORY_SEMANTIC is intentionally OMITTED — dead config.
     # ── External services ───────────────────────────────────────────────
     SettingField("PAPERHUB_SEMANTIC_SCHOLAR_API_KEY", "integrations",
-                 "Semantic Scholar API key", "secret", secret=True,
+                 "Semantic Scholar API key", "secret", secret=True, group="paper_sources",
                  help="Optional but recommended — speeds up paper search. The "
                       "unauthenticated tier is heavily rate-limited (it won't "
                       "block the app, just slow searches).",
                  docs_url="https://www.semanticscholar.org/product/api#api-key"),
     # ── External lookup ─────────────────────────────────────────────────
     SettingField("PAPERHUB_UNPAYWALL_EMAIL", "integrations", "Unpaywall contact email", "email",
+                 group="paper_sources",
                  help="Enables the DOI→free-PDF fallback. Used for abuse logging only."),
     # ── Storage ─────────────────────────────────────────────────────────
     SettingField("PAPERHUB_MAX_UPLOAD_MB", "system", "Max PDF upload (MiB)", "int",
@@ -208,11 +212,11 @@ SETTINGS_REGISTRY: list[SettingField] = [
     # ── Marker (PDF ingestion) — grouped together at the bottom ──────────
     SettingField("PAPERHUB_MARKER_MAX_PAGES", "integrations",
                  "Marker pages per /extract call", "int", default="1", min=1, max=100,
-                 restart_required=True),
+                 restart_required=True, group="marker"),
     SettingField("PAPERHUB_MARKER_URL", "integrations", "Marker service URL", "string",
-                 default="http://127.0.0.1:8002", restart_required=True),
+                 default="http://127.0.0.1:8002", restart_required=True, group="marker"),
     SettingField("PAPERHUB_INPROCESS_MARKER", "integrations", "In-process Marker", "bool",
-                 default="0", restart_required=True),
+                 default="0", restart_required=True, group="marker"),
     # ── Slides ──────────────────────────────────────────────────────────
     SettingField("PAPERHUB_SLIDE_STYLE_PROFILE", "system", "Slide style profile", "enum",
                  default="default", choices=("default", "metropolis_minimal")),

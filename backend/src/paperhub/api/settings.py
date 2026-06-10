@@ -77,6 +77,8 @@ async def get_settings() -> dict[str, Any]:
         }
         if f.docs_url:
             item["docs_url"] = f.docs_url
+        if f.group:
+            item["group"] = f.group
         if f.choices:
             item["choices"] = list(f.choices)
         if f.min is not None:

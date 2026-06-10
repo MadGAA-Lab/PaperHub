@@ -49,6 +49,10 @@
     "integrations": "Integrations",
     "system": "System"
   },
+  "group": {
+    "paper_sources": "Paper search & open access",
+    "marker": "Marker (PDF ingestion)"
+  },
   "advancedModels": "Per-slot model overrides",
   "field": {
     "PAPERHUB_MODEL_SMALL": {

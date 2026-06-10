@@ -464,6 +464,9 @@ export interface SettingsField {
   max?: number;
   /** Optional "where to get this" link (e.g. a provider's API-key page). */
   docs_url?: string;
+  /** Optional sub-group key within a category; the panel renders a heading per
+   *  contiguous group. */
+  group?: string;
 }
 
 export interface SettingsCredentials {
