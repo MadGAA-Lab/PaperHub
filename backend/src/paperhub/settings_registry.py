@@ -77,6 +77,44 @@ def is_allowed_credential_key(key: str) -> bool:
     return key in PROVIDER_CREDENTIAL_SUGGESTIONS or bool(_CREDENTIAL_SUFFIX_RE.match(key))
 
 
+# Map a credential env-var key -> the LiteLLM provider it unlocks. Used to derive
+# the configured-provider set for live model discovery. Keys whose provider name
+# doesn't match the lowercased prefix (together_ai, perplexity, vertex_ai) are
+# listed explicitly; unlisted *_API_KEY keys fall back to the lowercased prefix.
+_CREDENTIAL_KEY_TO_PROVIDER: dict[str, str] = {
+    "GEMINI_API_KEY": "gemini",
+    "OPENAI_API_KEY": "openai",
+    "ANTHROPIC_API_KEY": "anthropic",
+    "AZURE_API_KEY": "azure",
+    "OPENROUTER_API_KEY": "openrouter",
+    "MISTRAL_API_KEY": "mistral",
+    "GROQ_API_KEY": "groq",
+    "COHERE_API_KEY": "cohere",
+    "DEEPSEEK_API_KEY": "deepseek",
+    "TOGETHERAI_API_KEY": "together_ai",
+    "XAI_API_KEY": "xai",
+    "PERPLEXITYAI_API_KEY": "perplexity",
+    "GOOGLE_APPLICATION_CREDENTIALS": "vertex_ai",
+    "VERTEXAI_PROJECT": "vertex_ai",
+}
+
+# Providers whose models LiteLLM can fetch live from the provider's own API
+# (``get_valid_models(check_provider_endpoint=True)``). Others fall back to the
+# bundled static model map. See docs.litellm.ai/docs/proxy/model_discovery.
+LIVE_DISCOVERY_PROVIDERS: frozenset[str] = frozenset(
+    {"gemini", "openai", "anthropic", "xai", "vertex_ai", "fireworks_ai", "vllm", "topaz"}
+)
+
+
+def provider_for_credential_key(key: str) -> str | None:
+    """The LiteLLM provider a credential key unlocks, or None for non-key creds
+    (config-only keys like AZURE_API_BASE that don't map to a provider list)."""
+    if key in _CREDENTIAL_KEY_TO_PROVIDER:
+        return _CREDENTIAL_KEY_TO_PROVIDER[key]
+    m = re.match(r"^([A-Z][A-Z0-9]*)_API_KEY$", key)
+    return m.group(1).lower() if m else None
+
+
 _SMALL = "gemini/gemini-3.1-flash-lite"
 _FLAGSHIP = "gemini/gemini-2.5-pro"
 
