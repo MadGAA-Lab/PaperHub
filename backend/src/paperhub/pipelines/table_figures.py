@@ -614,6 +614,32 @@ _PDFLATEX_TIMEOUT_SECONDS = 60
 # cropped content page, skipping these.
 _FULL_PAGE_SIZES = {(612, 792), (595, 842)}
 
+# The snippet inlines the paper's OWN preamble (for its macros/colours), which
+# `\usepackage`s arbitrary font/symbol packages. A package present on the dev
+# box (MiKTeX auto-installs missing .sty on demand) but ABSENT from a fixed
+# TeX Live (Debian/Docker — e.g. `tgcursor.sty` from the `tex-gyre` package,
+# dropped by `--no-install-recommends`) makes pdflatex Emergency-stop with no
+# PDF, so the table silently degrades to a raw-text dump in deploy. pdflatex
+# names the absent file as ``File `X' not found.`` — we stub it empty and retry
+# so the table still rasterises (a missing FONT package just falls back to the
+# default font in the rasterised image — cosmetic). We only stub TEXT input
+# classes that trigger the fatal stop; a missing binary font (.tfm/.pfb) is
+# non-fatal (pdftex substitutes) and an empty stub would corrupt it.
+_MISSING_INPUT_RE = re.compile(
+    r"File `([^']+\.(?:sty|tex|def|cfg|clo|cls|ldf|fd))' not found"
+)
+_MAX_COMPILE_ATTEMPTS = 8  # initial + up to 7 stub-and-retry passes
+
+
+def _missing_input_files(log: str) -> list[str]:
+    r"""Absent text-input filenames named in a pdflatex log (``File `X' not
+    found.``), in first-seen order, deduplicated. Used to stub-and-retry past a
+    package missing from a fixed TeX Live (see ``_MISSING_INPUT_RE``)."""
+    seen: dict[str, None] = {}
+    for name in _MISSING_INPUT_RE.findall(log):
+        seen.setdefault(name, None)
+    return list(seen)
+
 
 def _build_snippet(env_text: str, *, preamble: str, body_prefix: str) -> str:
     """Assemble a compilable standalone document for one table environment."""
@@ -685,32 +711,53 @@ def _compile_table_to_png(
         env = dict(os.environ)
         prior = env.get("TEXINPUTS", "")
         env["TEXINPUTS"] = str(png_path.parent.resolve()) + os.pathsep + prior
-        try:
-            proc = subprocess.run(
-                ["pdflatex", "-interaction=nonstopmode", "tbl.tex"],
-                cwd=str(tmpdir),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=_PDFLATEX_TIMEOUT_SECONDS,
-                check=False,
-                env=env,
-            )
-        except subprocess.TimeoutExpired:
-            logger.warning(
-                "table: pdflatex timed out (%ss); leaving env as-is",
-                _PDFLATEX_TIMEOUT_SECONDS,
-            )
-            return False
-        except FileNotFoundError:
-            logger.debug("table: pdflatex not on PATH; leaving env as-is")
-            return False
         pdf_path = tmpdir / "tbl.pdf"
+        # Compile, stubbing any text-input file pdflatex reports missing and
+        # retrying — so a font/symbol package absent from a fixed TeX Live (the
+        # deploy Debian image) can't silently drop the table to a raw-text dump.
+        stubbed: set[str] = set()
+        proc: subprocess.CompletedProcess[str] | None = None
+        for _ in range(_MAX_COMPILE_ATTEMPTS):
+            try:
+                proc = subprocess.run(
+                    ["pdflatex", "-interaction=nonstopmode", "tbl.tex"],
+                    cwd=str(tmpdir),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=_PDFLATEX_TIMEOUT_SECONDS,
+                    check=False,
+                    env=env,
+                )
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "table: pdflatex timed out (%ss); leaving env as-is",
+                    _PDFLATEX_TIMEOUT_SECONDS,
+                )
+                return False
+            except FileNotFoundError:
+                logger.debug("table: pdflatex not on PATH; leaving env as-is")
+                return False
+            if pdf_path.is_file():
+                break
+            new_missing = [m for m in _missing_input_files(proc.stdout or "")
+                           if m not in stubbed]
+            if not new_missing:
+                break  # no recoverable missing-file error — give up
+            for name in new_missing:
+                (tmpdir / name).write_text("", encoding="utf-8")
+                stubbed.add(name)
+            logger.info(
+                "table: stubbed missing LaTeX input(s) %s; retrying compile",
+                sorted(new_missing),
+            )
+        assert proc is not None  # loop ran at least once
         if not pdf_path.is_file():
             logger.warning(
-                "table: pdflatex produced no PDF (rc=%s). Log tail: %s",
+                "table: pdflatex produced no PDF (rc=%s, stubbed=%s). Log tail: %s",
                 proc.returncode,
+                sorted(stubbed),
                 (proc.stdout or "")[-500:],
             )
             return False

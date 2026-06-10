@@ -1,5 +1,6 @@
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pymupdf
 import pytest
@@ -10,6 +11,7 @@ from paperhub.pipelines.table_figures import (
     _convert_rasterized_table_floats,
     _find_plain_tabulars,
     _is_blank_pixmap,
+    _missing_input_files,
     _normalize_colspec_for_plain,
     _parse_newcolumntype_defs,
     _residual_dump_envs,
@@ -412,6 +414,95 @@ def test_compile_returns_false_when_pdflatex_missing(
         preamble="", body_prefix="", png_path=tmp_path / "x.png", dpi=150,
     )
     assert ok is False
+
+
+def test_missing_input_files_parses_pdflatex_log() -> None:
+    # pandoc/pdflatex names the absent file in a `File `X' not found.` line.
+    log = (
+        "(/usr/share/texlive/.../amsmath.sty)\n"
+        "! LaTeX Error: File `tgcursor.sty' not found.\n"
+        "Type X to quit ...\n"
+        "! LaTeX Error: File `bbding.def' not found.\n"
+        "! LaTeX Error: File `tgcursor.sty' not found.\n"  # dup -> deduped
+    )
+    assert _missing_input_files(log) == ["tgcursor.sty", "bbding.def"]
+
+
+def test_missing_input_files_ignores_binary_font_files() -> None:
+    # A missing .tfm/.pfb is non-fatal (pdftex substitutes); only text input
+    # files (.sty/.def/...) cause the Emergency-stop we recover from by stubbing.
+    log = "kpathsea: Running mktextfm qcrr\n! Font ... `qcrr.tfm' not found.\n"
+    assert _missing_input_files(log) == []
+
+
+def test_compile_stubs_missing_sty_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A standalone table whose inlined preamble \\usepackage's a package absent
+    from this TeX Live (deploy: tgcursor.sty) must still rasterise: stub the
+    missing .sty and retry instead of dumping the table to raw text."""
+    calls: list[Path] = []
+
+    def fake_run(cmd: list[str], **kw: object) -> SimpleNamespace:
+        cwd = Path(str(kw["cwd"]))
+        calls.append(cwd)
+        if not (cwd / "fakepkg.sty").exists():
+            # First attempt: the package isn't there -> Emergency stop, no PDF.
+            return SimpleNamespace(
+                returncode=1,
+                stdout="! LaTeX Error: File `fakepkg.sty' not found.\n! Emergency stop.\n",
+                stderr="",
+            )
+        # Stub now present -> compile succeeds, emit a (placeholder) PDF.
+        (cwd / "tbl.pdf").write_bytes(b"%PDF-1.4 fake")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    class _FakePix:
+        def save(self, path: str) -> None:
+            Path(path).write_bytes(b"\x89PNG fake")
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def fake_open(_p: object) -> object:
+        yield object()
+
+    monkeypatch.setattr("paperhub.pipelines.table_figures.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "paperhub.pipelines.table_figures._table_pixmap", lambda doc, dpi: _FakePix()
+    )
+    monkeypatch.setattr(
+        "paperhub.pipelines.table_figures.pymupdf.open", fake_open
+    )
+    png = tmp_path / "t.png"
+    ok = _compile_table_to_png(
+        "\\begin{tabular}{c}a\\\\\\end{tabular}",
+        preamble="\\usepackage{fakepkg}", body_prefix="", png_path=png, dpi=150,
+    )
+    assert ok is True
+    assert len(calls) == 2  # initial attempt + one retry after stubbing
+    assert png.is_file()
+
+
+def test_compile_gives_up_when_no_stubbable_missing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A genuine compile error with no missing-file line -> no infinite retry.
+    calls: list[int] = []
+
+    def fake_run(cmd: list[str], **kw: object) -> SimpleNamespace:
+        calls.append(1)
+        return SimpleNamespace(
+            returncode=1, stdout="! Undefined control sequence.\n", stderr=""
+        )
+
+    monkeypatch.setattr("paperhub.pipelines.table_figures.subprocess.run", fake_run)
+    ok = _compile_table_to_png(
+        "\\begin{tabular}{c}\\bogus\\\\\\end{tabular}",
+        preamble="", body_prefix="", png_path=tmp_path / "x.png", dpi=150,
+    )
+    assert ok is False
+    assert len(calls) == 1  # no missing file to stub -> single attempt, no loop
 
 
 # ---------------------------------------------------------------------------
