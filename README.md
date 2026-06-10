@@ -28,19 +28,28 @@ PaperHub is built **UX-first**. Every retrieved chunk has a clickable provenance
 
 ## ✨ What it does
 
-- **🔎 Agentic paper retrieval.** A per-paper subagent navigates each paper by its section table-of-contents (not blind top-k); a flagship model synthesises across papers over the raw cited chunks.
-- **🧷 Citation Canvas.** Inline `[chunk:N]` markers link back to the exact passage — click to highlight it in both the rendered HTML *and* the source PDF. No ungrounded claims.
-- **🌍 Answers in your language.** Ask in Chinese, get Chinese — citations preserved. A remembered "always reply in X" preference overrides per-turn detection.
-- **📊 Library stats in plain language.** "How many papers do I have?" → a `library_stats` agent runs **read-only** SQL over a table allowlist, self-repairs, and answers with the numbers *and* the SQL it ran.
-- **🧠 Session + global memory.** Remembered facts/preferences persist per-chat or everywhere — with a safety gate (refuses secrets), LLM conflict-**supersede**, and a Memory Manager panel to view/edit/(de)activate.
-- **🧭 Visible routing + tracing.** A badge shows which agent + model handled each turn; an expandable trace panel replays every model/MCP/pipeline step from SQLite.
-- **🌐 Discovery via web + Semantic Scholar.** `paper_search` resolves even vague references ("that diffusion paper everyone cites") to a citable hit.
-- **📎 Bring your own papers.** Attach by arXiv ID, URL, or PDF upload — deduplicated + cached; a background **Marker** worker upgrades PDFs to real figures + captions + equations→LaTeX.
-- **🖼️ Conference-grade slides.** Generate a grounded **Beamer deck** that **never cites a figure that doesn't exist**. Speaker notes are an **opt-in**, any-language follow-up; **diff-edit a single slide** by chat ("make slide 3 more concise") — never a full regen. Ask about the **on-screen slide** ("explain this diagram") and it's answered from the paper **without mutating the deck**.
-- **🔱 Fork & rewind.** Branch a new chat from any of your past messages — the original is left intact. The forked message is **prefilled, editable, not auto-sent**: edit it to re-prompt, or send as-is to retry. Forks carry over the enabled references, session memories, and the deck, and **nest under their parent** in the sidebar.
-- **➗ Math renders.** LaTeX in answers (`$…$`, `$$…$$`) renders as real equations via KaTeX.
-- **💾 Pick up on any device.** Sessions and their full chat record live in the backend, not the browser — open the app anywhere. Deleting a chat removes it everywhere (with Undo).
-- **🔌 MCP-native.** The agent's own tools are served over MCP (`/mcp`); external clients (Claude Desktop, Cursor) reach the same surface.
+🔎 Agentic retrieval · 🧷 Citation Canvas · 🌍 Your language · 📊 Library stats · 🧠 Memory · 🧭 Routing + tracing · 🌐 Discovery · 📎 Bring your own papers · 🖼️ Beamer slides · 🔱 Fork & rewind · ➗ Math · 💾 Any device · 🔌 MCP-native
+
+<details>
+<summary><b>What each one means →</b></summary>
+
+<br>
+
+- **🔎 Agentic retrieval.** A per-paper subagent navigates each paper's section TOC (not blind top-k); a flagship model synthesises across papers.
+- **🧷 Citation Canvas.** Inline `[chunk:N]` markers link to the exact passage — click to highlight it in both the rendered HTML *and* the source PDF.
+- **🌍 Your language.** Ask in Chinese, get Chinese — citations preserved; a remembered "always reply in X" overrides per-turn detection.
+- **📊 Library stats.** "How many papers do I have?" → read-only SQL over a table allowlist, answered with the numbers *and* the SQL it ran.
+- **🧠 Memory.** Facts/preferences persist per-chat or everywhere — with a safety gate, LLM conflict-**supersede**, and a Manager panel to edit/(de)activate.
+- **🧭 Visible routing + tracing.** A badge shows which agent + model handled each turn; a trace panel replays every step from SQLite.
+- **🌐 Discovery.** `paper_search` resolves even vague references ("that diffusion paper everyone cites") via web + Semantic Scholar.
+- **📎 Bring your own papers.** Attach by arXiv ID, URL, or PDF — deduplicated + cached; a background **Marker** worker upgrades PDFs to real figures, captions, and equations→LaTeX.
+- **🖼️ Conference-grade slides.** A grounded **Beamer deck** that **never cites a figure that doesn't exist**. Opt-in any-language speaker notes; **diff-edit one slide** by chat; ask about the **on-screen slide** without mutating the deck.
+- **🔱 Fork & rewind.** Branch a new chat from any past message — prefilled, editable, not auto-sent. Forks carry over references, memories, and the deck, and **nest under their parent**.
+- **➗ Math renders.** LaTeX (`$…$`, `$$…$$`) renders as real equations via KaTeX.
+- **💾 Any device.** Sessions and their full record live in the backend, not the browser. Deleting a chat removes it everywhere (with Undo).
+- **🔌 MCP-native.** The agent's tools are served over MCP (`/mcp`); external clients (Claude Desktop, Cursor) reach the same surface.
+
+</details>
 
 ---
 
@@ -104,6 +113,7 @@ PaperHub is built **UX-first**. Every retrieved chunk has a clickable provenance
 | **LLM** | Gemini by default (any LiteLLM provider — small-tier subagents, flagship finalizer) |
 | **Tooling** | `uv` · `pytest` · `ruff` · `mypy --strict` · Vitest · ESLint · Conventional Commits |
 
+> [!NOTE]
 > Local-only, single-user. No auth surface — point it at your own LLM key and run it on your machine.
 
 ---
@@ -124,6 +134,7 @@ docker compose up -d --build           # CPU; first build downloads TeX Live + M
 
 Open **http://localhost:8080**.
 
+> [!NOTE]
 > **GPU (optional, NVIDIA + [Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)):** faster Marker PDF ingestion. Layer the GPU override:
 > ```bash
 > docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
@@ -189,6 +200,7 @@ web-search note under [Configuration](#️-configuration).
 
 </details>
 
+> [!TIP]
 > **No API key handy?** Exercise the chat plumbing with mocked LLMs (PowerShell):
 > ```powershell
 > $env:PAPERHUB_ROUTER_MOCK   = '{"intent":"chitchat","model_tier":"small","confidence":0.9,"reasoning":"dev"}'
@@ -346,7 +358,7 @@ If you use PaperHub in your research or build on it, please cite it:
   title   = {{PaperHub: A Provenance-First Multi-Agent Research Assistant for Grounded Paper Q\&A and Slide Generation}},
   year    = {2026},
   url     = {https://github.com/whats2000/PaperHub},
-  version = {2.31.2}
+  version = {2.31.6}
 }
 ```
 

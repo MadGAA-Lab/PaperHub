@@ -15,7 +15,7 @@
 ![Lint](https://img.shields.io/badge/lint-ruff-261230?logo=ruff&logoColor=white)
 ![Types](https://img.shields.io/badge/types-mypy%20--strict-2A6DB2)
 ![Tests](https://img.shields.io/badge/tests-1130%20backend%20%2B%20426%20frontend-brightgreen)
-![Status](https://img.shields.io/badge/release-v2.31.2%20(SRS%20v2.31.2)-success)
+![Status](https://img.shields.io/badge/release-v2.31.6%20(SRS%20v2.31.6)-success)
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue)
 
 [English](README.md) · **日本語** · [繁體中文](README.zh-TW.md) · [简体中文](README.zh-CN.md)
@@ -28,19 +28,28 @@ PaperHub は **UX ファースト**で設計されています。検索された
 
 ## ✨ できること
 
-- **🔎 エージェント型の論文検索。** 論文ごとのサブエージェントが、各論文をセクションの目次に沿って読み解きます(やみくもなトップ k 検索ではありません)。フラッグシップモデルが、引用された生のチャンクをもとに複数論文を横断して統合します。
-- **🧷 Citation Canvas。** インラインの `[chunk:N]` マーカーが正確な一節へリンクします — クリックすれば、レンダリングされた HTML *と* 元の PDF の両方でその箇所がハイライトされます。根拠のない主張はありません。
-- **🌍 あなたの言語で回答。** 中国語で尋ねれば中国語で返ってきます — 引用はそのまま保持されます。記憶された「常に X 言語で返答」という設定は、ターンごとの言語判定を上書きします。
-- **📊 平易な言葉でライブラリ統計。** 「論文は何件ありますか?」 → `library_stats` エージェントがテーブルの許可リストに対して**読み取り専用**の SQL を実行し、自己修復し、数値 *と* 実行した SQL を添えて回答します。
-- **🧠 セッション + グローバルのメモリ。** 記憶された事実や設定は、チャットごと、あるいはどこでも保持されます — 安全ゲート(秘密情報は拒否)、LLM による矛盾の**置き換え(supersede)**、そして閲覧・編集・(無効/有効)化ができるメモリマネージャーパネルを備えます。
-- **🧭 可視化されたルーティング + トレース。** バッジが各ターンを処理したエージェント + モデルを表示し、展開可能なトレースパネルがすべてのモデル/MCP/パイプラインのステップを SQLite から再生します。
-- **🌐 Web + Semantic Scholar による発見。** `paper_search` は曖昧な参照(「みんなが引用しているあの拡散モデルの論文」)でも引用可能なヒットへと解決します。
-- **📎 自分の論文を持ち込み。** arXiv ID、URL、または PDF アップロードで添付できます — 重複排除 + キャッシュされ、バックグラウンドの **Marker** ワーカーが PDF を実際の図 + キャプション + 数式→LaTeX へとアップグレードします。
-- **🖼️ 学会水準のスライド。** **存在しない図を決して引用しない**、根拠に基づいた **Beamer デッキ**を生成します。発表者ノートは**任意指定(opt-in)**の、任意言語のフォローアップです。チャットで**1 枚のスライドを差分編集**できます(「スライド 3 をもっと簡潔に」)— 全体の再生成ではありません。**画面上のスライド**について尋ねれば(「この図を説明して」)、**デッキを変更することなく**論文から回答されます。
-- **🔱 フォーク & 巻き戻し。** 過去の任意のメッセージから新しいチャットを分岐できます — 元のものはそのまま残ります。フォークしたメッセージは**プレフィル済み・編集可能・自動送信なし**です。編集して再プロンプトするか、そのまま送信して再試行します。フォークは有効化された参照、セッションメモリ、デッキを引き継ぎ、サイドバーで**親の下にネスト**して表示されます。
-- **➗ 数式をレンダリング。** 回答中の LaTeX(`$…$`、`$$…$$`)は KaTeX によって実際の数式としてレンダリングされます。
-- **💾 どのデバイスでも続きから。** セッションとその完全なチャット記録はブラウザではなくバックエンドに保存されます — どこからでもアプリを開けます。チャットを削除するとどこからでも削除されます(取り消し可能)。
-- **🔌 MCP ネイティブ。** エージェント自身のツールは MCP(`/mcp`)経由で提供されます。外部クライアント(Claude Desktop、Cursor)も同じ面に到達できます。
+🔎 エージェント検索 · 🧷 Citation Canvas · 🌍 あなたの言語 · 📊 ライブラリ統計 · 🧠 メモリ · 🧭 ルーティング + トレース · 🌐 発見 · 📎 論文を持ち込み · 🖼️ Beamer スライド · 🔱 フォーク & 巻き戻し · ➗ 数式 · 💾 どのデバイスでも · 🔌 MCP ネイティブ
+
+<details>
+<summary><b>各項目の説明 →</b></summary>
+
+<br>
+
+- **🔎 エージェント型検索。** 論文ごとのサブエージェントがセクション目次に沿って読み解き(やみくもなトップ k ではありません)、フラッグシップモデルが複数論文を横断して統合します。
+- **🧷 Citation Canvas。** インラインの `[chunk:N]` マーカーが正確な一節へリンク — クリックでレンダリング済み HTML *と* 元 PDF の両方をハイライトします。
+- **🌍 あなたの言語。** 中国語で尋ねれば中国語で返答 — 引用は保持され、記憶された「常に X 言語で返答」がターンごとの判定を上書きします。
+- **📊 ライブラリ統計。** 「論文は何件?」 → テーブル許可リストに対し読み取り専用 SQL を実行し、数値 *と* 実行した SQL を添えて回答します。
+- **🧠 メモリ。** 事実や設定はチャットごと、あるいはどこでも保持 — 安全ゲート、LLM の矛盾**置き換え**、編集・(無効/有効)化できる管理パネルを備えます。
+- **🧭 可視化されたルーティング + トレース。** バッジが各ターンの担当エージェント + モデルを表示し、トレースパネルが全ステップを SQLite から再生します。
+- **🌐 発見。** `paper_search` は曖昧な参照(「みんなが引用するあの拡散モデルの論文」)でも Web + Semantic Scholar で解決します。
+- **📎 自分の論文を持ち込み。** arXiv ID、URL、PDF で添付 — 重複排除 + キャッシュされ、バックグラウンドの **Marker** ワーカーが PDF を実際の図・キャプション・数式→LaTeX へアップグレードします。
+- **🖼️ 学会水準のスライド。** **存在しない図を決して引用しない**、根拠に基づく **Beamer デッキ**。任意指定・任意言語の発表者ノート、チャットで **1 枚を差分編集**、**画面上のスライド** について尋ねてもデッキは変更しません。
+- **🔱 フォーク & 巻き戻し。** 過去の任意のメッセージから新しいチャットを分岐 — プレフィル済み・編集可能・自動送信なし。フォークは参照、メモリ、デッキを引き継ぎ、**親の下にネスト**します。
+- **➗ 数式をレンダリング。** LaTeX(`$…$`、`$$…$$`)は KaTeX で実際の数式としてレンダリングされます。
+- **💾 どのデバイスでも。** セッションと完全な記録はブラウザではなくバックエンドに保存。チャットを削除するとどこからでも削除されます(取り消し可能)。
+- **🔌 MCP ネイティブ。** エージェントのツールは MCP(`/mcp`)経由で提供され、外部クライアント(Claude Desktop、Cursor)も同じ面に到達できます。
+
+</details>
 
 ---
 
@@ -104,6 +113,7 @@ PaperHub は **UX ファースト**で設計されています。検索された
 | **LLM** | デフォルトで Gemini(任意の LiteLLM プロバイダー — 軽量ティアのサブエージェント、フラッグシップのファイナライザー) |
 | **ツール** | `uv` · `pytest` · `ruff` · `mypy --strict` · Vitest · ESLint · Conventional Commits |
 
+> [!NOTE]
 > ローカル専用・シングルユーザー。認証面はありません — 自分の LLM キーを指定し、自分のマシンで実行してください。
 
 ---
@@ -124,6 +134,7 @@ docker compose up -d --build           # CPU; first build downloads TeX Live + M
 
 **http://localhost:8080** を開きます。
 
+> [!NOTE]
 > **GPU(任意、NVIDIA + [Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)):** Marker PDF 取り込みが高速になります。GPU オーバーライドを重ねてください:
 > ```bash
 > docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
@@ -183,6 +194,7 @@ uv run uvicorn paperhub.app:app --reload --reload-dir src --port 8000
 
 </details>
 
+> [!TIP]
 > **API キーが手元にない?** モック化された LLM でチャットの配管を試せます(PowerShell):
 > ```powershell
 > $env:PAPERHUB_ROUTER_MOCK   = '{"intent":"chitchat","model_tier":"small","confidence":0.9,"reasoning":"dev"}'
@@ -324,7 +336,7 @@ scripts/run-benchmark.ps1 -Resume <prior.json>   # retry only failed cases after
 
 ## 📖 ドキュメント
 
-- **[システム要求仕様書(SRS)](docs/superpowers/specs/2026-05-17-paperhub-srs.md)** — 信頼できるアーキテクチャ、スキーマ、スコープ、受け入れ基準(**v2.31.2** まで提供)。
+- **[システム要求仕様書(SRS)](docs/superpowers/specs/2026-05-17-paperhub-srs.md)** — 信頼できるアーキテクチャ、スキーマ、スコープ、受け入れ基準(**v2.31.6** まで提供)。
 - **[実装プラン](docs/superpowers/plans/)** — サブプロジェクトごとに 1 つ、それぞれ TDD で実行。
 - **[バックエンド開発者向けドキュメント](backend/README.md)** — バックエンド固有の注記。
 
@@ -340,7 +352,7 @@ scripts/run-benchmark.ps1 -Resume <prior.json>   # retry only failed cases after
   title   = {{PaperHub: A Provenance-First Multi-Agent Research Assistant for Grounded Paper Q\&A and Slide Generation}},
   year    = {2026},
   url     = {https://github.com/whats2000/PaperHub},
-  version = {2.31.2}
+  version = {2.31.6}
 }
 ```
 

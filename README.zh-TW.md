@@ -15,7 +15,7 @@
 ![Lint](https://img.shields.io/badge/lint-ruff-261230?logo=ruff&logoColor=white)
 ![Types](https://img.shields.io/badge/types-mypy%20--strict-2A6DB2)
 ![Tests](https://img.shields.io/badge/tests-1130%20backend%20%2B%20426%20frontend-brightgreen)
-![Status](https://img.shields.io/badge/release-v2.31.2%20(SRS%20v2.31.2)-success)
+![Status](https://img.shields.io/badge/release-v2.31.6%20(SRS%20v2.31.6)-success)
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue)
 
 [English](README.md) · [日本語](README.ja.md) · **繁體中文** · [简体中文](README.zh-CN.md)
@@ -28,19 +28,28 @@ PaperHub 以 **使用者體驗優先（UX-first）** 打造。每一段檢索到
 
 ## ✨ 它能做什麼
 
-- **🔎 代理式論文檢索。** 每篇論文都有一個專屬子代理，依照論文的章節目錄來導覽（而非盲目的 top-k）；再由旗艦模型在原始引用 chunk 上跨論文進行綜整。
-- **🧷 Citation Canvas（引用畫布）。** 行內 `[chunk:N]` 標記連回確切的段落 — 點擊即可同時在彩現後的 HTML *以及* 來源 PDF 中將它標示出來。沒有無依據的論述。
-- **🌍 用你的語言回答。** 用中文提問，就得到中文答覆 — 引用一併保留。一個被記住的「永遠用 X 語言回覆」偏好會覆蓋逐輪偵測的結果。
-- **📊 用白話查詢文獻庫統計。** 「我有幾篇論文？」→ `library_stats` 代理會在表格白名單上執行 **唯讀** SQL、自我修復，並同時用數字 *以及* 它實際執行的 SQL 來回答。
-- **🧠 工作階段 + 全域記憶。** 被記住的事實／偏好可以逐一聊天保存或全域保存 — 並具備安全防線（拒絕祕密資訊）、LLM 衝突 **取代（supersede）**，以及一個可檢視／編輯／（停）啟用的記憶管理面板。
-- **🧭 可見的路由 + 追蹤。** 一個徽章顯示每一輪由哪個代理 + 模型處理；一個可展開的追蹤面板能從 SQLite 重播每一個模型／MCP／流程步驟。
-- **🌐 透過網路 + Semantic Scholar 探索。** `paper_search` 即使是模糊的指涉（「那篇大家都引用的擴散模型論文」）也能解析成一筆可引用的命中結果。
-- **📎 帶上你自己的論文。** 以 arXiv ID、URL，或 PDF 上傳的方式附加 — 去重 + 快取；背景的 **Marker** 工作程序會把 PDF 升級成真正的圖片 + 圖說 + 方程式→LaTeX。
-- **🖼️ 會議等級的投影片。** 產生一份有依據的 **Beamer 投影片**，且 **絕不引用不存在的圖片**。講稿是 **可選擇加入** 的、任何語言的後續動作；用聊天 **逐張差異編輯（diff-edit）單張投影片**（「把第 3 張弄得更精簡」）— 絕非整份重新產製。針對 **螢幕上的投影片** 提問（「解釋這張圖」），會直接從論文作答，而 **不會更動投影片**。
-- **🔱 分叉與回溯。** 從你過去的任一則訊息分叉出一個新的聊天 — 原本的對話保持完好。被分叉的訊息會 **預先填入、可編輯、不會自動送出**：編輯它以重新提問，或原樣送出以重試。分叉會帶過已啟用的參考資料、工作階段記憶，以及投影片，並在側邊欄中 **巢狀置於其母項之下**。
-- **➗ 數學會彩現。** 答覆中的 LaTeX（`$…$`、`$$…$$`）會透過 KaTeX 彩現為真正的方程式。
-- **💾 在任何裝置上接續使用。** 工作階段及其完整聊天紀錄存在後端，而非瀏覽器 — 在任何地方開啟應用程式都行。刪除一個聊天會在各處一併移除（並可復原）。
-- **🔌 原生 MCP。** 代理本身的工具透過 MCP 提供（`/mcp`）；外部用戶端（Claude Desktop、Cursor）可連到同一個介面。
+🔎 代理式檢索 · 🧷 Citation Canvas · 🌍 你的語言 · 📊 文獻庫統計 · 🧠 記憶 · 🧭 路由 + 追蹤 · 🌐 探索 · 📎 帶上你的論文 · 🖼️ Beamer 投影片 · 🔱 分叉與回溯 · ➗ 數學 · 💾 任何裝置 · 🔌 原生 MCP
+
+<details>
+<summary><b>每一項的說明 →</b></summary>
+
+<br>
+
+- **🔎 代理式檢索。** 每篇論文都有專屬子代理，依章節目錄導覽（而非盲目 top-k）；旗艦模型跨論文綜整。
+- **🧷 Citation Canvas。** 行內 `[chunk:N]` 標記連回確切段落 — 點擊即可同時在彩現後的 HTML *以及* 來源 PDF 中標示。
+- **🌍 你的語言。** 用中文問就用中文答 — 引用一併保留；被記住的「永遠用 X 語言回覆」會覆蓋逐輪偵測。
+- **📊 文獻庫統計。**「我有幾篇論文？」→ 在表格白名單上執行唯讀 SQL，並同時用數字 *以及* 它執行的 SQL 回答。
+- **🧠 記憶。** 事實／偏好可逐一聊天或全域保存 — 具安全防線、LLM 衝突 **取代**，以及可編輯／（停）啟用的管理面板。
+- **🧭 可見的路由 + 追蹤。** 徽章顯示每輪由哪個代理 + 模型處理；追蹤面板能從 SQLite 重播每一步。
+- **🌐 探索。** `paper_search` 即使是模糊指涉（「那篇大家都引用的擴散模型論文」）也能透過網路 + Semantic Scholar 解析。
+- **📎 帶上你自己的論文。** 以 arXiv ID、URL 或 PDF 附加 — 去重 + 快取；背景 **Marker** 工作程序把 PDF 升級成真正的圖片、圖說與方程式→LaTeX。
+- **🖼️ 會議等級的投影片。** 有依據的 **Beamer 投影片**，且 **絕不引用不存在的圖片**。可選擇加入的任何語言講稿；用聊天 **逐張差異編輯單張投影片**；針對 **螢幕上的投影片** 提問也不會更動投影片。
+- **🔱 分叉與回溯。** 從過去任一則訊息分叉新聊天 — 預先填入、可編輯、不自動送出。分叉會帶過參考資料、記憶與投影片，並 **巢狀置於母項之下**。
+- **➗ 數學會彩現。** LaTeX（`$…$`、`$$…$$`）透過 KaTeX 彩現為真正的方程式。
+- **💾 任何裝置。** 工作階段及其完整紀錄存在後端而非瀏覽器。刪除聊天會在各處一併移除（可復原）。
+- **🔌 原生 MCP。** 代理的工具透過 MCP（`/mcp`）提供；外部用戶端（Claude Desktop、Cursor）可連到同一介面。
+
+</details>
 
 ---
 
@@ -104,6 +113,7 @@ PaperHub 以 **使用者體驗優先（UX-first）** 打造。每一段檢索到
 | **LLM** | 預設 Gemini（任何 LiteLLM 供應商 — 小型子代理、旗艦終結器） |
 | **工具鏈** | `uv` · `pytest` · `ruff` · `mypy --strict` · Vitest · ESLint · Conventional Commits |
 
+> [!NOTE]
 > 僅限本機、單一使用者。沒有驗證介面 — 指向你自己的 LLM 金鑰，並在你自己的機器上執行。
 
 ---
@@ -124,6 +134,7 @@ docker compose up -d --build           # CPU; first build downloads TeX Live + M
 
 開啟 **http://localhost:8080**。
 
+> [!NOTE]
 > **GPU（選用，NVIDIA + [Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)）：** 更快的 Marker PDF 擷取。疊上 GPU override：
 > ```bash
 > docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
@@ -189,6 +200,7 @@ uv run uvicorn paperhub.app:app --reload --reload-dir src --port 8000
 
 </details>
 
+> [!TIP]
 > **手邊沒有 API 金鑰？** 用模擬的 LLM 來操練聊天管路（PowerShell）：
 > ```powershell
 > $env:PAPERHUB_ROUTER_MOCK   = '{"intent":"chitchat","model_tier":"small","confidence":0.9,"reasoning":"dev"}'
@@ -330,7 +342,7 @@ scripts/run-benchmark.ps1 -Resume <prior.json>   # retry only failed cases after
 
 ## 📖 文件
 
-- **[系統需求規格書（System Requirements Specification）](docs/superpowers/specs/2026-05-17-paperhub-srs.md)** — 權威的架構、結構描述、範圍，以及驗收準則（已交付至 **v2.31.2**）。
+- **[系統需求規格書（System Requirements Specification）](docs/superpowers/specs/2026-05-17-paperhub-srs.md)** — 權威的架構、結構描述、範圍，以及驗收準則（已交付至 **v2.31.6**）。
 - **[實作計畫](docs/superpowers/plans/)** — 每個子專案一份，皆透過 TDD 執行。
 - **[後端開發者文件](backend/README.md)** — 後端專屬說明。
 
@@ -346,7 +358,7 @@ scripts/run-benchmark.ps1 -Resume <prior.json>   # retry only failed cases after
   title   = {{PaperHub: A Provenance-First Multi-Agent Research Assistant for Grounded Paper Q\&A and Slide Generation}},
   year    = {2026},
   url     = {https://github.com/whats2000/PaperHub},
-  version = {2.31.2}
+  version = {2.31.6}
 }
 ```
 
