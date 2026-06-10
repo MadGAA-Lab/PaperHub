@@ -11,6 +11,7 @@ from paperhub import settings_overlay as ov
 from paperhub.config import load_settings
 from paperhub.db.connection import open_db, write_transaction
 from paperhub.settings_readiness import (
+    clear_readiness_cache,
     compute_readiness,
     configured_providers,
     fetch_model_options,
@@ -104,13 +105,13 @@ async def get_settings() -> dict[str, Any]:
 async def get_readiness() -> dict[str, Any]:
     """First-run gate: are the small + flagship models runnable right now?
 
-    ``ready`` drives the frontend composer lock + onboarding tour. The check is
-    synchronous (``validate_environment`` reads the live ``os.environ`` overlay,
-    no network), so it is safe to call on every app boot.
+    ``ready`` drives the frontend composer lock + onboarding tour. Pre-flights a
+    1-token call per gate model (cached, invalidated on PATCH) so an empty /
+    invalid key or a bad model id is caught before the user hits it on send.
     """
     settings = load_settings()
     rows = await _db_rows(settings.db_path)
-    return compute_readiness(_credential_keys(rows))
+    return await compute_readiness(_credential_keys(rows))
 
 
 @router.get("/model-options")
@@ -178,4 +179,6 @@ async def patch_settings(body: dict[str, str | None]) -> dict[str, Any]:
         ov.clear_override(key)
         cleared.append(key)
 
+    # A credential / model change invalidates cached readiness pings.
+    clear_readiness_cache()
     return {"updated": updated, "cleared": cleared, "restart_required": restart}

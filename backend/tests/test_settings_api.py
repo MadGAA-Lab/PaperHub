@@ -113,17 +113,27 @@ async def test_patch_clear_reverts_to_default(settings_client: AsyncClient) -> N
 async def test_readiness_flips_after_adding_credential(
     settings_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from paperhub import settings_readiness as sr
+
+    sr._reset_cache_for_tests()
     # Strip ambient Google keys so the gemini/* default gate models start invalid.
     for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "VERTEXAI_PROJECT"):
         monkeypatch.delenv(key, raising=False)
+    # The pre-flight ping is mocked to succeed so we test wiring, not network.
+    async def ok(**_kwargs: object) -> object:
+        return object()
+
+    monkeypatch.setattr(sr.litellm, "acompletion", ok)
+
     before = await settings_client.get("/settings/readiness")
     assert before.status_code == 200
     body = before.json()
-    assert body["ready"] is False
+    assert body["ready"] is False  # key absent -> short-circuit, no ping
     assert body["credentials_set"] is False
     assert body["models"]["small"]["key_ok"] is False
 
-    # Adding the provider key hot-applies to os.environ -> gate goes green.
+    # Adding the key hot-applies to os.environ; PATCH clears the readiness cache
+    # so the next call re-pings (now succeeds) -> gate goes green.
     await settings_client.patch("/settings", json={"GEMINI_API_KEY": "x"})
     after = (await settings_client.get("/settings/readiness")).json()
     assert after["ready"] is True

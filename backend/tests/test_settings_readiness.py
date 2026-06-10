@@ -4,6 +4,14 @@ from paperhub import settings_readiness as sr
 from paperhub.settings_registry import provider_for_credential_key
 
 
+def _boom(msg: str):
+    """An async stub that fails if ever called (asserts no ping happened)."""
+    async def _fail(**_kwargs: object) -> object:
+        raise AssertionError(msg)
+
+    return _fail
+
+
 def test_provider_for_credential_key_known_and_fallback() -> None:
     assert provider_for_credential_key("GEMINI_API_KEY") == "gemini"
     assert provider_for_credential_key("OPENAI_API_KEY") == "openai"
@@ -22,27 +30,59 @@ def test_configured_providers_dedups_and_skips_non_keys() -> None:
     assert providers == ["gemini", "openai"]
 
 
-def test_compute_readiness_not_ready_without_keys(
+@pytest.mark.asyncio
+async def test_compute_readiness_not_ready_without_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    sr._reset_cache_for_tests()
     # Default gate models are gemini/* — strip every Google key so they fail.
     for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "VERTEXAI_PROJECT"):
         monkeypatch.delenv(key, raising=False)
-    result = sr.compute_readiness([])
+    # Missing key short-circuits — no ping should be attempted.
+    monkeypatch.setattr(
+        sr.litellm, "acompletion", _boom("acompletion must not run when key absent")
+    )
+    result = await sr.compute_readiness([])
     assert result["ready"] is False
     assert result["credentials_set"] is False
     assert result["models"]["small"]["key_ok"] is False
     assert "GEMINI_API_KEY" in result["models"]["small"]["missing_keys"]
 
 
-def test_compute_readiness_ready_with_gemini_key(
+@pytest.mark.asyncio
+async def test_compute_readiness_ready_when_ping_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    sr._reset_cache_for_tests()
     monkeypatch.setenv("GEMINI_API_KEY", "x")
-    result = sr.compute_readiness(["GEMINI_API_KEY"])
+
+    async def ok(**_kwargs: object) -> object:
+        return object()
+
+    monkeypatch.setattr(sr.litellm, "acompletion", ok)
+    result = await sr.compute_readiness(["GEMINI_API_KEY"])
     assert result["ready"] is True
     assert result["credentials_set"] is True
     assert result["models"]["flagship"]["key_ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_compute_readiness_not_ready_when_ping_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty/invalid key or bad model id is present-but-broken — the ping
+    catches it even though validate_environment reports the key as present."""
+    sr._reset_cache_for_tests()
+    monkeypatch.setenv("GEMINI_API_KEY", "x")
+
+    async def boom(**_kwargs: object) -> object:
+        raise RuntimeError("Missing Gemini API key")
+
+    monkeypatch.setattr(sr.litellm, "acompletion", boom)
+    result = await sr.compute_readiness(["GEMINI_API_KEY"])
+    assert result["ready"] is False
+    assert result["models"]["small"]["key_ok"] is False
+    assert result["models"]["small"]["error"] == "RuntimeError"
 
 
 @pytest.mark.asyncio

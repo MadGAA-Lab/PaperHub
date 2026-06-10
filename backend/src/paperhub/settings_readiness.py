@@ -4,10 +4,14 @@
 Two concerns, kept separate by reliability:
 
 * **Readiness (hard gate)** — can the configured small + flagship models actually
-  run right now? ``litellm.validate_environment`` resolves each model's provider
-  and reports whether its required keys are present in ``os.environ`` (the live
-  settings overlay). This is what the missing-``GEMINI_API_KEY`` /
-  no-provider-prefix errors come down to, so it gates the composer.
+  run right now? We *pre-flight the real call*: a 1-token ``acompletion`` against
+  each gate model. This is the only check that catches every failure the user
+  would otherwise hit on send — a missing key, an **empty/placeholder** key
+  (``validate_environment`` reports an empty env var as "present"), an invalid or
+  expired key, and a non-existent model id (e.g. ``gemini-3.1-pro-preview``).
+  ``validate_environment`` is used only as a *fast short-circuit* when the key is
+  plainly absent, so we skip the network call in that case. Results are cached
+  (and invalidated on a settings PATCH) so boot isn't slow.
 
 * **Model options (soft assist)** — autocomplete suggestions for the model-name
   fields. Best-effort live fetch via ``get_valid_models`` for providers that
@@ -40,26 +44,76 @@ _OPTIONS_TTL_S = 600.0
 # provider -> (fetched_at_monotonic, models). Live discovery is slow, so cache it.
 _options_cache: dict[str, tuple[float, list[str]]] = {}
 
+_PING_TIMEOUT_S = 12.0
+_READINESS_TTL_S = 60.0
+# model id -> (checked_at_monotonic, check dict). The ping is a real API call, so
+# cache it; clear_readiness_cache() (called on a settings PATCH) forces a recheck.
+_readiness_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
 
 def _effective_model(env_key: str) -> str:
     field = field_by_key(env_key)
     default = field.default if field is not None else None
-    return os.environ.get(env_key) or default or ""
+    return (os.environ.get(env_key) or "").strip() or default or ""
 
 
-def _model_check(model: str) -> dict[str, Any]:
-    """validate_environment for one model id; never raises."""
-    if not model:
-        return {"model": "", "key_ok": False, "missing_keys": []}
+def _missing_keys(model: str) -> list[str]:
+    """Required env keys LiteLLM reports absent for this model (best-effort)."""
     try:
         env = litellm.validate_environment(model=model)
+        if env.get("keys_in_environment"):
+            return []
+        return list(env.get("missing_keys") or [])
+    except Exception:  # noqa: BLE001 — never break the gate
+        return []
+
+
+async def _ping_model(model: str) -> dict[str, Any]:
+    """Pre-flight a model with a 1-token completion. ``key_ok`` iff it succeeds.
+
+    Fast short-circuit: if validate_environment says the key is plainly absent,
+    report it without a network call. Otherwise we actually try the call so an
+    empty/invalid key or a non-existent model id is caught (it would error on
+    send otherwise)."""
+    if not model:
+        return {"model": "", "key_ok": False, "missing_keys": [], "error": "no model configured"}
+
+    missing = _missing_keys(model)
+    if missing:  # key plainly absent — no point spending a network round-trip
+        return {"model": model, "key_ok": False, "missing_keys": missing, "error": None}
+
+    try:
+        await litellm.acompletion(
+            model=model,
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=1,
+            timeout=_PING_TIMEOUT_S,
+        )
+        return {"model": model, "key_ok": True, "missing_keys": [], "error": None}
+    except Exception as exc:  # noqa: BLE001 — any failure means "not runnable"
+        # Re-derive missing keys: an empty key surfaces here, not above.
         return {
             "model": model,
-            "key_ok": bool(env.get("keys_in_environment")),
-            "missing_keys": list(env.get("missing_keys") or []),
+            "key_ok": False,
+            "missing_keys": _missing_keys(model),
+            "error": type(exc).__name__,
         }
-    except Exception:  # noqa: BLE001 — discovery must never break the gate
-        return {"model": model, "key_ok": False, "missing_keys": []}
+
+
+async def _model_check(model: str) -> dict[str, Any]:
+    """Cached per-model readiness check."""
+    now = time.monotonic()
+    cached = _readiness_cache.get(model)
+    if cached is not None and now - cached[0] < _READINESS_TTL_S:
+        return cached[1]
+    result = await _ping_model(model)
+    _readiness_cache[model] = (time.monotonic(), result)
+    return result
+
+
+def clear_readiness_cache() -> None:
+    """Drop cached pings so the next readiness call re-checks (post-PATCH)."""
+    _readiness_cache.clear()
 
 
 def configured_providers(credential_keys: list[str]) -> list[str]:
@@ -72,9 +126,14 @@ def configured_providers(credential_keys: list[str]) -> list[str]:
     return list(seen)
 
 
-def compute_readiness(credential_keys: list[str]) -> dict[str, Any]:
-    """Synchronous, no-network gate. ``ready`` iff both gate models are runnable."""
-    models = {name: _model_check(_effective_model(key)) for name, key in _GATE_MODEL_KEYS}
+async def compute_readiness(credential_keys: list[str]) -> dict[str, Any]:
+    """``ready`` iff both gate models pass a live 1-token pre-flight (cached)."""
+    checks = await asyncio.gather(
+        *(_model_check(_effective_model(key)) for _, key in _GATE_MODEL_KEYS)
+    )
+    models = {
+        name: check for (name, _), check in zip(_GATE_MODEL_KEYS, checks, strict=True)
+    }
     return {
         "ready": all(m["key_ok"] for m in models.values()),
         "credentials_set": len(credential_keys) > 0,
@@ -129,3 +188,4 @@ async def fetch_model_options(providers: list[str]) -> dict[str, list[str]]:
 
 def _reset_cache_for_tests() -> None:
     _options_cache.clear()
+    _readiness_cache.clear()
