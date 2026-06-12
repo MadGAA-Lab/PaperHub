@@ -178,17 +178,32 @@ class DeckOutlineDraft(BaseModel):
     slides: list[OutlineSlideDraft]
 
 
+class ReadRequest(BaseModel):
+    """A deterministic read_section fetch request emitted by the R-path orchestrator."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    paper_id: int
+    section_name: str
+
+
 class RoundAction(BaseModel):
     """The orchestrator LLM's per-round decision: gather more context or finalize.
 
     Placed after DeckOutlineDraft to allow the forward reference to resolve.
+
+    action values:
+      "dispatch" — (legacy) gather via aimed PaperContextBundle fetches
+      "read"     — (F6.1-R) fetch specific sections via ReadRequest list
+      "finalize" — emit the DeckOutlineDraft
     """
 
     # No extra="forbid": LLM structured output is not schema-strict; ignore unknown keys.
 
-    action: Literal["dispatch", "finalize"]
+    action: Literal["dispatch", "read", "finalize"]
     narrative_pattern: str = "synthesis"  # chosen round 1, echoed thereafter
     requests: list[ContextRequest] = Field(default_factory=list)  # when action == "dispatch"
+    reads: list[ReadRequest] = Field(default_factory=list)  # when action == "read"
     outline: DeckOutlineDraft | None = None  # when action == "finalize"
 
 
@@ -226,6 +241,37 @@ class SeedFigure(BaseModel):
 
     key: str
     caption: str = ""
+
+
+class DigestSection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    insight: str  # 1-2 line compression of what this section says
+
+
+class DigestEquation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    latex: str
+    role: str = ""
+
+
+class PaperDigest(BaseModel):
+    """Cheap cached per-section summary of one paper (F6.1-R gather rework).
+
+    Produced once per paper and reused by the outline orchestrator to structure
+    the deck without fetching full section text upfront.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    paper_id: int
+    title: str
+    abstract: str
+    sections: list[DigestSection]
+    figures: list[SeedFigure]  # reuse the existing SeedFigure
+    key_equations: list[DigestEquation] = Field(default_factory=list)
 
 
 class SeedPaper(BaseModel):
