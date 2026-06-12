@@ -62,6 +62,7 @@ async def run_sl_outline(
     conn: aiosqlite.Connection,
 ) -> DeckOutline:
     known_figs = {f.key for b in bundles for f in b.key_figures}
+    known_paper_ids = {b.paper_id for b in bundles}
     async with tracer.step(agent="report", tool="report:outline", model=model) as step:
         step.record_args(
             {
@@ -88,16 +89,19 @@ async def run_sl_outline(
         for idx, s in enumerate(draft.slides):
             chunk_ids: list[int] = []
             if s.paper_id is not None and s.grounding_sections:
-                seen: set[int] = set()
-                for name in s.grounding_sections:
-                    hits = await _chunk_ids_for_sections(
-                        conn=conn, paper_content_id=s.paper_id, sections=[name]
-                    )
-                    if hits:
-                        seen.update(hits)
-                    else:
-                        dropped.append(f"{s.paper_id}:{name}")
-                chunk_ids = sorted(seen)
+                if s.paper_id not in known_paper_ids:
+                    dropped.append(f"{s.paper_id}:paper-not-in-deck")
+                else:
+                    seen: set[int] = set()
+                    for name in s.grounding_sections:
+                        hits = await _chunk_ids_for_sections(
+                            conn=conn, paper_content_id=s.paper_id, sections=[name]
+                        )
+                        if hits:
+                            seen.update(hits)
+                        else:
+                            dropped.append(f"{s.paper_id}:{name}")
+                    chunk_ids = sorted(seen)
             figure_key = s.figure_key if s.figure_key in known_figs else None
             resolved.append(
                 OutlineSlide(

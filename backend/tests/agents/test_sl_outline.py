@@ -56,6 +56,15 @@ async def conn(tmp_path: Path) -> AsyncIterator[aiosqlite.Connection]:
                 "VALUES (?, 73, ?, 0, 1, 'x')",
                 (cid, sec),
             )
+        # Paper 74: a SECOND paper NOT in the test bundle (used to verify paper_id clamping)
+        await c.execute(
+            "INSERT INTO paper_content (id, content_key, kind, arxiv_id, title, source_path, source_dir_path, html_path) "
+            "VALUES (74, 'k74', 'arxiv', '2301.00002', 'P74', '/p2', '/d2', '/h2')"
+        )
+        await c.execute(
+            "INSERT INTO chunks (id, paper_content_id, section, char_start, char_end, text) "
+            "VALUES (201, 74, 'Method', 0, 1, 'x')"
+        )
         # Insert chat_sessions + runs rows so Tracer can write tool_calls
         await c.execute("INSERT INTO chat_sessions DEFAULT VALUES")
         await c.execute("INSERT INTO runs (session_id) VALUES (1)")
@@ -124,3 +133,27 @@ def test_generate_calls_run_sl_outline() -> None:
     src = inspect.getsource(rg)
     assert "run_sl_outline(" in src
     assert "outline=" in src
+
+
+@pytest.mark.asyncio
+async def test_paper_id_not_in_bundles_is_not_grounded(conn) -> None:
+    draft = DeckOutlineDraft(
+        talk_title="T", audience_intent="ai", narrative_arc="arc",
+        slides=[OutlineSlideDraft(goal="g", key_message="k", paper_id=74,
+                                  grounding_sections=["Method"])],
+    )
+    out = await run_sl_outline(
+        bundles=[_bundle()], task_description="x", response_language="English",
+        adapter=_StubAdapter(draft), tracer=_tracer(conn),
+        model="m", conn=conn,
+    )
+    # paper 74 is NOT in the deck's bundles -> must NOT ground to its chunk (201)
+    assert out.slides[0].grounding_chunk_ids == []
+    # and the miss is recorded in the trace
+    async with conn.execute(
+        "SELECT result_summary_json FROM tool_calls ORDER BY step_index DESC LIMIT 1"
+    ) as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    dropped = json.loads(row[0])["dropped_sections"]
+    assert any("74" in d for d in dropped)
