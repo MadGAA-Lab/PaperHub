@@ -227,6 +227,7 @@ async def run_gather_context(
     registry: PromptRegistry | None = None,
     llm_acompletion: LlmAcompletion | None = None,
     max_callback_calls: int = MAX_CALLBACK_CALLS,
+    aim: str | None = None,
 ) -> PaperContextBundle:
     """Run the gather-context subagent for ONE paper and return ONE bundle.
 
@@ -255,6 +256,12 @@ async def run_gather_context(
             ``litellm.acompletion``.
         max_callback_calls: shared budget across read_section /
             read_figure_block calls. ``list_sections`` is free.
+        aim: optional focus directive for this gather call. When provided,
+            the string is threaded into the prompt so the agent prioritises
+            reading sections/figures relevant to that specific aim (e.g.
+            "quantitative ablation results for the encoder choice"). When
+            ``None`` (the default), the prompt line reads as empty and
+            behaviour is identical to the original generic-bundle gather.
 
     Raises:
         ValueError: a ``key_figures[*].key`` was not in the inventory
@@ -280,6 +287,7 @@ async def run_gather_context(
         sections_toc_block=_format_sections_toc(asset),
         abstract_block=(paper_abstract or "")[:1200],
         paper_newcommands_block=_format_newcommands(paper_newcommands),
+        aim=aim or "",
     )
 
     messages: list[dict[str, Any]] = [
@@ -292,6 +300,7 @@ async def run_gather_context(
     callback_log: list[dict[str, str]] = []
     llm_turn_log: list[dict[str, Any]] = []
     callback_reads_used = 0
+    read_chunk_ids: list[int] = []
 
     if llm_acompletion is None:
         import litellm
@@ -391,11 +400,12 @@ async def run_gather_context(
                     result_str = json.dumps([s.name for s in asset.sections])
                     callback_reads_used += 1
                 elif name == "read_section" and conn is not None:
-                    result_str, _ = await _read_section(
+                    result_str, section_chunk_ids = await _read_section(
                         paper_content_id=paper_id,
                         name=str(args.get("name", "")),
                         conn=conn,
                     )
+                    read_chunk_ids.extend(section_chunk_ids)
                     callback_reads_used += 1
                 elif name == "read_figure_block" and conn is not None:
                     result_str = await _read_figure_block(
@@ -467,12 +477,19 @@ async def run_gather_context(
             step.mark_error("gather_context_parse_failed")
             raise
 
+        # Surface the chunk IDs the agent actually read — the sl_outline
+        # orchestrator uses these to ground slides on what was fetched.
+        bundle = bundle.model_copy(
+            update={"read_chunk_ids": sorted(set(read_chunk_ids))}
+        )
+
         step.record_result(
             {
                 "paper_id": paper_id,
                 "n_key_figures": len(bundle.key_figures),
                 "n_key_equations": len(bundle.key_equations),
                 "n_section_excerpts": len(bundle.section_excerpts),
+                "read_chunk_ids": bundle.read_chunk_ids,
                 "callback_reads": callback_log,
                 "llm_turns": llm_turn_log,
                 "final_text_len": len(final_text),

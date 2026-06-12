@@ -89,4 +89,6 @@ user: |
   Tools: list_sections, read_section, read_figure_block (call only when the
   pre-extracted material is insufficient — bounded budget of 3 callbacks).
 
+  FOCUS — gather the specific detail needed for: {aim}
+
   Emit the JSON `PaperContextBundle` now.

@@ -77,6 +77,7 @@ class PaperContextBundle(BaseModel):
     key_equations: list[KeyEquationBundle]
     section_excerpts: list[SectionExcerpt]
     paper_newcommands: list[str]  # raw \newcommand lines from ADDITIONAL.tex
+    read_chunk_ids: list[int] = Field(default_factory=list)  # chunk IDs read during gather (grounding source)
 
 
 # --- detector signals ----------------------------------------------------
