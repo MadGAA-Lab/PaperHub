@@ -163,7 +163,8 @@ class OutlineSlideDraft(BaseModel):
     paper_id: int | None = None  # paper_content.id this slide is about; None = synthesis/title
     figure_key: str | None = None  # inventory key, if the slide centres on a figure
     grounding_sections: list[str] = Field(default_factory=list)  # legacy: bundle section names (unused in F6.1+)
-    cites_aims: list[str] = Field(default_factory=list)  # the aims whose gathered chunks ground this slide
+    cites_aims: list[str] = Field(default_factory=list)  # legacy (unused in F6.1-R): the aims whose gathered chunks ground this slide
+    cites_reads: list[str] = Field(default_factory=list)  # read keys "<paper_id>:<section_name>" whose evidence grounds this slide
 
 
 class DeckOutlineDraft(BaseModel):

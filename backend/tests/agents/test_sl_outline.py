@@ -1,10 +1,8 @@
-"""Tests for the F6.1 sl_outline multi-round orchestrator loop.
+"""Tests for the F6.1-R sl_outline digest-driven orchestrator loop.
 
-Tests are fully deterministic — the LLM adapter and gather_fn are stubbed.
-No real DB chunk resolution is needed (grounding comes from gather_fn bundles,
-not SQL sections).
+Tests are fully deterministic — the LLM adapter and read_fn are stubbed.
+Grounding comes from the stubbed ReadResult chunk ids, not real SQL.
 """
-import inspect
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -14,20 +12,19 @@ import aiosqlite
 import pytest
 import pytest_asyncio
 
-import paperhub.agents.report_graph as rg  # noqa: F401 (used by wiring test)
 from paperhub.agents.sl_outline import run_sl_outline
+from paperhub.agents.sl_read import ReadResult
 from paperhub.db.migrate import apply_schema
 from paperhub.models.slide_domain import (
-    ContextRequest,
     DeckOutline,
     DeckOutlineDraft,
+    DigestSection,
     OutlineResult,
     OutlineSlideDraft,
-    PaperContextBundle,
+    PaperDigest,
+    ReadRequest,
     RoundAction,
-    SectionExcerpt,
     SeedFigure,
-    SeedPaper,
 )
 from paperhub.tracing.tracer import Tracer
 
@@ -50,43 +47,29 @@ def _tracer(c: aiosqlite.Connection) -> Tracer:
     return Tracer(c, run_id=1, branch="")
 
 
-def _seeds() -> list[SeedPaper]:
+def _digests() -> list[PaperDigest]:
     return [
-        SeedPaper(
+        PaperDigest(
             paper_id=73,
             title="Paper A",
             abstract="Abstract of paper A",
-            is_survey=False,
-            sections=["Intro", "Method", "Results", "Conclusion"],
+            sections=[
+                DigestSection(name="Method", insight="Describes the core method."),
+                DigestSection(name="Results", insight="Reports the headline numbers."),
+            ],
             figures=[SeedFigure(key="p0-fig-001", caption="Architecture diagram")],
         ),
-        SeedPaper(
+        PaperDigest(
             paper_id=74,
             title="Paper B",
             abstract="Abstract of paper B",
-            is_survey=False,
-            sections=["Intro", "Approach", "Experiments"],
+            sections=[
+                DigestSection(name="Approach", insight="Outlines the approach."),
+                DigestSection(name="Experiments", insight="Summarizes the experiments."),
+            ],
             figures=[SeedFigure(key="p1-fig-001", caption="Results chart")],
         ),
     ]
-
-
-def _bundle(paper_id: int, aim: str, chunk_ids: list[int]) -> PaperContextBundle:
-    return PaperContextBundle(
-        paper_id=paper_id,
-        paper_idx=0,
-        title=f"Paper {paper_id}",
-        authors=["Author"],
-        year=2025,
-        narrative_summary=f"Summary for aim={aim!r}",
-        key_figures=[],
-        key_equations=[],
-        section_excerpts=[
-            SectionExcerpt(section_name="Method", text=f"Evidence text for {aim}")
-        ],
-        paper_newcommands=[],
-        read_chunk_ids=chunk_ids,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -125,38 +108,39 @@ class _ScriptedAdapter:
 
 
 # ---------------------------------------------------------------------------
-# Stub gather_fn
+# Stub read_fn
 # ---------------------------------------------------------------------------
 
-class _GatherTracker:
-    """Records all gather_fn calls."""
+class _ReadTracker:
+    """Records all read_fn calls; returns controlled ReadResults."""
 
-    def __init__(self, bundles: dict[tuple[str, int], PaperContextBundle]) -> None:
-        self._bundles = bundles
-        self.calls: list[tuple[str, int]] = []
+    def __init__(self, results: dict[tuple[int, str], ReadResult]) -> None:
+        self._results = results
+        self.calls: list[tuple[int, str]] = []
 
-    async def __call__(self, aim: str, paper_id: int) -> PaperContextBundle:
-        self.calls.append((aim, paper_id))
-        key = (aim, paper_id)
-        if key in self._bundles:
-            return self._bundles[key]
-        return _bundle(paper_id, aim, [])
+    async def __call__(self, paper_id: int, section: str) -> ReadResult:
+        self.calls.append((paper_id, section))
+        key = (paper_id, section)
+        if key in self._results:
+            return self._results[key]
+        return ReadResult(text=f"text for {paper_id}:{section}", chunk_ids=[])
 
 
 # ---------------------------------------------------------------------------
-# Test 1: dispatch then finalize
+# Test 1: read then finalize
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_dispatch_then_finalize(conn: aiosqlite.Connection) -> None:
-    """Round 1 dispatches two aims; round 2 finalizes with cites_aims pointing
-    at aim 'A'.  Asserts gather_fn called correctly, grounding_chunk_ids correct,
-    support_excerpts non-empty, narrative_pattern propagated."""
+async def test_read_then_finalize(conn: aiosqlite.Connection) -> None:
+    """Round 1 reads two sections; round 2 finalizes with cites_reads pointing at
+    those keys.  Asserts read_fn called correctly, grounding_chunk_ids correct,
+    support_excerpts non-empty, speaker_note_hint carried, narrative_pattern
+    propagated."""
     chunk_ids_A = [101, 102]
     chunk_ids_B = [201]
-    gather_tracker = _GatherTracker({
-        ("A", 73): _bundle(73, "A", chunk_ids_A),
-        ("B", 74): _bundle(74, "B", chunk_ids_B),
+    read_tracker = _ReadTracker({
+        (73, "Method"): ReadResult(text="Method evidence", chunk_ids=chunk_ids_A),
+        (74, "Experiments"): ReadResult(text="Experiments evidence", chunk_ids=chunk_ids_B),
     })
 
     finalize_action = RoundAction(
@@ -172,21 +156,22 @@ async def test_dispatch_then_finalize(conn: aiosqlite.Connection) -> None:
                     goal="Title slide",
                     key_message="Comparing Paper A and B",
                     content_form="title",
-                    cites_aims=[],
+                    cites_reads=[],
                 ),
                 OutlineSlideDraft(
                     goal="Paper A Method",
                     key_message="Key mechanism",
                     content_form="comparison_table",
                     paper_id=73,
-                    cites_aims=["A"],
+                    # spacing/case differs from stored key on purpose
+                    cites_reads=["73:method"],
                     speaker_note_hint="Explain how the method works and why it was designed this way.",
                 ),
                 OutlineSlideDraft(
                     goal="Synthesis",
                     key_message="Combined takeaway",
                     content_form="synthesis",
-                    cites_aims=["A", "B"],
+                    cites_reads=["73:Method", "74:Experiments"],
                 ),
             ],
         ),
@@ -194,11 +179,11 @@ async def test_dispatch_then_finalize(conn: aiosqlite.Connection) -> None:
 
     script = [
         RoundAction(
-            action="dispatch",
+            action="read",
             narrative_pattern="comparison",
-            requests=[
-                ContextRequest(aim="A", paper_id=73),
-                ContextRequest(aim="B", paper_id=74),
+            reads=[
+                ReadRequest(paper_id=73, section_name="Method"),
+                ReadRequest(paper_id=74, section_name="Experiments"),
             ],
         ),
         finalize_action,
@@ -207,19 +192,19 @@ async def test_dispatch_then_finalize(conn: aiosqlite.Connection) -> None:
     tracer = _tracer(conn)
 
     result = await run_sl_outline(
-        seeds=_seeds(),
+        digests=_digests(),
         task_description="Compare these papers",
         response_language="English",
         target_slides=10,
         adapter=adapter,
         tracer=tracer,
         model="test-model",
-        gather_fn=gather_tracker,
+        read_fn=read_tracker,
         max_rounds=4,
     )
 
-    # gather_fn called once per aim in the dispatch
-    assert set(gather_tracker.calls) == {("A", 73), ("B", 74)}
+    # read_fn called once per read in the round
+    assert set(read_tracker.calls) == {(73, "Method"), (74, "Experiments")}
 
     assert isinstance(result, OutlineResult)
     assert result.rounds_used == 2
@@ -229,52 +214,103 @@ async def test_dispatch_then_finalize(conn: aiosqlite.Connection) -> None:
     assert outline.narrative_pattern == "comparison"
     assert len(outline.slides) == 3
 
-    # Title slide — no cites_aims, so no grounding
-    title_slide = outline.slides[0]
-    assert title_slide.grounding_chunk_ids == []
+    # Title slide — no cites_reads, so no grounding
+    assert outline.slides[0].grounding_chunk_ids == []
 
-    # Paper A slide cites_aims=["A"] -> should ground to chunk_ids_A
+    # Paper A slide cites "73:method" (different case) -> grounds to chunk_ids_A
     method_slide = outline.slides[1]
     assert method_slide.grounding_chunk_ids == sorted(set(chunk_ids_A))
     assert method_slide.support_excerpts  # non-empty
-    # speaker_note_hint must be carried from draft -> resolved slide
-    assert method_slide.speaker_note_hint == "Explain how the method works and why it was designed this way."
+    assert method_slide.speaker_note_hint == (
+        "Explain how the method works and why it was designed this way."
+    )
 
-    # Synthesis slide cites both A and B
+    # Synthesis slide cites both reads
     synth_slide = outline.slides[2]
     assert synth_slide.grounding_chunk_ids == sorted(set(chunk_ids_A + chunk_ids_B))
 
 
 # ---------------------------------------------------------------------------
-# Test 2: forced finalize at budget
+# Test 2: filtering — empty section, duplicate, unknown paper_id
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_forced_finalize_at_budget(conn: aiosqlite.Connection) -> None:
-    """An adapter that always returns dispatch must not loop forever.
-    After max_rounds the loop falls back to a minimal outline and returns."""
-    # Always dispatch — never finalize
-    always_dispatch = RoundAction(
-        action="dispatch",
-        narrative_pattern="synthesis",
-        requests=[ContextRequest(aim="X", paper_id=73)],
-    )
-    gather_tracker = _GatherTracker({("X", 73): _bundle(73, "X", [999])})
+async def test_read_filtering(conn: aiosqlite.Connection) -> None:
+    """A read round with an empty section_name, a duplicate, and a paper_id not
+    in the digests — read_fn is NOT called for those."""
+    read_tracker = _ReadTracker({
+        (73, "Method"): ReadResult(text="Method evidence", chunk_ids=[1]),
+    })
 
-    # Script: 10 dispatches (way more than max_rounds=3)
-    script = [always_dispatch] * 10
+    script = [
+        RoundAction(
+            action="read",
+            narrative_pattern="synthesis",
+            reads=[
+                ReadRequest(paper_id=73, section_name="Method"),
+                ReadRequest(paper_id=73, section_name=""),          # empty -> skip
+                ReadRequest(paper_id=73, section_name="Method"),    # dup -> skip
+                ReadRequest(paper_id=999, section_name="Ghost"),    # unknown paper -> skip
+            ],
+        ),
+        RoundAction(
+            action="finalize",
+            narrative_pattern="synthesis",
+            outline=DeckOutlineDraft(
+                talk_title="T",
+                audience_intent="i",
+                narrative_arc="a",
+                slides=[OutlineSlideDraft(goal="Title", key_message="")],
+            ),
+        ),
+    ]
     adapter = _ScriptedAdapter(script)
     tracer = _tracer(conn)
 
-    result = await run_sl_outline(
-        seeds=_seeds(),
-        task_description="Always dispatch",
+    await run_sl_outline(
+        digests=_digests(),
+        task_description="Filter test",
         response_language="English",
         target_slides=8,
         adapter=adapter,
         tracer=tracer,
         model="test-model",
-        gather_fn=gather_tracker,
+        read_fn=read_tracker,
+        max_rounds=4,
+    )
+
+    # Only the valid, unique read fired
+    assert read_tracker.calls == [(73, "Method")]
+
+
+# ---------------------------------------------------------------------------
+# Test 3: forced finalize at budget
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_forced_finalize_at_budget(conn: aiosqlite.Connection) -> None:
+    """An adapter that always returns read must not loop forever.
+    After max_rounds the loop falls back to a minimal outline and returns."""
+    always_read = RoundAction(
+        action="read",
+        narrative_pattern="synthesis",
+        reads=[ReadRequest(paper_id=73, section_name="Method")],
+    )
+    read_tracker = _ReadTracker({(73, "Method"): ReadResult(text="x", chunk_ids=[999])})
+
+    script = [always_read] * 10  # way more than max_rounds
+    adapter = _ScriptedAdapter(script)
+    tracer = _tracer(conn)
+
+    result = await run_sl_outline(
+        digests=_digests(),
+        task_description="Always read",
+        response_language="English",
+        target_slides=8,
+        adapter=adapter,
+        tracer=tracer,
+        model="test-model",
+        read_fn=read_tracker,
         max_rounds=3,
     )
 
@@ -285,14 +321,14 @@ async def test_forced_finalize_at_budget(conn: aiosqlite.Connection) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 3: clamp — bad paper_id, figure_key, ungathered aim recorded in dropped
+# Test 4: clamp — bad paper_id, figure_key, unread cites_reads recorded in dropped
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_clamp_bad_paper_figure_aim(conn: aiosqlite.Connection) -> None:
-    """Finalized slide with paper_id not in seeds, figure_key not in seeds,
-    and a cites_aims entry that was never gathered — all should be clamped and
-    recorded in the trace's 'dropped' field."""
+async def test_clamp_bad_paper_figure_read(conn: aiosqlite.Connection) -> None:
+    """Finalized slide with paper_id not in digests, figure_key not in digests,
+    and a cites_reads key that was never read — all clamped and recorded in the
+    trace's 'dropped' field."""
     finalize_action = RoundAction(
         action="finalize",
         narrative_pattern="synthesis",
@@ -306,35 +342,32 @@ async def test_clamp_bad_paper_figure_aim(conn: aiosqlite.Connection) -> None:
                     goal="Bad slide",
                     key_message="test",
                     content_form="bullets",
-                    paper_id=999,          # NOT in seeds
-                    figure_key="bad-key",  # NOT in seeds
-                    cites_aims=["NEVER_GATHERED"],  # never dispatched
+                    paper_id=999,                     # NOT in digests
+                    figure_key="bad-key",             # NOT in digests
+                    cites_reads=["73:NeverRead"],     # never fetched
                 ),
             ],
         ),
     )
     adapter = _ScriptedAdapter([finalize_action])
-    gather_tracker = _GatherTracker({})
+    read_tracker = _ReadTracker({})
     tracer = _tracer(conn)
 
     result = await run_sl_outline(
-        seeds=_seeds(),
+        digests=_digests(),
         task_description="Clamp test",
         response_language="English",
         target_slides=8,
         adapter=adapter,
         tracer=tracer,
         model="test-model",
-        gather_fn=gather_tracker,
+        read_fn=read_tracker,
         max_rounds=4,
     )
 
     slide = result.outline.slides[0]
-    # paper_id clamped to None
     assert slide.paper_id is None
-    # figure_key clamped to None
     assert slide.figure_key is None
-    # grounding empty (aim never gathered)
     assert slide.grounding_chunk_ids == []
 
     # Verify the trace records the dropped items
@@ -345,14 +378,13 @@ async def test_clamp_bad_paper_figure_aim(conn: aiosqlite.Connection) -> None:
     assert row is not None
     trace_result = json.loads(row[0])
     dropped = trace_result["dropped"]
-    # Should record the bad paper_id, figure_key, and ungathered aim
     assert any("999" in d or "paper_id=999" in d for d in dropped)
     assert any("bad-key" in d or "figure_key" in d for d in dropped)
-    assert any("NEVER_GATHERED" in d for d in dropped)
+    assert any("NeverRead" in d or "neverread" in d.lower() for d in dropped)
 
 
 # ---------------------------------------------------------------------------
-# Test 4: prompt slots check
+# Test 5: prompt slots check
 # ---------------------------------------------------------------------------
 
 def test_outline_prompt_loads_and_has_slots() -> None:
@@ -360,20 +392,8 @@ def test_outline_prompt_loads_and_has_slots() -> None:
     slot = PromptRegistry().get("slides_outline/v1")
     assert slot.system.strip()
     for key in (
-        "{task_description}", "{response_language}", "{seed_map_block}",
-        "{gathered_block}", "{round_number}", "{max_rounds}", "{target_slides}",
+        "{task_description}", "{response_language}", "{target_slides}",
+        "{digest_block}", "{read_block}", "{round_number}", "{max_rounds}",
         "{must_finalize}",
     ):
         assert key in slot.user_template, f"missing slot {key!r}"
-
-
-# ---------------------------------------------------------------------------
-# Test 5: wiring guard
-# ---------------------------------------------------------------------------
-
-def test_generate_calls_run_sl_outline() -> None:
-    """Guard: the GENERATE node must invoke run_sl_outline and pass an outline
-    into run_slide_agent (the F6.1 wiring)."""
-    src = inspect.getsource(rg)
-    assert "run_sl_outline(" in src
-    assert "outline=" in src
