@@ -146,6 +146,7 @@ class OutlineSlideDraft(BaseModel):
 
     goal: str  # one-line purpose of the slide
     key_message: str  # the single point it makes (may be "" for a title slide)
+    content_form: str = "bullets"  # how to SHOW the slide — bullets/comparison_table/results/…
     transition_from_prev: str = ""  # the bridge from the previous slide
     paper_id: int | None = None  # paper_content.id this slide is about; None = synthesis/title
     figure_key: str | None = None  # inventory key, if the slide centres on a figure
@@ -158,6 +159,7 @@ class DeckOutlineDraft(BaseModel):
     # No extra="forbid": LLM structured output is not schema-strict; ignore unknown keys.
 
     talk_title: str
+    narrative_pattern: str = "synthesis"  # chosen talk archetype — single_paper/comparison/…
     audience_intent: str  # what the talk should accomplish; e.g. "walk through the references"
     narrative_arc: str  # the throughline: problem framing -> bridges -> synthesis takeaway
     slides: list[OutlineSlideDraft]
@@ -171,10 +173,12 @@ class OutlineSlide(BaseModel):
     slide_index: int  # 0-based; matches the final deck_slides.slide_index (1:1 contract)
     goal: str
     key_message: str
+    content_form: str = "bullets"  # how to SHOW the slide — bullets/comparison_table/results/…
     transition_from_prev: str
     paper_id: int | None
     figure_key: str | None
     grounding_chunk_ids: list[int]  # resolved from grounding_sections via SQL
+    support_excerpts: list[str] = Field(default_factory=list)  # gathered evidence for the drafter
 
 
 class DeckOutline(BaseModel):
@@ -183,6 +187,36 @@ class DeckOutline(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     talk_title: str
+    narrative_pattern: str = "synthesis"  # chosen talk archetype — single_paper/comparison/…
     audience_intent: str
     narrative_arc: str
     slides: list[OutlineSlide]
+
+
+class SeedFigure(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    caption: str = ""
+
+
+class SeedPaper(BaseModel):
+    """Deterministic high-level map of one paper — the orchestrator's dispatch menu."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    paper_id: int
+    title: str
+    abstract: str
+    is_survey: bool          # a survey is internally multi-work -> decompose into its branches
+    sections: list[str]      # section names = the menu of what a detail gather can aim at
+    figures: list[SeedFigure]
+
+
+class OutlineResult(BaseModel):
+    """What the orchestrator returns: the outline + how many refine rounds it took."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    outline: DeckOutline
+    rounds_used: int
