@@ -1,3 +1,4 @@
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -106,3 +107,10 @@ async def test_unknown_section_is_dropped(conn) -> None:
         adapter=_StubAdapter(draft), tracer=_tracer(conn), model="m", conn=conn,
     )
     assert out.slides[0].grounding_chunk_ids == [101, 102]
+    async with conn.execute(
+        "SELECT result_summary_json FROM tool_calls ORDER BY step_index DESC LIMIT 1"
+    ) as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    result = json.loads(row[0])
+    assert result["dropped_sections"] == ["73:Nonexistent"]

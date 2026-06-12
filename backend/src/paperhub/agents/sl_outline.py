@@ -9,10 +9,9 @@ dropped sections so a misnarrated deck is diagnosable from the DB alone.
 """
 from __future__ import annotations
 
-from typing import Any
-
 import aiosqlite
 
+from paperhub.llm.adapter import LlmAdapter
 from paperhub.models.slide_domain import (
     DeckOutline,
     DeckOutlineDraft,
@@ -57,7 +56,7 @@ async def run_sl_outline(
     bundles: list[PaperContextBundle],
     task_description: str,
     response_language: str,
-    adapter: Any,  # LlmAdapter — has .structured(...)
+    adapter: LlmAdapter,
     tracer: Tracer,
     model: str,
     conn: aiosqlite.Connection,
@@ -89,15 +88,16 @@ async def run_sl_outline(
         for idx, s in enumerate(draft.slides):
             chunk_ids: list[int] = []
             if s.paper_id is not None and s.grounding_sections:
-                chunk_ids = await _chunk_ids_for_sections(
-                    conn=conn, paper_content_id=s.paper_id, sections=s.grounding_sections
-                )
+                seen: set[int] = set()
                 for name in s.grounding_sections:
-                    hit = await _chunk_ids_for_sections(
+                    hits = await _chunk_ids_for_sections(
                         conn=conn, paper_content_id=s.paper_id, sections=[name]
                     )
-                    if not hit:
+                    if hits:
+                        seen.update(hits)
+                    else:
                         dropped.append(f"{s.paper_id}:{name}")
+                chunk_ids = sorted(seen)
             figure_key = s.figure_key if s.figure_key in known_figs else None
             resolved.append(
                 OutlineSlide(
