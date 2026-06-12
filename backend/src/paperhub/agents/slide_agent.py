@@ -312,10 +312,20 @@ def _format_layout_examples_block() -> str:
     )
 
 
+_EXCERPT_MAX_CHARS: Final[int] = 300
+
+
 def _format_outline_block(outline: DeckOutline | None) -> str:
     """Render the approved outline for the drafter. The drafter MUST render
     exactly one frame per slide, in order — no add/drop/split (the 1:1 contract
-    that keeps grounding mapped to pages by slide_index)."""
+    that keeps grounding mapped to pages by slide_index).
+
+    Each slide line now includes:
+    - ``[form: <content_form>]`` so the drafter knows the intended render style.
+    - An ``Evidence:`` sub-list of ``support_excerpts`` (truncated to
+      ``_EXCERPT_MAX_CHARS`` chars) so the drafter writes from fetched material
+      rather than hallucinating. Omitted when the slide has no excerpts.
+    """
     if outline is None:
         return ""
     lines = [
@@ -331,7 +341,14 @@ def _format_outline_block(outline: DeckOutline | None) -> str:
         fig = f" [figure: {s.figure_key}]" if s.figure_key else ""
         bridge = f" (transition: {s.transition_from_prev})" if s.transition_from_prev else ""
         msg = f" — {s.key_message}" if s.key_message else ""
-        lines.append(f"{s.slide_index + 1}. {s.goal}{msg}{fig}{bridge}")
+        form = f" [form: {s.content_form}]"
+        lines.append(f"{s.slide_index + 1}. {s.goal}{msg}{form}{fig}{bridge}")
+        if s.support_excerpts:
+            lines.append("   Evidence:")
+            for excerpt in s.support_excerpts:
+                if len(excerpt) > _EXCERPT_MAX_CHARS:
+                    excerpt = excerpt[:_EXCERPT_MAX_CHARS] + "..."
+                lines.append(f"   - {excerpt}")
     return "\n".join(lines)
 
 

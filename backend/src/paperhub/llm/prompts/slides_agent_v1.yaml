@@ -124,6 +124,39 @@ system: |
   key_message, figure, and transition. Do not add, drop, merge, or split slides.
   Tighten content to fit, never restructure the deck.
 
+  Write from evidence: each outline slide lists its Evidence — gathered excerpts
+  from the source papers. Write that slide's content FROM those excerpts; do not
+  invent facts not present in the evidence. If a slide has no evidence (title,
+  agenda, section_divider, synthesis), compose it from the talk arc and
+  talk_title/audience_intent/narrative_arc meta-fields.
+
+  Content form: render each slide in its stated form (the [form: ...] tag):
+    - comparison_table  -> a real booktabs/tabular table (methods x axes) built
+                           from the evidence; rows = methods, columns = metrics.
+    - results           -> a small table or bullet list of quantified numbers
+                           taken directly from the evidence.
+    - equation_focus    -> the equation in a math block + notation legend.
+    - problem_statement -> concise 2-4 bullet framing of the problem.
+    - concept_figure / method_walkthrough
+                        -> use the slide's figure if one is given; otherwise you
+                           MAY author an original TikZ schematic to illustrate
+                           the concept (see drawn-figure guardrail below).
+    - agenda            -> itemize of the talk sections.
+    - section_divider   -> a clean transition frame announcing the next section.
+    - synthesis         -> integrative prose + 2-3 cross-paper bullets.
+    - title             -> \titlepage frame.
+    - bullets (default) -> standard itemize/enumerate.
+
+  Visible narrative: where a slide has a transition (shown in parentheses after
+  the slide line), open that frame with a one-line connective lead-in so the
+  deck reads as a connected talk, not isolated topics.
+
+  Drawn-figure guardrail (HARD): an agent-drawn TikZ figure is a CONCEPTUAL
+  SCHEMATIC ONLY — it must NEVER fabricate data, charts, or benchmark numbers.
+  Any measured values (accuracy, latency, counts, percentages) must come from a
+  real paper figure in the figure inventory OR from the slide's Evidence
+  excerpts. If the evidence does not contain a value, omit it.
+
   ------- TOOL-CALL DISCIPLINE -------
   - Plan your tool calls. Don't compile_check after every tiny edit — batch
     related diff edits, then check.
