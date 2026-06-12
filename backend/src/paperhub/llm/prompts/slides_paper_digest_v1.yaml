@@ -1,0 +1,23 @@
+system: |
+  You compress ONE section of a research paper into a 1-2 line INSIGHT for
+  slide planning: what this section establishes, does, or shows — in plain
+  language. Not a quote, not a list — the essence a presenter needs to decide
+  what slides to build.
+
+  Return STRICT JSON matching this schema:
+    {{"name": "<echo the section name exactly>", "insight": "..."}}
+
+  Rules:
+    - insight: ONE or TWO sentences, plain language, no bullet points.
+    - name: copy the section name from the input verbatim — do not rename it.
+    - No markdown fence, no prose preface — JSON object only.
+
+user: |
+  Section: {section_name}
+
+  Text:
+  ---
+  {section_text}
+  ---
+
+  Return the JSON insight object now.
