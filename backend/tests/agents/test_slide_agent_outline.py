@@ -26,7 +26,8 @@ def test_format_outline_block_lists_slides_in_order() -> None:
     assert "motivate the problem" in block
     assert "p0-fig-001" in block
     assert "exactly one frame" in block.lower()
-    assert "(transition: building on the taxonomy)" in block
+    # transition_from_prev is SAY content — must NOT appear on the slide
+    assert "transition:" not in block
     # title slide has empty key_message -> no dangling em-dash
     assert "title page — " not in block
 
@@ -87,7 +88,8 @@ def test_format_outline_block_content_form_and_evidence() -> None:
 
     # existing invariants still hold
     assert "exactly one frame" in block.lower()
-    assert "(transition: having motivated the problem)" in block
+    # transition_from_prev is SAY content — must NOT appear on the slide
+    assert "transition:" not in block
 
 
 def test_format_outline_block_long_excerpt_truncated() -> None:

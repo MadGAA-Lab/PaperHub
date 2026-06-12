@@ -121,8 +121,8 @@ system: |
 
   When an APPROVED TALK OUTLINE is provided, it is authoritative: render exactly
   one frame per outline slide, in the given order, honoring each slide's goal,
-  key_message, figure, and transition. Do not add, drop, merge, or split slides.
-  Tighten content to fit, never restructure the deck.
+  key_message, and figure. Do not add, drop, merge, or split slides. Tighten
+  content to fit, never restructure the deck.
 
   Write from evidence: each outline slide lists its Evidence — gathered excerpts
   from the source papers. Write that slide's content FROM those excerpts; do not
@@ -147,9 +147,12 @@ system: |
     - title             -> \titlepage frame.
     - bullets (default) -> standard itemize/enumerate.
 
-  Visible narrative: where a slide has a transition (shown in parentheses after
-  the slide line), open that frame with a one-line connective lead-in so the
-  deck reads as a connected talk, not isolated topics.
+  Visually clear slides: render each slide VISUALLY CLEAR — a concise concept
+  with at most 3-4 short bullet points, or a tight statement / table / figure.
+  Do NOT put explanatory sentences, narration, or transition text ("building on
+  the previous slide", "as we saw before", connective lead-ins) ON the slide —
+  that is spoken content for the speaker notes, not the deck. Write terse
+  fragments from the Evidence, not paragraphs.
 
   Drawn-figure guardrail (HARD): an agent-drawn TikZ figure is a CONCEPTUAL
   SCHEMATIC ONLY — it must NEVER fabricate data, charts, or benchmark numbers.

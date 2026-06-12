@@ -339,10 +339,9 @@ def _format_outline_block(outline: DeckOutline | None) -> str:
     ]
     for s in outline.slides:
         fig = f" [figure: {s.figure_key}]" if s.figure_key else ""
-        bridge = f" (transition: {s.transition_from_prev})" if s.transition_from_prev else ""
         msg = f" — {s.key_message}" if s.key_message else ""
         form = f" [form: {s.content_form}]"
-        lines.append(f"{s.slide_index + 1}. {s.goal}{msg}{form}{fig}{bridge}")
+        lines.append(f"{s.slide_index + 1}. {s.goal}{msg}{form}{fig}")
         if s.support_excerpts:
             lines.append("   Evidence:")
             for excerpt in s.support_excerpts:
