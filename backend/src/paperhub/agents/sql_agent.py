@@ -1,7 +1,26 @@
-"""SQL Agent — the `library_stats` intent (SRS v2.16, §III-3)."""
+"""SQL Agent — the `library_stats` intent (SRS v2.16, §III-3).
+
+Rewritten (Plan "SQL Agent ReAct rework", Task 3) from the fixed
+plan->query->repair-once->answer pipeline into a BOUNDED ReAct LOOP. Each round
+the orchestrator LLM returns a :class:`SqlRoundAction`:
+
+* ``action="query"`` — run ONE validated read-only SELECT; the returned
+  columns/rows are fed back into the next round's prompt so the model can
+  observe and refine.
+* ``action="finalize"`` — stop with the user-facing prose ``answer`` plus a
+  curated ``papers`` shortlist.
+
+The loop mirrors ``sl_outline.run_sl_outline``: ``for round_num in range(1,
+max_rounds+1)``, build a context block, ``adapter.structured(...)``, branch on
+the action, force-finalize on the last round via ``must_finalize``.
+
+This task delivers the loop + tracing and streams ``final_action.answer`` as
+token(s). **Task 4** turns ``final_action.papers`` into curated
+``SearchResultsYield`` cards emitted BEFORE the answer tokens — see the SEAM
+comment in :func:`sql_agent_stream`.
+"""
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
@@ -9,11 +28,20 @@ import aiosqlite
 
 from paperhub.agents._mcp_result import normalize_mcp_result
 from paperhub.agents.memory_recall import build_active_memory_block
-from paperhub.agents.research import SearchCandidate, SearchResultsYield, ToolStepYield
+from paperhub.agents.research import SearchResultsYield, ToolStepYield
 from paperhub.agents.state import AgentState, effective_query, response_language
 from paperhub.db.tool_calls import drain_tool_calls_since
 from paperhub.llm.adapter import LlmAdapter
+from paperhub.models.sql_domain import SqlPaperPick, SqlRoundAction
 from paperhub.tracing.tracer import Tracer
+
+# Maximum query rounds before the loop forces a finalize. The Nth (last) round
+# is run with ``must_finalize=True`` so the model cannot request another query.
+_MAX_ROUNDS = 4
+# Row-text caps for the query_results context block so a wide/long result set
+# can't blow up the prompt. Mirrors sl_outline's bounded read-block.
+_MAX_ROWS_IN_CONTEXT = 30
+_MAX_CELL_CHARS = 200
 
 
 class _Registry(Protocol):
@@ -49,89 +77,65 @@ async def _mcp_call(tracer: Tracer, registry: _Registry, tool: str, args: dict[s
         return result
 
 
-async def _plan_sql(
-    adapter: LlmAdapter,
-    tracer: Tracer,
-    *,
-    slot: str,
-    model: str,
-    variables: dict[str, Any],
-    mock: str | None,
-) -> str:
-    kwargs: dict[str, Any] = {}
-    if mock is not None:
-        kwargs["mock_response"] = mock
-    parts: list[str] = []
-    async with tracer.step(agent="sql", tool="sql:plan", model=model) as step:
-        step.record_args(variables)
-        async for tok in adapter.stream(slot=slot, variables=variables, model=model, **kwargs):
-            parts.append(tok)
-        sql = "".join(parts).strip().strip("`").removeprefix("sql").strip()
-        step.record_result({"sql": sql})
-    return sql
+def _cols(schema: Any) -> str:
+    """Render a ``sql.describe`` result as a comma-joined column-name list.
 
-
-async def _emit_library_candidates(
-    columns: list[str],
-    rows: list[list[Any]],
-    *,
-    conn: aiosqlite.Connection | None,
-    session_id: int | None,
-) -> AsyncIterator[SearchResultsYield]:
-    """Map a paper-shaped ``sql.query`` result (one with a ``paper_content_id``
-    column) into a single ``SearchResultsYield`` of ``library:<id>`` candidates.
-
-    ``already_in_session`` is resolved with ONE set-membership query against the
-    session's ``papers`` rows (not per-row). ``title``/``year`` come from the
-    result columns when the SELECT included them, else the dataclass defaults.
+    ``sql.describe`` returns ``{"columns": [{name, type}, ...]}`` (the dict
+    envelope survives the MCP wire as one valid-JSON TextContent; a top-level
+    list is flattened into an unparseable multi-object string — the run-517
+    bug). Tolerate a bare list for legacy in-test callers.
     """
-    pcid_idx = columns.index("paper_content_id")
-    title_idx = columns.index("title") if "title" in columns else None
-    year_idx = columns.index("year") if "year" in columns else None
+    cols = schema.get("columns") if isinstance(schema, dict) else schema
+    if isinstance(cols, list):
+        return ", ".join(c["name"] for c in cols if isinstance(c, dict) and "name" in c)
+    return "(unavailable)"
 
-    in_session: set[int] = set()
-    if conn is not None and session_id is not None:
-        async with conn.execute(
-            "SELECT paper_content_id FROM papers WHERE session_id = ?",
-            (session_id,),
-        ) as cur:
-            in_session = {int(r[0]) for r in await cur.fetchall()}
 
-    candidates: list[SearchCandidate] = []
-    seen: set[int] = set()
-    for row in rows:
-        # The SELECT is LLM-authored: a row may be shorter than the declared
-        # column count (ragged) and a JOIN fan-out may repeat a pcid. Guard all
-        # cell reads so a bad row degrades gracefully instead of aborting the
-        # generator mid-stream, and dedup so each pcid emits at most one card.
-        try:
-            pcid = int(row[pcid_idx])
-            title = (
-                str(row[title_idx])
-                if title_idx is not None and row[title_idx] is not None
-                else ""
-            )
-            year: int | None = None
-            if year_idx is not None and row[year_idx] is not None:
-                try:
-                    year = int(row[year_idx])
-                except (TypeError, ValueError):
-                    year = None
-        except (TypeError, ValueError, IndexError):
-            continue
-        if pcid in seen:
-            continue
-        seen.add(pcid)
-        candidates.append(
-            SearchCandidate(
-                paper_id=f"library:{pcid}",
-                title=title,
-                year=year,
-                already_in_session=pcid in in_session,
-                finalize=False,
-            )
-        )
-    yield SearchResultsYield(candidates=candidates)
+def _format_query_result(sql: str, result: Any) -> str:
+    """Render one prior round's (sql, result) into a readable context block.
+
+    Caps rows (``_MAX_ROWS_IN_CONTEXT``) and truncates long cells
+    (``_MAX_CELL_CHARS``) so the accumulated context can't explode the prompt.
+    Errors / rejections / empty results are surfaced verbatim so the model can
+    refine on the next round.
+    """
+    header = f"SQL: {sql}"
+    if not isinstance(result, dict):
+        return f"{header}\nResult: (execution failed — non-dict result)"
+    if "error" in result:
+        reason = result.get("reason") or result.get("error") or "error"
+        return f"{header}\nResult: ERROR ({result.get('error')}): {reason}"
+    columns = result.get("columns", [])
+    rows = result.get("rows", []) or []
+    if not rows:
+        return f"{header}\nColumns: {columns}\nRows: (empty result)"
+
+    def _cell(v: Any) -> str:
+        s = str(v)
+        return s if len(s) <= _MAX_CELL_CHARS else s[:_MAX_CELL_CHARS] + "…"
+
+    shown = rows[:_MAX_ROWS_IN_CONTEXT]
+    body = "\n".join("  " + " | ".join(_cell(c) for c in row) for row in shown)
+    more = f"\n  … ({len(rows) - len(shown)} more rows)" if len(rows) > len(shown) else ""
+    return f"{header}\nColumns: {columns}\nRows ({len(rows)}):\n{body}{more}"
+
+
+def _coerce_finalize(action: SqlRoundAction) -> SqlRoundAction:
+    """Turn a stray ``action="query"`` on the final round into a finalize.
+
+    Never run a query past the cap: if the model still asked to query when it
+    was told to finalize, salvage whatever answer/papers it gave (or synthesize
+    a minimal answer) rather than executing a (max_rounds+1)-th query.
+    """
+    if action.action == "finalize":
+        return action
+    answer = action.answer or (
+        "I reached the query limit while looking into your library. Based on "
+        "what I gathered above, I wasn't able to finish refining the query."
+    )
+    return SqlRoundAction(
+        action="finalize", sql=None, answer=answer, papers=action.papers,
+    )
 
 
 async def sql_agent_stream(
@@ -149,16 +153,31 @@ async def sql_agent_stream(
     recall_enabled: bool = True,
     emit_tool_steps: bool = False,
 ) -> AsyncIterator[str | ToolStepYield | SearchResultsYield]:
+    """Run the bounded ReAct loop for a ``library_stats`` turn.
+
+    Yields, in order: ``ToolStepYield`` (when ``emit_tool_steps``) as each agent
+    step commits, then ``str`` answer tokens. Task 4 will additionally yield a
+    ``SearchResultsYield`` from ``final_action.papers`` BEFORE the answer tokens
+    (the seam is marked below).
+
+    The ``planner_mock`` / ``repair_mock`` / ``answer_mock`` kwargs are retained
+    for signature compatibility with chat.py + the old test suite; the ReAct
+    loop drives the model via ``adapter.structured`` and does not use them
+    (real-API behaviour is unchanged; the mocks were a stream-adapter feature).
+    """
     question = effective_query(state)
     language = response_language(state)
     session_id = state.get("session_id")
+    # The ReAct loop uses one model for every round; keep the planner model as
+    # the loop model (answer_model is retained for signature compatibility).
+    model = planner_model
 
     # Progressive trace-streaming (FR-02): when ``emit_tool_steps`` is set the
     # caller (chat.py) wants each agent step to surface as a ``tool_step`` SSE
-    # event AS IT COMMITS — not in one batch at end-of-turn via the post-stream
-    # drain. The Tracer only writes to the DB (no live channel), so we drain
-    # newly-committed rows after each step and yield them. Start after the
-    # current max step so the router's already-emitted step 0 isn't re-sent.
+    # event AS IT COMMITS — not in one batch at end-of-turn. The Tracer only
+    # writes to the DB (no live channel), so we drain newly-committed rows after
+    # each step and yield them. Start after the current max step so the router's
+    # already-emitted step 0 isn't re-sent.
     _emitted_step = -1
     if emit_tool_steps:
         async with tracer.connection.execute(
@@ -176,118 +195,110 @@ async def sql_agent_stream(
             _emitted_step = rec["step_index"]
             yield ToolStepYield(record=rec)
 
+    # 1. Describe schemas once. These two columns lists are constant per turn.
     pc_schema = await _mcp_call(tracer, registry, "sql.describe", {"table": "paper_content"})
     p_schema = await _mcp_call(tracer, registry, "sql.describe", {"table": "papers"})
     async for ev in _drain_new_steps():
         yield ev
-
-    def _cols(schema: Any) -> str:
-        # ``sql.describe`` returns ``{"columns": [{name, type}, ...]}`` (the
-        # dict envelope survives the MCP wire as one valid-JSON TextContent;
-        # a top-level list is flattened into an unparseable multi-object
-        # string — the run-517 bug). Tolerate a bare list for legacy callers.
-        cols = schema.get("columns") if isinstance(schema, dict) else schema
-        if isinstance(cols, list):
-            return ", ".join(c["name"] for c in cols if isinstance(c, dict) and "name" in c)
-        return "(unavailable)"
-
     table_schemas = f"paper_content columns: {_cols(pc_schema)}\npapers columns: {_cols(p_schema)}"
 
-    sql = await _plan_sql(
-        adapter,
-        tracer,
-        slot="sql_planner/v1",
-        model=planner_model,
-        variables={"session_id": session_id, "question": question, "table_schemas": table_schemas},
-        mock=planner_mock,
-    )
-    async for ev in _drain_new_steps():
-        yield ev
-
-    result = await _mcp_call(tracer, registry, "sql.query", {"sql": sql})
-    async for ev in _drain_new_steps():
-        yield ev
-    rows = result.get("rows") if isinstance(result, dict) else None
-    if (not isinstance(result, dict)) or ("error" in result) or (not rows):
-        repaired = await _plan_sql(
-            adapter,
-            tracer,
-            slot="sql_repair/v1",
-            model=planner_model,
-            variables={
-                "question": question,
-                "schema": json.dumps(pc_schema),
-                "previous_sql": sql,
-                "table_schemas": table_schemas,
-                "error": (
-                    (result.get("reason") or result.get("error") or "empty result")
-                    if isinstance(result, dict)
-                    else "execution failed"
-                ),
-            },
-            mock=repair_mock if repair_mock is not None else planner_mock,
-        )
-        async for ev in _drain_new_steps():
-            yield ev
-        sql = repaired
-        result = await _mcp_call(tracer, registry, "sql.query", {"sql": sql})
-        async for ev in _drain_new_steps():
-            yield ev
-        rows = result.get("rows") if isinstance(result, dict) else []
-
-    columns = result.get("columns", []) if isinstance(result, dict) else []
-    rows = rows or []
-
-    # E1: when the executed SELECT is paper-shaped (it includes a
-    # ``paper_content_id`` column), surface each row as a ``library:<id>``
-    # SearchCandidate so the result is attachable via the Research Agent's
-    # existing ``search_results`` SSE path. Emit BEFORE the answer stream so the
-    # cards render alongside (not after) the prose. Aggregate queries (no
-    # ``paper_content_id`` column) emit nothing.
-    if isinstance(columns, list) and "paper_content_id" in columns:
-        async for cand_ev in _emit_library_candidates(
-            columns, rows, conn=conn, session_id=session_id,
-        ):
-            yield cand_ev
-
-    # Build recall-injection block (FR-10). Empty when disabled or no memories.
-    # Uses the UNCONDITIONAL active-memory block (not FTS) so a standing
-    # directive like "respond in Japanese" always surfaces — an FTS query on
-    # the user's stats question would never match a language preference.
+    # 2. Recalled-memory block (FR-10): the unconditional active-memory block so
+    # a standing directive like "respond in Japanese" always surfaces. The
+    # agent prompt has no dedicated memory slot, so we prepend it to the
+    # question the model reasons over (cheapest non-lossy injection; if a
+    # dedicated prompt var is wanted later, add it to sql_agent/v1).
     memory_context: str = ""
     if conn is not None and recall_enabled:
-        memory_context = await build_active_memory_block(
-            conn,
-            session_id=session_id,
+        memory_context = await build_active_memory_block(conn, session_id=session_id)
+    question_for_model = question
+    if memory_context:
+        question_for_model = f"{question}\n\n{memory_context}"
+
+    # 3. The bounded ReAct loop.
+    query_results: list[str] = []  # readable blocks of prior rounds' (sql, rows)
+    final_action: SqlRoundAction | None = None
+
+    for round_num in range(1, _MAX_ROUNDS + 1):
+        must_finalize = round_num == _MAX_ROUNDS
+        results_block = "\n\n".join(query_results) if query_results else "(no queries run yet)"
+
+        async with tracer.step(agent="sql", tool="sql:react", model=model) as step:
+            step.record_args({
+                "round_number": round_num,
+                "max_rounds": _MAX_ROUNDS,
+                "must_finalize": must_finalize,
+                "question": question,
+                "recall_hit": bool(memory_context),
+            })
+            action: SqlRoundAction = await adapter.structured(
+                slot="sql_agent/v1",
+                variables={
+                    "session_id": session_id,
+                    "response_language": language,
+                    "round_number": round_num,
+                    "max_rounds": _MAX_ROUNDS,
+                    "must_finalize": must_finalize,
+                    "table_schemas": table_schemas,
+                    "question": question_for_model,
+                    "query_results": results_block,
+                },
+                response_model=SqlRoundAction,
+                model=model,
+            )
+            if must_finalize:
+                action = _coerce_finalize(action)
+            step.record_result(
+                {"action": action.action, "sql": action.sql}
+                if action.action == "query"
+                else {"action": action.action, "n_papers": len(action.papers)}
+            )
+        async for ev in _drain_new_steps():
+            yield ev
+
+        if action.action == "finalize":
+            final_action = action
+            break
+
+        # action == "query" (and not the must_finalize round, which coerced
+        # above). Run the validated query and feed the rows back next round.
+        result = await _mcp_call(tracer, registry, "sql.query", {"sql": action.sql or ""})
+        async for ev in _drain_new_steps():
+            yield ev
+        # A rejected / errored / empty result is appended verbatim so the agent
+        # can observe and refine — never crash the loop.
+        query_results.append(_format_query_result(action.sql or "", result))
+
+    # The loop always terminates with a finalize (break) or the must_finalize
+    # coercion on round _MAX_ROUNDS. Defensive fallback for an empty queue.
+    if final_action is None:  # pragma: no cover - loop guarantees a finalize
+        final_action = SqlRoundAction(
+            action="finalize", sql=None,
+            answer="I wasn't able to complete the analysis.", papers=[],
         )
 
-    kwargs: dict[str, Any] = {}
-    if answer_mock is not None:
-        kwargs["mock_response"] = answer_mock
-    async with tracer.step(agent="sql", tool="sql:answer", model=answer_model) as step:
-        step.record_args({"sql": sql, "row_count": len(rows)})
-        collected: list[str] = []
-        async for tok in adapter.stream(
-            slot="sql_answer/v1",
-            variables={
-                "question": question,
-                "sql": sql,
-                "response_language": language,
-                "columns": json.dumps(columns),
-                "rows": json.dumps(rows),
-                "memory_context": memory_context,
-            },
-            model=answer_model,
-            **kwargs,
-        ):
-            collected.append(tok)
-            yield tok
+    # ── SEAM for Task 4 ────────────────────────────────────────────────────
+    # ``final_action.papers`` (list[SqlPaperPick]) is the curated shortlist the
+    # model chose. Task 4 will resolve each pick to a ``library:<pcid>``
+    # SearchCandidate (title/year/already_in_session via ``conn``/``session_id``,
+    # the reason carried through) and yield ONE ``SearchResultsYield`` HERE —
+    # BEFORE the answer tokens below — so the cards render alongside the prose.
+    # Kept available, not emitted, this task:
+    final_picks: list[SqlPaperPick] = final_action.papers
+    _ = final_picks  # noqa: F841 — handed to Task 4's emission seam.
+
+    # 4. Stream the finalized answer. Wrapped in a tracer step so the trace
+    # records the final output text + which round produced it.
+    answer = final_action.answer or ""
+    async with tracer.step(agent="sql", tool="sql:answer", model=model) as step:
+        step.record_args({"n_papers": len(final_action.papers)})
+        # Minimal streaming this task: yield the answer in one chunk. Task 4 may
+        # stream finer-grained if it streams from the finalize result.
+        if answer:
+            yield answer
         step.record_result({
-            "length": sum(len(c) for c in collected),
+            "length": len(answer),
+            "n_papers": len(final_action.papers),
             "recall_hit": bool(memory_context),
         })
-    # Stream the answer step's record now that it's committed (its tokens
-    # already streamed above). Any remainder is caught by chat.py's
-    # post-stream drain — which is now a no-op for the happy path.
     async for ev in _drain_new_steps():
         yield ev
