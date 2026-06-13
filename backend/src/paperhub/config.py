@@ -41,10 +41,8 @@ class Settings:
     paper_qa_model: str
     # paper_qa per-paper subagent (section navigation + chunk picking).
     paper_qa_subagent_model: str
-    # SQL Agent NL2SQL planner + self-repair (small tier).
+    # SQL Agent ReAct loop model — reason→query→curate→finalize (small tier).
     sql_agent_model: str
-    # SQL Agent answer phrasing (flagship tier).
-    sql_answer_model: str
     # Memory-add conflict detector (small tier; classifier-shaped).
     memory_conflict_model: str
 
@@ -159,7 +157,6 @@ def load_settings() -> Settings:
             "PAPERHUB_PAPER_QA_SUBAGENT_MODEL", small,
         ),
         sql_agent_model=os.environ.get("PAPERHUB_SQL_AGENT_MODEL", small),
-        sql_answer_model=os.environ.get("PAPERHUB_SQL_ANSWER_MODEL", flagship),
         memory_conflict_model=os.environ.get(
             "PAPERHUB_MEMORY_CONFLICT_MODEL", small,
         ),

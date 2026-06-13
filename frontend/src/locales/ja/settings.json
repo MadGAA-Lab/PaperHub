@@ -81,12 +81,8 @@
       "help": "論文ごとのセクション探索とチャンク選択。既定は小型ティア。"
     },
     "PAPERHUB_SQL_AGENT_MODEL": {
-      "label": "SQL プランナー",
-      "help": "library_stats の NL→SQL 立案と自己修復。既定は小型ティア。"
-    },
-    "PAPERHUB_SQL_ANSWER_MODEL": {
-      "label": "SQL 回答",
-      "help": "library_stats の自然言語回答の言い回し。既定はフラッグシップティア。"
+      "label": "SQL エージェント",
+      "help": "library_stats の ReAct エージェント（推論 → クエリ → 選別 → 回答）。既定は小型ティア。"
     },
     "PAPERHUB_MEMORY_CONFLICT_MODEL": {
       "label": "メモリ競合検出",

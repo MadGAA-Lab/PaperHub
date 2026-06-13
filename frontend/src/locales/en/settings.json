@@ -81,12 +81,8 @@
       "help": "Per-paper section navigation + chunk selection. Defaults to the small tier."
     },
     "PAPERHUB_SQL_AGENT_MODEL": {
-      "label": "SQL planner",
-      "help": "library_stats NL→SQL planning + self-repair. Defaults to the small tier."
-    },
-    "PAPERHUB_SQL_ANSWER_MODEL": {
-      "label": "SQL answer",
-      "help": "library_stats natural-language answer phrasing. Defaults to the flagship tier."
+      "label": "SQL agent",
+      "help": "library_stats ReAct agent (reason → query → curate → answer). Defaults to the small tier."
     },
     "PAPERHUB_MEMORY_CONFLICT_MODEL": {
       "label": "Memory conflict detector",

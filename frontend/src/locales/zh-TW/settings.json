@@ -81,12 +81,8 @@
       "help": "逐篇論文的章節導覽與片段挑選。預設使用小型層級。"
     },
     "PAPERHUB_SQL_AGENT_MODEL": {
-      "label": "SQL 規劃器",
-      "help": "library_stats 的 NL→SQL 規劃與自我修復。預設使用小型層級。"
-    },
-    "PAPERHUB_SQL_ANSWER_MODEL": {
-      "label": "SQL 回答",
-      "help": "library_stats 的自然語言回答措辭。預設使用旗艦層級。"
+      "label": "SQL 代理",
+      "help": "library_stats 的 ReAct 代理（推理 → 查詢 → 篩選 → 回答）。預設使用小型層級。"
     },
     "PAPERHUB_MEMORY_CONFLICT_MODEL": {
       "label": "記憶衝突偵測器",

@@ -110,7 +110,7 @@ def test_tier_defaults_unset_use_built_in_models(monkeypatch: pytest.MonkeyPatch
         "PAPERHUB_MODEL_SMALL", "PAPERHUB_MODEL_FLAGSHIP",
         "PAPERHUB_ROUTER_MODEL", "PAPERHUB_CHITCHAT_MODEL",
         "PAPERHUB_PAPER_QA_MODEL", "PAPERHUB_PAPER_QA_SUBAGENT_MODEL",
-        "PAPERHUB_SQL_AGENT_MODEL", "PAPERHUB_SQL_ANSWER_MODEL",
+        "PAPERHUB_SQL_AGENT_MODEL",
         "PAPERHUB_REPORT_PLAN_MODEL", "PAPERHUB_REPORT_SECTION_MODEL",
         "PAPERHUB_REPORT_NOTES_MODEL", "PAPERHUB_REPORT_RESOLVE_MODEL",
     ):
@@ -124,7 +124,6 @@ def test_tier_defaults_unset_use_built_in_models(monkeypatch: pytest.MonkeyPatch
     assert s.report_resolve_model == "gemini/gemini-3.1-flash-lite"
     # Flagship-tier slots
     assert s.paper_qa_model == "gemini/gemini-2.5-pro"
-    assert s.sql_answer_model == "gemini/gemini-2.5-pro"
     assert s.report_plan_model == "gemini/gemini-2.5-pro"
     assert s.report_section_model == "gemini/gemini-2.5-pro"
     assert s.report_notes_model == "gemini/gemini-2.5-pro"
@@ -154,7 +153,7 @@ def test_flagship_tier_env_var_changes_all_flagship_tier_slots(
 ) -> None:
     """``PAPERHUB_MODEL_FLAGSHIP`` is the default for every flagship-tier slot."""
     for name in (
-        "PAPERHUB_PAPER_QA_MODEL", "PAPERHUB_SQL_ANSWER_MODEL",
+        "PAPERHUB_PAPER_QA_MODEL",
         "PAPERHUB_REPORT_PLAN_MODEL", "PAPERHUB_REPORT_SECTION_MODEL",
         "PAPERHUB_REPORT_NOTES_MODEL",
     ):
@@ -162,7 +161,6 @@ def test_flagship_tier_env_var_changes_all_flagship_tier_slots(
     monkeypatch.setenv("PAPERHUB_MODEL_FLAGSHIP", "anthropic/claude-opus-4-7")
     s = load_settings()
     assert s.paper_qa_model == "anthropic/claude-opus-4-7"
-    assert s.sql_answer_model == "anthropic/claude-opus-4-7"
     assert s.report_plan_model == "anthropic/claude-opus-4-7"
     assert s.report_section_model == "anthropic/claude-opus-4-7"
     assert s.report_notes_model == "anthropic/claude-opus-4-7"

@@ -81,12 +81,8 @@
       "help": "逐篇论文的章节导航与片段挑选。默认使用小型层级。"
     },
     "PAPERHUB_SQL_AGENT_MODEL": {
-      "label": "SQL 规划器",
-      "help": "library_stats 的 NL→SQL 规划与自我修复。默认使用小型层级。"
-    },
-    "PAPERHUB_SQL_ANSWER_MODEL": {
-      "label": "SQL 回答",
-      "help": "library_stats 的自然语言回答措辞。默认使用旗舰层级。"
+      "label": "SQL 代理",
+      "help": "library_stats 的 ReAct 代理（推理 → 查询 → 筛选 → 回答）。默认使用小型层级。"
     },
     "PAPERHUB_MEMORY_CONFLICT_MODEL": {
       "label": "记忆冲突检测器",
