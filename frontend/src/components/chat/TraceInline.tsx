@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { fetchRunTrace } from "@/lib/api";
 import { useChatStore } from "@/store/chat";
 import type { ToolCallRecord } from "@/types/domain";
+import { RejectionPill } from "@/components/states/RejectionPill";
 import { JsonTree } from "./JsonTree";
 
 // ---------------------------------------------------------------------------
@@ -315,8 +316,17 @@ export function TraceInline({
                 >
                   <RowIcon className="h-3 w-3" />
                   [{r.branch || "main"}#{r.step_index}] {r.agent} · {r.tool}{" "}
-                  ({r.model ?? "-"}) {r.latency_ms}ms {r.status}
-                  {r.error && ` — ${r.error}`}
+                  ({r.model ?? "-"}) {r.latency_ms}ms{" "}
+                  {/* A rejection is a deliberate policy stop — surface it as a
+                      RejectionPill (with its reason) rather than raw text. */}
+                  {r.status === "rejected" ? (
+                    <RejectionPill reason={r.error ?? ""} />
+                  ) : (
+                    <>
+                      {r.status}
+                      {r.error && ` — ${r.error}`}
+                    </>
+                  )}
                 </button>
 
                 {/* Expanded detail */}

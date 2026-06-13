@@ -120,6 +120,37 @@ describe("TraceInline — lazy fetch", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Rejected step — RejectionPill surfaces the policy stop + its reason
+// (Plan B follow-up: a rejection is recorded as status="rejected" with the
+//  reason in `error`; the row must render the RejectionPill, not raw text.)
+// ---------------------------------------------------------------------------
+describe("TraceInline — rejected step", () => {
+  const rejectedTrace: ToolCallRecord[] = [
+    {
+      ...sampleTrace[0]!,
+      agent: "memory",
+      tool: "add_memory",
+      status: "rejected",
+      error: "session scope cannot write a global memory",
+    },
+  ];
+
+  it("flags a rejected step with data-status=\"rejected\"", async () => {
+    const { container } = renderTrace(rejectedTrace);
+    await userEvent.click(screen.getByRole("button", { name: /1 step/i }));
+    expect(container.querySelector('[data-status="rejected"]')).not.toBeNull();
+  });
+
+  it("renders the RejectionPill with its reason instead of raw status text", async () => {
+    renderTrace(rejectedTrace);
+    await userEvent.click(screen.getByRole("button", { name: /1 step/i }));
+    expect(
+      screen.getByText(/Rejected: session scope cannot write a global memory/i),
+    ).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Detail rendering (args/result) — preserved from the original suite
 // ---------------------------------------------------------------------------
 describe("TraceInline — step detail", () => {
