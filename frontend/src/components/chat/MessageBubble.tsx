@@ -19,6 +19,7 @@ import { SqlCard } from "@/components/chat/SqlCard";
 import { DeckChip } from "@/components/slides/DeckChip";
 import { rehypeChunkCitations } from "@/lib/rehypeChunkCitations";
 import { normalizeMath, KATEX_MACROS } from "@/lib/normalizeMath";
+import { liftSqlFence } from "@/lib/liftSqlFence";
 import { CitationMarker } from "@/components/canvas/CitationMarker";
 
 interface Props {
@@ -154,7 +155,7 @@ export function MessageBubble({
                 },
               } as Components}
             >
-              {normalizeMath(message.content) || " "}
+              {normalizeMath(liftSqlFence(message.content)) || " "}
             </ReactMarkdown>
           )}
           {isStreamingWithContent && (

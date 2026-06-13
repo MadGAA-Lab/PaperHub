@@ -48,6 +48,29 @@ describe("MessageBubble", () => {
     expect(screen.getByText(/provider 500/i)).toBeInTheDocument();
   });
 
+  it("renders a one-line ```sql block as a SqlCard (not broken inline text)", () => {
+    // Verbatim shape from a live library_stats run: the model emits the fence,
+    // SQL, and closing fence all on one line — liftSqlFence must normalize it
+    // so the SqlCard renders instead of broken inline markup.
+    render(
+      <MessageBubble
+        message={{
+          role: "assistant",
+          run_id: 1,
+          content:
+            "Here are the most relevant ones:\n\n```sql SELECT id AS paper_content_id, title FROM paper_content WHERE title LIKE '%T%' ```",
+        }}
+      />,
+    );
+    // The prose still renders…
+    expect(screen.getByText(/most relevant ones/i)).toBeInTheDocument();
+    // …and the SQL is lifted into a SqlCard (distinctive "SQL" summary).
+    expect(screen.getByText("SQL")).toBeInTheDocument();
+    expect(
+      screen.getByText(/SELECT id AS paper_content_id, title FROM paper_content/),
+    ).toBeInTheDocument();
+  });
+
   it("shows Retry button on error message when onRetry is provided", async () => {
     const onRetry = vi.fn();
     render(
