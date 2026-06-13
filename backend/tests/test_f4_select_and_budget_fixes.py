@@ -20,14 +20,14 @@ def _row(idx: int, ps: int, pe: int) -> DeckSlideRow:
 
 def test_select_rows_page_without_number_falls_back_to_current_view() -> None:
     rows = [_row(0, 1, 1), _row(1, 2, 2), _row(2, 3, 3)]
-    cmd = DeckCommand(action="edit_slides", target_scope="page", target_page=None)
+    cmd = DeckCommand(action="edit_slides", target_scope="page", target_page=None, note_language=None)
     sel = _select_rows(rows, cmd, current_view_page=3)
     assert [r.slide_index for r in sel] == [2]
 
 
 def test_select_rows_page_with_explicit_number() -> None:
     rows = [_row(0, 1, 1), _row(1, 2, 2)]
-    cmd = DeckCommand(action="edit_slides", target_scope="page", target_page=2)
+    cmd = DeckCommand(action="edit_slides", target_scope="page", target_page=2, note_language=None)
     sel = _select_rows(rows, cmd, current_view_page=1)
     assert [r.slide_index for r in sel] == [1]
 
@@ -35,7 +35,7 @@ def test_select_rows_page_with_explicit_number() -> None:
 def test_select_rows_page_unresolvable_returns_empty() -> None:
     # target_page None AND current_view_page out of range → genuinely empty.
     rows = [_row(0, 1, 1)]
-    cmd = DeckCommand(action="edit_slides", target_scope="page", target_page=None)
+    cmd = DeckCommand(action="edit_slides", target_scope="page", target_page=None, note_language=None)
     assert _select_rows(rows, cmd, current_view_page=9) == []
 
 

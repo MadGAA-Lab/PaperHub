@@ -27,7 +27,7 @@ async def test_relanguage_notes(fake_tracer) -> None:
 
 @pytest.mark.asyncio
 async def test_edit_current_page(fake_tracer) -> None:
-    dec = DeckCommand(action="edit_slides", target_scope="current", target_page=None)
+    dec = DeckCommand(action="edit_slides", target_scope="current", target_page=None, note_language=None)
     out = await classify_deck_command(
         adapter=_A(dec), tracer=fake_tracer, model="m",
         instruction="make this slide more concise", current_view_page=3,
@@ -58,7 +58,7 @@ async def test_detect_slide_language_none_when_unspecified(fake_tracer) -> None:
 
 @pytest.mark.asyncio
 async def test_edit_title_action(fake_tracer) -> None:
-    dec = DeckCommand(action="edit_title", target_scope="all", target_page=None)
+    dec = DeckCommand(action="edit_title", target_scope="all", target_page=None, note_language=None)
     out = await classify_deck_command(
         adapter=_A(dec), tracer=fake_tracer, model="m",
         instruction="edit the title page authors", current_view_page=1,
@@ -69,7 +69,7 @@ async def test_edit_title_action(fake_tracer) -> None:
 
 @pytest.mark.asyncio
 async def test_edit_preamble_action(fake_tracer) -> None:
-    dec = DeckCommand(action="edit_preamble", target_scope="all", target_page=None)
+    dec = DeckCommand(action="edit_preamble", target_scope="all", target_page=None, note_language=None)
     out = await classify_deck_command(
         adapter=_A(dec), tracer=fake_tracer, model="m",
         instruction="make the whole deck use a dark blue theme",

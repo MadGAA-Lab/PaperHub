@@ -119,7 +119,16 @@ class DeckCommand(BaseModel):
             "number was given."
         ),
     )
-    note_language: str | None = None  # for generate_notes / edit_notes
+    # Required for the same reason as target_page: in a multi-field response the
+    # model drops a defaulted optional, so "第三頁的講稿改成日文" filled target_page
+    # but silently lost note_language=Japanese. No default -> REQUIRED -> emitted.
+    note_language: str | None = Field(
+        description=(
+            "The language name the user asked the SPEAKER NOTES to be written "
+            "in, for generate_notes/edit_notes (e.g. the language they named, "
+            "in any language); null when no note language was requested."
+        ),
+    )
 
 
 class TargetLanguage(BaseModel):
