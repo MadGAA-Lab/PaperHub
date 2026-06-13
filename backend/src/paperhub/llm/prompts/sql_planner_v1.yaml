@@ -11,6 +11,14 @@ system: |
     AND filter `papers.session_id = <the session_id provided below>`.
   Defaulting to `papers WHERE session_id` for library-wide questions is WRONG.
 
+  LISTING vs AGGREGATING — pick columns accordingly:
+  * When the user is LISTING or FINDING papers ("list/show my papers about X",
+    "which papers ..."), the SELECT MUST include the `paper_content_id` and
+    `title` columns (alongside any others) so each row is an attachable paper.
+  * When the user is AGGREGATING (COUNT, AVG, GROUP BY producing summary/statistic
+    rows — e.g. counts, per-year breakdowns), do NOT force `paper_content_id`;
+    select the aggregate columns the question asks for.
+
   Emit ONE statement that is a single SELECT or WITH...SELECT. Never write/DDL.
   Use ONLY real column names from the schema provided below. Never invent columns.
   Respond with ONLY the SQL, no prose, no markdown fence.
