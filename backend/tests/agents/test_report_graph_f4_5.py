@@ -44,6 +44,31 @@ from paperhub.tracing.tracer import Tracer
 # ─────────────────────────── fixtures ────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _stub_latex_compile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI installs no TeX Live (unit tests stub compilation — see ci.yml).
+
+    sl_emit's post-audit recompile callback shells out to a real ``pdflatex``
+    via ``compile_mod.compile_with_revise``; without a binary that raises
+    ``FileNotFoundError`` and fails the GENERATE happy-path tests. Stub the
+    compile to write ``deck.tex`` + a dummy ``deck.pdf`` and report success,
+    so these tests exercise the orchestration/persistence wiring (their actual
+    subject) without a LaTeX toolchain. Short-circuit tests never reach it.
+    """
+    from paperhub.pipelines.slide_pipeline.compile import CompileResult
+
+    async def _fake_compile_with_revise(
+        *, tex: str, workdir: Path, tex_name: str = "deck.tex", **_: Any
+    ) -> CompileResult:
+        (workdir / tex_name).write_text(tex, encoding="utf-8")
+        (workdir / "deck.pdf").write_bytes(b"%PDF-stub\n")
+        return CompileResult(ok=True, attempts=1, tex=tex, log="", page_count=1)
+
+    monkeypatch.setattr(
+        rg.compile_mod, "compile_with_revise", _fake_compile_with_revise
+    )
+
+
 @pytest_asyncio.fixture
 async def conn(tmp_path: Path) -> AsyncIterator[aiosqlite.Connection]:
     db = tmp_path / "test.db"
