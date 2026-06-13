@@ -6,7 +6,7 @@ import type {
   ReferenceItem,
   SearchResultCandidate,
 } from "@/types/domain";
-import { ingestPaper, listSessionReferences, uploadPdf } from "@/lib/api";
+import { attachFromLibrary, ingestPaper, listSessionReferences, uploadPdf } from "@/lib/api";
 import { useChatStore } from "@/store/chat";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -262,12 +262,21 @@ function AddButton({ candidate, sessionId }: AddButtonProps) {
     const sid = sessionId;
     setState("loading");
     try {
-      const result = await ingestPaper(sid, candidate.paper_id, {
-        title: candidate.title,
-        abstract: candidate.abstract,
-        authors: candidate.authors,
-        year: candidate.year,
-      });
+      // E1: library_stats candidates carry paper_id="library:<pcid>" — these
+      // papers are already in the dedup index, so attach via the idempotent
+      // from-library endpoint rather than re-ingesting from a remote source.
+      const isLibrary = candidate.paper_id.startsWith("library:");
+      const result = isLibrary
+        ? await attachFromLibrary(
+            sid,
+            Number(candidate.paper_id.slice("library:".length)),
+          )
+        : await ingestPaper(sid, candidate.paper_id, {
+            title: candidate.title,
+            abstract: candidate.abstract,
+            authors: candidate.authors,
+            year: candidate.year,
+          });
       // Optimistic insert so the card flips to "Added" immediately,
       // without waiting for the listSessionReferences round-trip.
       // The fetch below confirms with authoritative server state.

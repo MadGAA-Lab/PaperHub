@@ -168,6 +168,71 @@ describe("SearchResultList", () => {
     expect(screen.getByText(/^added$/i)).toBeInTheDocument();
   });
 
+  it("Add on a library:<id> candidate attaches via POST /papers/from-library (not POST /papers)", async () => {
+    // E1: library_stats results render as search candidates with
+    // paper_id="library:<pcid>". Clicking Add must route through the
+    // idempotent library-attach endpoint, NOT the ingest path.
+    const fromLibraryBodies: unknown[] = [];
+    let ingestCalled = false;
+    server.use(
+      http.post(`${API_BASE_URL}/papers/from-library`, async ({ request }) => {
+        fromLibraryBodies.push(await request.json());
+        return HttpResponse.json(
+          {
+            paper_content_id: 42,
+            papers_id: 55,
+            cache_hit: true,
+            title: "A Paper In My Library",
+          },
+          { status: 200 },
+        );
+      }),
+      http.post(`${API_BASE_URL}/papers`, () => {
+        ingestCalled = true;
+        return HttpResponse.json(ingestResponse, { status: 201 });
+      }),
+      http.get(`${API_BASE_URL}/papers`, () =>
+        HttpResponse.json([
+          makeRef({ papers_id: 55, paper_content_id: 42, arxiv_id: null, kind: "pdf_upload", title: "A Paper In My Library" }),
+        ]),
+      ),
+    );
+
+    render(
+      <SearchResultList
+        candidates={[
+          makeCandidate({
+            paper_id: "library:42",
+            title: "A Paper In My Library",
+            arxiv_id: null,
+            has_open_pdf: false,
+            papers_id: null,
+          }),
+        ]}
+        sessionId={1}
+      />,
+    );
+
+    const addBtn = screen.getByRole("button", { name: /add as reference/i });
+    await userEvent.click(addBtn);
+
+    // The from-library endpoint was hit with the parsed pcid…
+    await waitFor(() => expect(fromLibraryBodies.length).toBeGreaterThan(0));
+    const body = fromLibraryBodies[0] as Record<string, unknown>;
+    expect(body.session_id).toBe(1);
+    expect(body.paper_content_id).toBe(42);
+
+    // …and the ingest path was NOT used.
+    expect(ingestCalled).toBe(false);
+
+    // Optimistic insert flips the card to "Added".
+    await waitFor(() => {
+      expect(screen.getByText(/^added$/i)).toBeInTheDocument();
+    });
+    const refs = useChatStore.getState().referencesBySession[1] ?? [];
+    expect(refs.some((r) => r.papers_id === 55)).toBe(true);
+  });
+
   it("flips back to 'Add as reference' after the matching ref is removed mid-render", () => {
     useChatStore.getState().setReferences(1, [makeRef({ papers_id: 3 })]);
     render(
