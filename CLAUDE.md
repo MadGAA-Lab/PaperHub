@@ -183,7 +183,6 @@ npm run build     # Vite production build
 
 Plans A–G are shipped + merged; closed follow-ups live in the SRS Revision History. Genuinely open, out-of-scope-when-written items (audited 2026-06-13 against `main`):
 
-- **(B) `RejectionPill` not wired** — the backend now records `status="rejected"` (memory-scope `agents/memory_node.py`, SQL `agents/sql_agent.py`; covered by `test_tracer_rejected.py` + `test_memory_node.py`), but `components/states/RejectionPill.tsx` is **imported nowhere** — `chat/TraceInline.tsx` just renders the raw `{r.status}` text. So a rejection is recorded yet invisible to the user. Closing it = wire the pill into the trace render + a frontend test with a rejected fixture. Plan H's MCP-permission rejections will exercise it for real. **(Smallest genuinely-open item.)**
 - **(E) `library_stats` auto-attach is prose-only** — `agents/sql_agent.py` computes `columns`/`rows` and feeds them to the answer prompt as JSON, but streams only prose tokens; no structured card event. v2.32's `chat/SqlCard.tsx` lifts the ```sql block out of the prose but renders SQL text only — the rows themselves are still not attachable like `paper_search` results.
 - **(E) Memory recall is all-active, not semantic** *(deferred by design)* — `build_active_memory_block` (5 live call sites) returns every active memory (≤20); the FTS/semantic `build_memory_context_block` has **zero call sites** (dead code, kept intentionally so a standing directive like "respond in Japanese" always surfaces). Revisit if a user's active set grows large.
 - **(D) `dom_id` fallback-failure edge — test only** *(real fix shipped)* — `pipelines/sentinels.py` `inject_sentinels` no longer just skips math/fragile spans; it forward/backward-anchors to a nearby safe position and only sets `dom_id=None` when **both** directions fail (rare). Happy paths tested (`test_sentinels.py:175-233`); frontend degrades via the three-tier fallback in `canvas/HtmlView.tsx`. **Only open piece:** no unit test for the genuinely-boxed-in case (no safe position → `dom_id=None`).
@@ -191,7 +190,7 @@ Plans A–G are shipped + merged; closed follow-ups live in the SRS Revision His
 
 ## Plan G review — anything blocking Plan H?
 
-**No.** Plan G (i18n + DB-backed Settings panel, v2.31) shipped; its one notable YAGNI cut — *"no live model-availability validation"* — was **closed by the v2.32 readiness gate** (`GET /settings/readiness`). Nothing in G blocks **Plan H** (Compare view + `paperhub.*` MCP + filesystem MCP): H reuses the already-shipped MCP client infra (add one `[[server]]` block to `mcp_servers.toml`), and the only cross-plan touchpoint is the **`RejectionPill`** above — H's MCP-permission rejections are what finally exercise it end-to-end.
+**No.** Plan G (i18n + DB-backed Settings panel, v2.31) shipped; its one notable YAGNI cut — *"no live model-availability validation"* — was **closed by the v2.32 readiness gate** (`GET /settings/readiness`). Nothing in G blocks **Plan H** (Compare view + `paperhub.*` MCP + filesystem MCP): H reuses the already-shipped MCP client infra (add one `[[server]]` block to `mcp_servers.toml`). The `RejectionPill` is now wired into the trace render (`chat/TraceInline.tsx`) and verified against a live memory-scope rejection; H's MCP-permission rejections will exercise that same path for real.
 
 ## Restricted operations
 
