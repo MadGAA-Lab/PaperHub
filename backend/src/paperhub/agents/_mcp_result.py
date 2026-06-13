@@ -9,8 +9,8 @@ tool payloads in two distinct shapes depending on whether the handler returns a
   (e.g. ``memory.recall``).
 
 In addition, some FastMCP transports / versions serialise the payload as a
-JSON *string* rather than a parsed object — the existing
-``sql_agent._normalize_mcp_result`` already handles that.
+JSON *string* rather than a parsed object — ``normalize_mcp_result`` (below)
+handles that too.
 
 This module consolidates both normalisation steps into a single helper so
 ``sql_agent`` and ``memory_node`` share identical semantics.  The rules, in

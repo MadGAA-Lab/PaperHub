@@ -14,10 +14,9 @@ The loop mirrors ``sl_outline.run_sl_outline``: ``for round_num in range(1,
 max_rounds+1)``, build a context block, ``adapter.structured(...)``, branch on
 the action, force-finalize on the last round via ``must_finalize``.
 
-This task delivers the loop + tracing and streams ``final_action.answer`` as
-token(s). **Task 4** turns ``final_action.papers`` into curated
-``SearchResultsYield`` cards emitted BEFORE the answer tokens — see the SEAM
-comment in :func:`sql_agent_stream`.
+The loop streams ``final_action.answer`` as token(s) and turns
+``final_action.papers`` into curated ``SearchResultsYield`` cards emitted
+BEFORE the answer tokens.
 """
 from __future__ import annotations
 
@@ -48,20 +47,11 @@ class _Registry(Protocol):
     async def call(self, namespaced_name: str, args: dict[str, Any]) -> Any: ...
 
 
-def _normalize_mcp_result(raw: Any) -> Any:
-    """Normalise the return value of ``MCPClient.call_tool``.
-
-    Thin re-export of :func:`~paperhub.agents._mcp_result.normalize_mcp_result`
-    kept for backwards compatibility with existing imports in tests.
-    """
-    return normalize_mcp_result(raw)
-
-
 async def _mcp_call(tracer: Tracer, registry: _Registry, tool: str, args: dict[str, Any]) -> Any:
     async with tracer.step(agent="sql", tool=tool, model=None) as step:
         step.record_args(args)
         raw = await registry.call(tool, args)
-        result = _normalize_mcp_result(raw)
+        result = normalize_mcp_result(raw)
         if isinstance(result, dict) and result.get("error") == "rejected":
             step.mark_rejected(str(result.get("reason", "rejected")))
             step.record_result(result)
@@ -213,10 +203,6 @@ async def sql_agent_stream(
     tracer: Tracer,
     registry: _Registry,
     planner_model: str,
-    answer_model: str,
-    planner_mock: str | None = None,
-    repair_mock: str | None = None,
-    answer_mock: str | None = None,
     conn: aiosqlite.Connection | None = None,
     recall_enabled: bool = True,
     emit_tool_steps: bool = False,
@@ -224,20 +210,17 @@ async def sql_agent_stream(
     """Run the bounded ReAct loop for a ``library_stats`` turn.
 
     Yields, in order: ``ToolStepYield`` (when ``emit_tool_steps``) as each agent
-    step commits, then ``str`` answer tokens. Task 4 will additionally yield a
-    ``SearchResultsYield`` from ``final_action.papers`` BEFORE the answer tokens
-    (the seam is marked below).
+    step commits, then a ``SearchResultsYield`` curated from
+    ``final_action.papers`` (when there are picks + a ``conn``) BEFORE the
+    ``str`` answer tokens, so the library cards render alongside the prose.
 
-    The ``planner_mock`` / ``repair_mock`` / ``answer_mock`` kwargs are retained
-    for signature compatibility with chat.py + the old test suite; the ReAct
-    loop drives the model via ``adapter.structured`` and does not use them
-    (real-API behaviour is unchanged; the mocks were a stream-adapter feature).
+    The ReAct loop uses ``planner_model`` for every round and drives the model
+    via ``adapter.structured``.
     """
     question = effective_query(state)
     language = response_language(state)
     session_id = state.get("session_id")
-    # The ReAct loop uses one model for every round; keep the planner model as
-    # the loop model (answer_model is retained for signature compatibility).
+    # The ReAct loop uses one model for every round.
     model = planner_model
 
     # Progressive trace-streaming (FR-02): when ``emit_tool_steps`` is set the

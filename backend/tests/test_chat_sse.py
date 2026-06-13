@@ -1068,7 +1068,6 @@ async def test_chat_sse_library_stats_streams_tokens(
         tracer: Any,
         registry: Any,
         planner_model: Any,
-        answer_model: Any,
         **kwargs: Any,
     ) -> AsyncIterator[str]:
         for tok in _canned_tokens:

@@ -135,7 +135,7 @@ async def test_one_shot_finalize_runs_no_query(migrated_db: aiosqlite.Connection
     reg = _QueryRegistry([{"columns": ["n"], "rows": [[3]]}])
     items = await _drain(sql_agent_stream(
         _state(), adapter=adapter, tracer=tracer, registry=reg,
-        planner_model="gpt-4o-mini", answer_model="gpt-4o-mini",
+        planner_model="gpt-4o-mini",
     ))
     out = "".join(x for x in items if isinstance(x, str))
     assert "You have 3 papers." in out
@@ -166,7 +166,7 @@ async def test_refine_one_query_then_finalize(migrated_db: aiosqlite.Connection)
     reg = _QueryRegistry([{"columns": ["n"], "rows": [[5]]}])
     items = await _drain(sql_agent_stream(
         _state(), adapter=adapter, tracer=tracer, registry=reg,
-        planner_model="gpt-4o-mini", answer_model="gpt-4o-mini",
+        planner_model="gpt-4o-mini",
     ))
     out = "".join(x for x in items if isinstance(x, str))
     assert "You have 5 papers." in out
@@ -195,7 +195,7 @@ async def test_cap_forces_finalize_after_max_rounds(migrated_db: aiosqlite.Conne
     reg = _QueryRegistry([{"columns": ["n"], "rows": [[1]]}])
     items = await _drain(sql_agent_stream(
         _state(), adapter=adapter, tracer=tracer, registry=reg,
-        planner_model="gpt-4o-mini", answer_model="gpt-4o-mini",
+        planner_model="gpt-4o-mini",
     ))
     # max_rounds = 4: rounds 1-3 each run a query; round 4 is must_finalize so
     # it does NOT run a query even though the model returned action=query.
@@ -231,7 +231,7 @@ async def test_rejected_query_does_not_crash_then_finalizes(
     reg = _QueryRegistry([{"error": "rejected", "reason": "not allowed"}])
     items = await _drain(sql_agent_stream(
         _state(), adapter=adapter, tracer=tracer, registry=reg,
-        planner_model="gpt-4o-mini", answer_model="gpt-4o-mini",
+        planner_model="gpt-4o-mini",
     ))
     out = "".join(x for x in items if isinstance(x, str))
     assert "could not run" in out
@@ -264,7 +264,7 @@ async def test_emits_tool_steps_before_answer(migrated_db: aiosqlite.Connection)
     reg = _QueryRegistry([{"columns": ["n"], "rows": [[3]]}])
     items = await _drain(sql_agent_stream(
         _state(), adapter=adapter, tracer=tracer, registry=reg,
-        planner_model="gpt-4o-mini", answer_model="gpt-4o-mini",
+        planner_model="gpt-4o-mini",
         emit_tool_steps=True,
     ))
     first_token = next((i for i, x in enumerate(items) if isinstance(x, str)), len(items))
@@ -324,7 +324,7 @@ async def test_finalize_emits_curated_cards_before_answer(
     reg = _QueryRegistry([{"columns": ["n"], "rows": [[2]]}])
     items = await _drain(sql_agent_stream(
         _state(), adapter=adapter, tracer=tracer, registry=reg,
-        planner_model="gpt-4o-mini", answer_model="gpt-4o-mini",
+        planner_model="gpt-4o-mini",
         conn=migrated_db,
     ))
 
@@ -358,7 +358,7 @@ async def test_finalize_aggregate_emits_no_cards(
     reg = _QueryRegistry([{"columns": ["n"], "rows": [[7]]}])
     items = await _drain(sql_agent_stream(
         _state(), adapter=adapter, tracer=tracer, registry=reg,
-        planner_model="gpt-4o-mini", answer_model="gpt-4o-mini",
+        planner_model="gpt-4o-mini",
         conn=migrated_db,
     ))
     assert not any(isinstance(x, SearchResultsYield) for x in items)
@@ -385,7 +385,7 @@ async def test_finalize_skips_hallucinated_pcid(
     reg = _QueryRegistry([{"columns": ["n"], "rows": [[1]]}])
     items = await _drain(sql_agent_stream(
         _state(), adapter=adapter, tracer=tracer, registry=reg,
-        planner_model="gpt-4o-mini", answer_model="gpt-4o-mini",
+        planner_model="gpt-4o-mini",
         conn=migrated_db,
     ))
     yields = [x for x in items if isinstance(x, SearchResultsYield)]
@@ -412,7 +412,7 @@ async def test_active_memory_recall_reaches_model(
     reg = _QueryRegistry([{"columns": ["n"], "rows": [[0]]}])
     await _drain(sql_agent_stream(
         _state(), adapter=adapter, tracer=tracer, registry=reg,
-        planner_model="gpt-4o-mini", answer_model="gpt-4o-mini",
+        planner_model="gpt-4o-mini",
         conn=migrated_db, recall_enabled=True,
     ))
     assert "Always respond in Japanese." in str(adapter.calls[0]["question"])

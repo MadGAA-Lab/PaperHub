@@ -117,7 +117,6 @@ async def test_library_stats_forwards_search_results_event_and_persists(
         tracer: Any,
         registry: Any,
         planner_model: Any,
-        answer_model: Any,
         **kwargs: Any,
     ) -> AsyncIterator[Any]:
         yield SearchResultsYield(

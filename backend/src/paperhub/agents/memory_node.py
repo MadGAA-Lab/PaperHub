@@ -79,8 +79,7 @@ async def memory_node(
             parts.append(tok)
         raw_text = "".join(parts).strip()
         # Strip markdown code fences the LLM may wrap around the JSON
-        # (e.g. ```json\n{...}\n```).  Mirror the same approach used by
-        # sql_agent._plan_sql which strips backticks + the "sql" prefix.
+        # (e.g. ```json\n{...}\n```) — strip the backticks + the language tag.
         if raw_text.startswith("```"):
             raw_text = raw_text.lstrip("`")
             # Remove optional language tag (e.g. "json") on the first line.

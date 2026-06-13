@@ -574,8 +574,6 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> EventSourceRespon
     adapter = LiteLlmAdapter()
     router_mock = os.environ.get("PAPERHUB_ROUTER_MOCK")
     chitchat_mock = os.environ.get("PAPERHUB_CHITCHAT_MOCK")
-    sql_planner_mock = os.environ.get("PAPERHUB_SQL_PLANNER_MOCK")
-    sql_answer_mock = os.environ.get("PAPERHUB_SQL_ANSWER_MOCK")
     memory_op_mock = os.environ.get("PAPERHUB_MEMORY_OP_MOCK")
 
     async def stream_events() -> AsyncIterator[dict[str, Any]]:
@@ -802,19 +800,12 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> EventSourceRespon
                         papers_cache_dir=settings.papers_cache_dir,
                     )
                     sql_chunks: list[str] = []
-                    sql_stream_kwargs: dict[str, Any] = {}
-                    if sql_planner_mock is not None:
-                        sql_stream_kwargs["planner_mock"] = sql_planner_mock
-                    if sql_answer_mock is not None:
-                        sql_stream_kwargs["answer_mock"] = sql_answer_mock
                     async for item in sql_agent_stream(
                         state, adapter=adapter, tracer=tracer, registry=registry,
                         planner_model=settings.sql_agent_model,
-                        answer_model=settings.sql_answer_model,
                         conn=conn,
                         recall_enabled=settings.memory_recall_enabled,
                         emit_tool_steps=True,
-                        **sql_stream_kwargs,
                     ):
                         if isinstance(item, ToolStepYield):
                             # Forward each agent step as it commits so the trace
