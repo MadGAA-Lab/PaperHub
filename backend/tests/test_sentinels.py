@@ -260,6 +260,33 @@ def test_inject_sentinels_allows_inside_itemize() -> None:
     assert sentinel_token(0) in marked
 
 
+def test_inject_sentinels_boxed_in_chunk_is_skipped_no_anchor() -> None:
+    # The fallback-failure edge: a chunk whose start is unsafe AND has no safe
+    # injection point in either direction within its bounds. Here the entire
+    # base is one equation environment — every position is command/brace/math
+    # (the lone safe spot, index n, is excluded since forward search is bounded
+    # by next_start == n, exclusive). The chunk is genuinely boxed in, so it is
+    # skipped (NOT anchored at a wrong/unsafe spot) and no token is emitted.
+    base = r"\begin{equation}E=mc^2\end{equation}"
+    pos = base.index("E")
+    marked, injected = inject_sentinels(base, [pos])
+    assert injected == set()  # skipped — no safe fallback exists
+    assert sentinel_token(0) not in marked
+    assert marked == base  # nothing inserted
+
+
+def test_postprocess_skipped_chunk_yields_no_dom_id() -> None:
+    # End-to-end consequence of the boxed-in skip above: with no token in the
+    # rendered output, postprocess returns no mapping for that ordinal, so the
+    # pipeline assigns dom_id=None and the chunk falls back to runtime
+    # text-search / heading scroll (the frontend degrades gracefully).
+    base = r"\begin{equation}E=mc^2\end{equation}"
+    pos = base.index("E")
+    marked, _injected = inject_sentinels(base, [pos])
+    _new_html, dom_map = postprocess_sentinels(marked)
+    assert dom_map.get(0) is None  # what paper_pipeline assigns to chunk.dom_id
+
+
 def test_inject_sentinels_allows_plain_paragraph() -> None:
     base = "First paragraph.\n\nHERE second paragraph with prose."
     pos = base.index("HERE")
