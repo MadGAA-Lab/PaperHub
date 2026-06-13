@@ -122,6 +122,122 @@ async def test_sql_agent_yields_library_candidates_for_paper_shaped_result(
     assert first_yield < first_token, "candidates must precede the answer stream"
 
 
+class _RaggedRegistry:
+    """``sql.query`` returns a paper-shaped result where one row is short:
+    it has the ``paper_content_id`` cell (index 0) but is shorter than the
+    ``title``/``year`` indices, simulating an LLM-authored SELECT whose row
+    width disagrees with the declared column count."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    async def call(self, name: str, args: dict):
+        self.calls.append((name, args))
+        if name == "sql.list_tables":
+            return ["papers", "paper_content"]
+        if name == "sql.describe":
+            return {"columns": [{"name": "id", "type": "INTEGER"}]}
+        if name == "sql.query":
+            return {
+                "columns": ["paper_content_id", "title", "year"],
+                "rows": [
+                    [10, "Attention Is All You Need", 2017],
+                    [20],  # ragged: missing title/year cells
+                ],
+            }
+        raise AssertionError(name)
+
+
+class _DuplicateRegistry:
+    """``sql.query`` returns rows with a repeated ``paper_content_id`` (a JOIN
+    fan-out, e.g. one row per chunk)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    async def call(self, name: str, args: dict):
+        self.calls.append((name, args))
+        if name == "sql.list_tables":
+            return ["papers", "paper_content"]
+        if name == "sql.describe":
+            return {"columns": [{"name": "id", "type": "INTEGER"}]}
+        if name == "sql.query":
+            return {
+                "columns": ["paper_content_id", "title", "year"],
+                "rows": [
+                    [10, "Attention Is All You Need", 2017],
+                    [10, "Attention Is All You Need", 2017],  # dup pcid
+                    [20, "Diffusion Models", 2020],
+                    [20, "Diffusion Models", 2020],  # dup pcid
+                ],
+            }
+        raise AssertionError(name)
+
+
+@pytest.mark.asyncio
+async def test_sql_agent_ragged_row_does_not_crash_generator(
+    migrated_db: aiosqlite.Connection,
+) -> None:
+    await _seed_papers(migrated_db)
+    tracer = Tracer(migrated_db, run_id=1, branch="")
+    state: AgentState = {
+        "run_id": 1, "session_id": 1,
+        "user_message": "list my papers", "effective_query": "list my papers",
+        "response_language": "English",
+    }
+    items: list = []
+    async for item in sql_agent_stream(
+        state, adapter=LiteLlmAdapter(), tracer=tracer,
+        registry=_RaggedRegistry(),
+        planner_model="gpt-4o-mini", answer_model="gpt-4o-mini",
+        planner_mock="SELECT paper_content_id, title, year FROM paper_content",
+        answer_mock="Here are your papers.\n```sql\nSELECT 1\n```",
+        conn=migrated_db,
+    ):
+        items.append(item)
+
+    # The ragged row must not abort the generator: a SearchResultsYield still
+    # arrives, and the good row is present.
+    yields = [x for x in items if isinstance(x, SearchResultsYield)]
+    assert len(yields) == 1, f"expected one SearchResultsYield, got {len(yields)}"
+    candidates = yields[0].candidates
+    # The good row (pcid 10) is present; the ragged row (pcid 20) is skipped.
+    assert [c.paper_id for c in candidates] == ["library:10"]
+    assert [c.title for c in candidates] == ["Attention Is All You Need"]
+    assert [c.year for c in candidates] == [2017]
+    # The answer stream still flows after the (non-crashing) candidate yield.
+    assert any(isinstance(x, str) for x in items), "answer tokens still stream"
+
+
+@pytest.mark.asyncio
+async def test_sql_agent_dedups_repeated_pcid(
+    migrated_db: aiosqlite.Connection,
+) -> None:
+    await _seed_papers(migrated_db)
+    tracer = Tracer(migrated_db, run_id=1, branch="")
+    state: AgentState = {
+        "run_id": 1, "session_id": 1,
+        "user_message": "list my papers", "effective_query": "list my papers",
+        "response_language": "English",
+    }
+    items: list = []
+    async for item in sql_agent_stream(
+        state, adapter=LiteLlmAdapter(), tracer=tracer,
+        registry=_DuplicateRegistry(),
+        planner_model="gpt-4o-mini", answer_model="gpt-4o-mini",
+        planner_mock="SELECT paper_content_id, title, year FROM paper_content",
+        answer_mock="Here are your papers.\n```sql\nSELECT 1\n```",
+        conn=migrated_db,
+    ):
+        items.append(item)
+
+    yields = [x for x in items if isinstance(x, SearchResultsYield)]
+    assert len(yields) == 1, f"expected one SearchResultsYield, got {len(yields)}"
+    candidates = yields[0].candidates
+    # Each distinct pcid yields at most one candidate (first occurrence wins).
+    assert [c.paper_id for c in candidates] == ["library:10", "library:20"]
+
+
 @pytest.mark.asyncio
 async def test_sql_agent_no_candidates_for_aggregate_result(
     migrated_db: aiosqlite.Connection,

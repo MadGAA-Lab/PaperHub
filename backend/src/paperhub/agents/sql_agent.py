@@ -72,8 +72,8 @@ async def _plan_sql(
 
 
 async def _emit_library_candidates(
-    columns: list[Any],
-    rows: list[Any],
+    columns: list[str],
+    rows: list[list[Any]],
     *,
     conn: aiosqlite.Connection | None,
     session_id: int | None,
@@ -98,18 +98,30 @@ async def _emit_library_candidates(
             in_session = {int(r[0]) for r in await cur.fetchall()}
 
     candidates: list[SearchCandidate] = []
+    seen: set[int] = set()
     for row in rows:
+        # The SELECT is LLM-authored: a row may be shorter than the declared
+        # column count (ragged) and a JOIN fan-out may repeat a pcid. Guard all
+        # cell reads so a bad row degrades gracefully instead of aborting the
+        # generator mid-stream, and dedup so each pcid emits at most one card.
         try:
             pcid = int(row[pcid_idx])
+            title = (
+                str(row[title_idx])
+                if title_idx is not None and row[title_idx] is not None
+                else ""
+            )
+            year: int | None = None
+            if year_idx is not None and row[year_idx] is not None:
+                try:
+                    year = int(row[year_idx])
+                except (TypeError, ValueError):
+                    year = None
         except (TypeError, ValueError, IndexError):
             continue
-        title = str(row[title_idx]) if title_idx is not None and row[title_idx] is not None else ""
-        year: int | None = None
-        if year_idx is not None and row[year_idx] is not None:
-            try:
-                year = int(row[year_idx])
-            except (TypeError, ValueError):
-                year = None
+        if pcid in seen:
+            continue
+        seen.add(pcid)
         candidates.append(
             SearchCandidate(
                 paper_id=f"library:{pcid}",
