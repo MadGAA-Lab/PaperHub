@@ -25,8 +25,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from paperhub.agents._canvas_budget import load_canvas_budget
-from paperhub.agents._layout_examples import load_layout_examples
 from paperhub.agents.sl_format import (
     _format_bundles_block,
     _format_figure_inventory_block,
@@ -233,27 +231,6 @@ def _tool_schemas() -> list[dict[str, Any]]:
     ]
 
 
-def _format_canvas_budget_block() -> str:
-    cb = load_canvas_budget()
-    rows: list[str] = []
-    for layout in cb.layouts:
-        rows.append(
-            f"- {layout.name}: "
-            f"text_region={layout.text_region_cm[0]:.1f}x{layout.text_region_cm[1]:.1f}cm "
-            f"matches_aspect={layout.matches_aspect} "
-            f"hint={layout.text_structure_hint[:80]}"
-        )
-    return "\n".join(rows)
-
-
-def _format_layout_examples_block() -> str:
-    return "\n\n".join(
-        f"### {e.id}\npurpose: {e.purpose}\nwhen: {e.when_to_use}\n"
-        f"matches_aspect: {e.matches_aspect}\nexample:\n```latex\n{e.example}\n```"
-        for e in load_layout_examples()
-    )
-
-
 async def _dispatch_tool_call(
     *,
     name: str,
@@ -409,8 +386,6 @@ async def run_slide_agent(
         bundles_block=_format_bundles_block(bundles),
         n_bundles=len(bundles),
         figure_inventory_block=_format_figure_inventory_block(figure_inventory),
-        canvas_budget_block=_format_canvas_budget_block(),
-        layout_examples_block=_format_layout_examples_block(),
         deck_state_label="EXISTING — diff-edit it",
         existing_deck_block=existing_deck_tex,
     )
