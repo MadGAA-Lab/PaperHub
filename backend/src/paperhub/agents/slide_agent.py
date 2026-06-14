@@ -548,9 +548,15 @@ async def run_slide_agent(
                         script=script,  # type: ignore[arg-type]
                     )
                     pending_compile_check = check
-                    if check.compile_errors or check.unrendered_math_frames:
+                    if (
+                        check.compile_errors
+                        or check.unrendered_math_frames
+                        or check.decorated_blocks
+                    ):
                         # Forced revision round: feed the failures back and keep
-                        # going. Do NOT accept done.
+                        # going. Do NOT accept done. ``decorated_blocks`` are
+                        # block boxes placed INSIDE a two-column layout (they
+                        # overflow the narrow column); a block is fine full-width.
                         messages.append(
                             {
                                 "role": "user",
@@ -558,12 +564,21 @@ async def run_slide_agent(
                                     {
                                         "submit_rejected": True,
                                         "reason": (
-                                            "Fix these before submitting again."
+                                            "Fix these before submitting again. "
+                                            "For decorated_blocks: the block box "
+                                            "is inside a two-column layout — move "
+                                            "it out of the columns (full-width "
+                                            "frame), or drop the box. A block is "
+                                            "fine in a full-width frame."
                                         ),
                                         "compile_errors": check.compile_errors,
                                         "unrendered_math_frames": [
                                             f.model_dump()
                                             for f in check.unrendered_math_frames
+                                        ],
+                                        "decorated_blocks": [
+                                            b.model_dump()
+                                            for b in check.decorated_blocks
                                         ],
                                     },
                                     ensure_ascii=False,

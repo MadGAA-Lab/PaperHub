@@ -1,6 +1,7 @@
 import pytest
 
 from paperhub.agents.slide_agent_compile import (
+    detect_decorated_blocks,
     run_compile_check,
     run_density_check,
 )
@@ -71,6 +72,53 @@ async def test_density_check_no_compile_runs_overflow_only(tmp_path):
     assert len(result.frame_overflow) == 1
     assert result.compile_errors == []
     assert result.page_count == 0   # density_check never runs pdflatex
+
+
+# A block INSIDE a two-column layout (the breaking case) vs a block in a
+# full-width frame (perfectly fine).
+_BLOCK_DECK = r"""\documentclass{beamer}
+\begin{document}
+\begin{frame}{Title}\titlepage\end{frame}
+\begin{frame}{Two column block}
+\begin{columns}
+\begin{column}{0.5\textwidth}
+\begin{block}{Formula}
+\[ E = mc^2 \]
+\end{block}
+\end{column}
+\begin{column}{0.5\textwidth}
+right
+\end{column}
+\end{columns}
+\end{frame}
+\begin{frame}{Full-width block is fine}
+\begin{block}{Definition}
+\[ a^2 + b^2 = c^2 \]
+\end{block}
+\end{frame}
+\end{document}
+"""
+
+
+def test_detect_decorated_blocks_flags_only_block_in_columns() -> None:
+    signals = detect_decorated_blocks(_BLOCK_DECK)
+    # Only the block INSIDE \begin{columns} is flagged; the full-width block is fine.
+    assert len(signals) == 1
+    assert signals[0].frame_index == 1            # 0-based over \begin{frame}
+    assert signals[0].frame_title == "Two column block"
+    assert "block" in signals[0].block_kinds
+
+
+def test_detect_decorated_blocks_clean_deck() -> None:
+    assert detect_decorated_blocks(_GOOD_DECK) == []
+
+
+@pytest.mark.asyncio
+async def test_density_check_surfaces_decorated_blocks() -> None:
+    result = await run_density_check(deck_tex=_BLOCK_DECK, bundles=[_bundle()], script="en")
+    assert len(result.decorated_blocks) == 1
+    assert result.decorated_blocks[0].frame_title == "Two column block"
+    assert result.ok is False  # a block-in-columns deck is not "clean"
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,7 @@ from typing import Literal
 from paperhub.agents._canvas_budget import load_canvas_budget
 from paperhub.models.slide_domain import (
     CompileCheckResult,
+    DecoratedBlockSignal,
     KeyFigureBundle,
     PaperContextBundle,
 )
@@ -32,6 +33,40 @@ Script = Literal["en", "cjk"]
 
 _COMPILE_ERR_RE = re.compile(r"^!\s.+|^l\.\d+\s.+", re.MULTILINE)
 _FRAME_COUNT_RE = re.compile(r"\\begin\{frame\}")
+
+# Decorated-box lint: a beamer ``block`` / ``exampleblock`` / ``alertblock``
+# titled box is FINE in a full-width frame, but INSIDE a two-column
+# (``\begin{columns}``) layout it overflows the narrow column and breaks the
+# slide (live run 569: a block-wrapped equation beside a figure). Only blocks
+# nested in a columns environment are flagged.
+_FRAME_SPAN_RE = re.compile(r"\\begin\{frame\}.*?\\end\{frame\}", re.DOTALL)
+_COLUMNS_SPAN_RE = re.compile(r"\\begin\{columns\}.*?\\end\{columns\}", re.DOTALL)
+_BLOCK_RE = re.compile(r"\\begin\{(block|exampleblock|alertblock)\}")
+_FRAMETITLE_RE = re.compile(r"\\begin\{frame\}\s*(?:\[[^\]]*\])?\s*\{(.*?)\}", re.DOTALL)
+
+
+def _frame_title(frame_tex: str) -> str:
+    m = _FRAMETITLE_RE.search(frame_tex)
+    return (m.group(1).strip() if m else "")[:80]
+
+
+def detect_decorated_blocks(deck_tex: str) -> list[DecoratedBlockSignal]:
+    """Flag frames that put a decorated box INSIDE a two-column layout."""
+    signals: list[DecoratedBlockSignal] = []
+    for idx, m in enumerate(_FRAME_SPAN_RE.finditer(deck_tex)):
+        frame = m.group(0)
+        kinds: set[str] = set()
+        for cols in _COLUMNS_SPAN_RE.finditer(frame):
+            kinds.update(_BLOCK_RE.findall(cols.group(0)))
+        if kinds:
+            signals.append(
+                DecoratedBlockSignal(
+                    frame_index=idx,
+                    frame_title=_frame_title(frame),
+                    block_kinds=sorted(kinds),
+                )
+            )
+    return signals
 
 
 def _parse_compile_errors(log: str) -> list[str]:
@@ -130,6 +165,7 @@ async def run_compile_check(
         compile_errors=compile_errors,
         frame_overflow=frame_overflow,
         unrendered_math_frames=unrendered_math,
+        decorated_blocks=detect_decorated_blocks(deck_tex),
     )
 
 
@@ -157,10 +193,13 @@ async def run_density_check(
         script=script,
     )
     unrendered_math = audit_math_frames(deck_tex=deck_tex, bundles=bundles)
+    decorated_blocks = detect_decorated_blocks(deck_tex)
     # ok is not meaningful here — there's no compile pass — but we set it to
     # True iff the deterministic checks alone pass, for symmetry.
-    ok = len(unrendered_math) == 0 and all(
-        not s.exceeds_canvas_budget for s in frame_overflow
+    ok = (
+        len(unrendered_math) == 0
+        and len(decorated_blocks) == 0
+        and all(not s.exceeds_canvas_budget for s in frame_overflow)
     )
     return CompileCheckResult(
         ok=ok,
@@ -168,4 +207,5 @@ async def run_density_check(
         compile_errors=[],
         frame_overflow=frame_overflow,
         unrendered_math_frames=unrendered_math,
+        decorated_blocks=decorated_blocks,
     )

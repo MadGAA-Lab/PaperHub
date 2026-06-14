@@ -123,6 +123,21 @@ class UnrenderedMathFrame(BaseModel):
     recommendation: str  # human-readable hint for the agent
 
 
+class DecoratedBlockSignal(BaseModel):
+    """A frame that puts a beamer decorated box (``block`` / ``exampleblock`` /
+    ``alertblock``) INSIDE a two-column ``columns`` layout. A block is fine in a
+    full-width frame, but in a narrow column it overflows and breaks the slide
+    (live run 569: a ``\\begin{block}``-wrapped equation beside a figure mangled
+    the 2-column). Detected deterministically and fed back so the revise agent
+    moves the block out of the columns (or drops the box)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    frame_index: int  # 0-based over \begin{frame} occurrences
+    frame_title: str
+    block_kinds: list[str]  # e.g. ["block", "alertblock"]
+
+
 class CompileCheckResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -131,6 +146,9 @@ class CompileCheckResult(BaseModel):
     compile_errors: list[str]
     frame_overflow: list[FrameOverflowSignal]
     unrendered_math_frames: list[UnrenderedMathFrame]
+    # Decorated-box lint: NOT part of ``ok`` (a block-using deck still compiles),
+    # but the revise loop gates ``submit`` on it and feeds it back automatically.
+    decorated_blocks: list[DecoratedBlockSignal] = Field(default_factory=list)
 
 
 # --- F6.1: slide narrative outline (the sl_outline stage) ----------------
