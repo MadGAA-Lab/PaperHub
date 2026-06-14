@@ -256,3 +256,34 @@ describe("TraceInline — step detail", () => {
     expect(rowButton).toHaveAttribute("aria-expanded", "false");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Live heartbeat — a single in-progress phase indicator (step_index < 0),
+// rendered as a humanized stage label + elapsed, NOT a clickable step row.
+// ---------------------------------------------------------------------------
+describe("TraceInline — live heartbeat", () => {
+  const heartbeat: ToolCallRecord = {
+    run_id: 1, branch: "", step_index: -3, parent_step: null,
+    agent: "report", tool: "report:planning", model: "",
+    args_redacted_json: null, result_summary_json: { stage: true, elapsed_s: 30 },
+    latency_ms: 0, token_in: 0, token_out: 0, status: "ok", error: null,
+  };
+
+  it("counts only real steps (not the beat) in the toggle", () => {
+    render(<TraceInline trace={[sampleTrace[0]!, heartbeat]} sessionId={7} runId={1} />);
+    expect(screen.getByRole("button", { name: /1 step/i })).toBeInTheDocument();
+  });
+
+  it("renders the beat as a live stage label with elapsed, not a 0ms step row", async () => {
+    const { container } = render(
+      <TraceInline trace={[sampleTrace[0]!, heartbeat]} sessionId={7} runId={1} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: /1 step/i }));
+    expect(screen.getByText(/Planning…/)).toBeInTheDocument();
+    expect(screen.getByText(/30s/)).toBeInTheDocument();
+    expect(container.querySelector('[data-stage="live"]')).not.toBeNull();
+    // The beat is NOT a 0ms clickable step row, and shows no raw tool id / JSON.
+    expect(screen.queryByText(/0ms/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/report:planning/)).not.toBeInTheDocument();
+  });
+});

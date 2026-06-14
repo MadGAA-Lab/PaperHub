@@ -230,10 +230,33 @@ export const useChatStore = create<ChatState>()(
             (m) => m.run_id === run_id && m.role === "assistant",
           );
           if (!msg) return s;
+          const prev = msg.trace ?? [];
+          // Two kinds of tool_step arrive on the wire:
+          //  • REAL steps (step_index >= 0) — persisted tool_calls rows. Each
+          //    graph node's flush re-drains from -1 with its own dedup set, so
+          //    an earlier node's steps (e.g. router#0) get re-emitted by a later
+          //    node. Dedup by step_index so a re-emit replaces, never stacks.
+          //  • HEARTBEATS (step_index < 0) — synthetic, live-only stage beats
+          //    emitted every ~15s during a silent phase. Collapse to a SINGLE
+          //    live marker (the latest) instead of one row per beat.
+          const realSteps = prev.filter((r) => r.step_index >= 0);
+          const liveBeat = prev.filter((r) => r.step_index < 0);
+          let trace: ToolCallRecord[];
+          if (record.step_index < 0) {
+            // Newest beat supersedes any prior beat; keep it after the steps.
+            trace = [...realSteps, record];
+          } else {
+            const deduped = realSteps.filter(
+              (r) => r.step_index !== record.step_index,
+            );
+            deduped.push(record);
+            deduped.sort((a, b) => a.step_index - b.step_index);
+            // Preserve the current live beat at the tail (it shows the phase in
+            // progress); a newer beat will replace it.
+            trace = [...deduped, ...liveBeat];
+          }
           return {
-            sessions: patchMessageByRunId(s.sessions, sessionId, run_id, {
-              trace: [...(msg.trace ?? []), record],
-            }),
+            sessions: patchMessageByRunId(s.sessions, sessionId, run_id, { trace }),
           };
         }),
 
@@ -243,20 +266,36 @@ export const useChatStore = create<ChatState>()(
         })),
 
       finaliseMessage: (sessionId, run_id, content) =>
-        set((s) => ({
-          sessions: patchMessageByRunId(s.sessions, sessionId, run_id, {
-            content,
-            status: "ok",
-          }),
-        })),
+        set((s) => {
+          // Drop the live heartbeat beat — the turn is done, nothing is "in
+          // progress" anymore (the real steps remain).
+          const msg = s.sessions
+            .find((x) => x.id === sessionId)
+            ?.messages.find((m) => m.run_id === run_id && m.role === "assistant");
+          const trace = (msg?.trace ?? []).filter((r) => r.step_index >= 0);
+          return {
+            sessions: patchMessageByRunId(s.sessions, sessionId, run_id, {
+              content,
+              status: "ok",
+              trace,
+            }),
+          };
+        }),
 
       errorMessage: (sessionId, run_id, error) =>
-        set((s) => ({
-          sessions: patchMessageByRunId(s.sessions, sessionId, run_id, {
-            status: "error",
-            error,
-          }),
-        })),
+        set((s) => {
+          const msg = s.sessions
+            .find((x) => x.id === sessionId)
+            ?.messages.find((m) => m.run_id === run_id && m.role === "assistant");
+          const trace = (msg?.trace ?? []).filter((r) => r.step_index >= 0);
+          return {
+            sessions: patchMessageByRunId(s.sessions, sessionId, run_id, {
+              status: "error",
+              error,
+              trace,
+            }),
+          };
+        }),
 
       failPendingAssistant: (sessionId, error) =>
         set((s) => ({

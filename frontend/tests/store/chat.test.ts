@@ -156,4 +156,62 @@ describe("chat store", () => {
     expect(session.messages[0]!.content).toBe("msg 0");
     expect(session.messages[1]!.content).toBe("msg 2");
   });
+
+  // -------------------------------------------------------------------------
+  // appendTrace — dedup real steps; collapse + strip live heartbeats
+  // -------------------------------------------------------------------------
+  const rec = (
+    step_index: number,
+    tool: string,
+    result: Record<string, unknown> | null = null,
+  ) => ({
+    run_id: 1, branch: "" as const, step_index, parent_step: null,
+    agent: "report", tool, model: null,
+    args_redacted_json: null, result_summary_json: result,
+    latency_ms: 0, token_in: null, token_out: null,
+    status: "ok" as const, error: null,
+  });
+
+  const seedAssistant = (): number => {
+    const id = useChatStore.getState().newSession();
+    useChatStore.getState().appendMessage(id, {
+      role: "assistant", content: "", run_id: 1, status: "streaming",
+    });
+    return id;
+  };
+
+  const traceOf = (id: number) =>
+    useChatStore.getState().sessions.find((s) => s.id === id)!
+      .messages.find((m) => m.run_id === 1)!.trace ?? [];
+
+  it("appendTrace dedups a re-emitted real step by step_index", () => {
+    const id = seedAssistant();
+    useChatStore.getState().appendTrace(id, 1, rec(0, "classify"));
+    useChatStore.getState().appendTrace(id, 1, rec(1, "detect_language"));
+    // The report graph's per-node flush re-emits step 0 — must NOT stack.
+    useChatStore.getState().appendTrace(id, 1, rec(0, "classify"));
+    const reals = traceOf(id).filter((r) => r.step_index >= 0);
+    expect(reals.map((r) => r.step_index)).toEqual([0, 1]);
+  });
+
+  it("appendTrace collapses heartbeat beats into a single live marker", () => {
+    const id = seedAssistant();
+    useChatStore.getState().appendTrace(id, 1, rec(-1, "report:planning", { stage: true, elapsed_s: 0 }));
+    useChatStore.getState().appendTrace(id, 1, rec(-2, "report:planning", { stage: true, elapsed_s: 15 }));
+    useChatStore.getState().appendTrace(id, 1, rec(-3, "report:planning", { stage: true, elapsed_s: 30 }));
+    const beats = traceOf(id).filter((r) => r.step_index < 0);
+    expect(beats).toHaveLength(1);
+    expect(beats[0]!.result_summary_json!.elapsed_s).toBe(30); // latest beat wins
+  });
+
+  it("appendTrace keeps the live beat after a real step; finalize strips it", () => {
+    const id = seedAssistant();
+    useChatStore.getState().appendTrace(id, 1, rec(0, "classify"));
+    useChatStore.getState().appendTrace(id, 1, rec(-1, "report:planning", { stage: true, elapsed_s: 0 }));
+    expect(traceOf(id).filter((r) => r.step_index < 0)).toHaveLength(1);
+    useChatStore.getState().finaliseMessage(id, 1, "done");
+    const after = traceOf(id);
+    expect(after.filter((r) => r.step_index < 0)).toHaveLength(0); // beat stripped
+    expect(after.filter((r) => r.step_index >= 0)).toHaveLength(1); // step kept
+  });
 });
