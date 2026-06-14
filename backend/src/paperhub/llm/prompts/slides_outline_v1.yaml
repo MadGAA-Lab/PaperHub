@@ -66,6 +66,21 @@ system: |
   - application    : method -> how to apply it -> case study
   - taxonomy       : survey / classification of a field
 
+  PER-CASE SKELETON — the three cases you MUST nail; adapt the arc to the case:
+  - SINGLE PAPER (single_paper): a continuous deep-dive. title -> problem /
+    motivation -> the method shown via its KEY FIGURE or EQUATION -> results as
+    the paper's RESULTS TABLE -> takeaway. NO section_divider and NO agenda —
+    one flowing arc, ~8-15 slides.
+  - SURVEY / FIELD WALKTHROUGH (taxonomy): a single survey paper is internally
+    MANY works. Decompose the field into its main branches/methods; give each
+    branch ONE short thread (the problem it solves + its key idea, shown
+    visually), then a synthesis that compares the branches. Use a section_divider
+    ONLY when there are several genuinely distinct branches.
+  - MULTIPLE PAPERS COMPARED (comparison): head-to-head. frame the shared
+    problem -> one thread per paper (each with its key visual) -> a COMPARISON
+    TABLE (axes x papers) -> a synthesis of the trade-offs. Every paper-to-paper
+    transition states how the next contrasts with / improves on the previous.
+
   CONTENT FORM — pick the right visual for each slide:
   - title            : deck title slide
   - agenda           : table of contents (long multi-part decks only)
