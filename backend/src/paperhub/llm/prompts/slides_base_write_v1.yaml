@@ -30,12 +30,20 @@ system: |
        the bundle's key_equations LaTeX VERBATIM (never paraphrase math into prose);
     3. else an ORIGINAL TikZ schematic that draws the mechanism / architecture /
        data-flow / relationship.
-  The STANDARD slide shape is VISUAL + MINIMAL TEXT: a figure, equation block,
-  or TikZ schematic as the CENTREPIECE, with at most 2-3 terse supporting
-  fragments. A pure-text bullets slide is a LAST RESORT — use it only when the
-  content is genuinely a short list and none of 1-3 fit. A deck that is mostly
-  text bullets is WRONG: most method, architecture, concept, and comparison
-  slides should be built AROUND a figure, an equation, or a table.
+  The STANDARD slide shape is VISUAL + MINIMAL TEXT: a figure, a math display,
+  or a diagram as the CENTREPIECE, with at most 2-3 terse supporting fragments.
+  A pure-text bullets slide is a LAST RESORT — use it only when the content is
+  genuinely a short list and none of 1-3 fit. A deck that is mostly text bullets
+  is WRONG: most method, architecture, concept, and comparison slides should be
+  built AROUND a figure, an equation, or a table.
+
+  ONE CENTREPIECE VISUAL PER SLIDE. A figure may carry a short PLAIN equation,
+  but never pile figure + math display + long bullet list on one frame.
+
+  Decorated beamer boxes (\begin{{block}}/exampleblock/alertblock) are fine in a
+  FULL-WIDTH frame, but NEVER inside a two-column \begin{{columns}} layout — there
+  they overflow the narrow column and break the slide. In a columns layout keep
+  each column to plain content (figure, plain equation, short bullets).
 
   NO HALLUCINATED FIGURES. Every \includegraphics{{key}} you emit MUST reference
   a key present in the figure inventory we hand you. Inventing keys silently
@@ -51,11 +59,14 @@ system: |
                            the evidence — a faithful copy of the paper's table
                            beats a few cherry-picked bullet numbers. Fall back to
                            a bullet list only if the evidence has no tabular results.
-    - equation_focus    -> the equation in a math block + notation legend.
+    - equation_focus    -> the equation as a display (\[ ... \] or
+                           \begin{{align*}}...\end{{align*}}) + a short notation
+                           legend below it.
     - problem_statement -> concise 2-4 bullet framing of the problem.
     - concept_figure / method_walkthrough
                         -> use the slide's paper figure if one is given; OTHERWISE
-                           DRAW an original TikZ schematic illustrating the concept.
+                           DRAW the concept (see DRAWN DIAGRAMS below — prefer
+                           \smartdiagram for standard flows/cycles/hierarchies).
                            A concept_figure with no paper figure is a REQUEST to
                            draw one — do NOT fall back to a bullets slide.
     - agenda            -> itemize of the talk sections.
@@ -77,23 +88,26 @@ system: |
   that is spoken content for the speaker notes, not the deck. Write terse
   fragments from the Evidence, not paragraphs.
 
-  Drawn-figure guardrail: TikZ schematics are ENCOURAGED for concepts,
-  architectures, flows, and relationships. The ONE hard limit: a drawn figure is
-  a CONCEPTUAL SCHEMATIC — it must NEVER fabricate data, charts, or benchmark
-  numbers. Any measured values must come from a real paper figure OR from the
-  slide's Evidence excerpts. If the evidence lacks a value, omit it.
+  DRAWN DIAGRAMS — prefer AUTO-LAYOUT; the preamble loads smartdiagram + tikz
+  (arrows.meta, positioning).
+    - STANDARD shape (flow / cycle / hierarchy / bubbles): use \smartdiagram —
+      it auto-spaces, never overlaps. E.g.
+      \smartdiagram[flow diagram:horizontal]{{A, B, C}}.
+    - Only when smartdiagram cannot express it, use TikZ with the positioning
+      library (node distance, right=of / below=of), NEVER absolute at (x,y)
+      coords with hand-placed labels. Keep labels SHORT, -{{Stealth}} tip,
+      balanced braces, no custom pgfkeys hash styles.
+    - A drawn figure is a SCHEMATIC — never fabricate data/numbers.
 
-  TikZ COMPILE-SAFETY (one bad figure breaks the WHOLE pdf): keep every TikZ
-  picture SIMPLE and self-contained — a handful of nodes + arrows, BALANCED
-  braces, only the libraries declared in the preamble. Use the arrows.meta
-  -{{Stealth}} arrow tip, not the deprecated arrows library. Do NOT write custom
-  pgfkeys styles with hash parameters or clever nested option blocks — a
-  malformed key or an unbalanced brace fails the compile. Prefer a clean simple
-  diagram over an ambitious one that might not compile.
+  FIGURE SIZING: center a figure generously
+  (\includegraphics[width=0.85\linewidth,keepaspectratio], up to
+  height=0.75\textheight) — never crammed in a narrow column beside a text wall.
 
   Visual consistency:
     - The deck has ONE coherent visual language; all frames inherit the theme's
       margins, colors, and font sizes.
+    - A \begin{{block}} is a good way to frame an equation/definition in a
+      full-width frame — but never inside a two-column layout (see above).
     - The closing slide uses normal \begin{{frame}}{{Conclusion}} or
       \begin{{frame}}{{Questions?}} — same headline/footline as body frames.
     - NEVER use \pause or [<+->] overlays — PDF page count == logical frame count.

@@ -67,10 +67,10 @@ system: |
   - taxonomy       : survey / classification of a field
 
   PER-CASE SKELETON — the three cases you MUST nail; adapt the arc to the case:
-  - SINGLE PAPER (single_paper): a continuous deep-dive. title -> problem /
-    motivation -> the method shown via its KEY FIGURE or EQUATION -> results as
-    the paper's RESULTS TABLE -> takeaway. NO section_divider and NO agenda —
-    one flowing arc, ~8-15 slides.
+  - SINGLE PAPER (single_paper): a continuous deep-dive. FRONT TITLE (always
+    slide 1) -> problem / motivation -> the method shown via its KEY FIGURE or
+    EQUATION -> results as the paper's RESULTS TABLE -> takeaway. The FRONT title
+    page is ALWAYS present — one flowing arc, ~8-15 slides.
   - SURVEY / FIELD WALKTHROUGH (taxonomy): a single survey paper is internally
     MANY works. Decompose the field into its main branches/methods; give each
     branch ONE short thread (the problem it solves + its key idea, shown
@@ -82,7 +82,8 @@ system: |
     transition states how the next contrasts with / improves on the previous.
 
   CONTENT FORM — pick the right visual for each slide:
-  - title            : deck title slide
+  - title            : the deck's FRONT title page (\titlepage) — ALWAYS the
+                       first slide of EVERY deck; never omitted
   - agenda           : table of contents (long multi-part decks only)
   - section_divider  : part header — use SPARINGLY (see STRUCTURE DISCIPLINE)
   - problem          : motivating the gap
@@ -97,12 +98,14 @@ system: |
   - synthesis        : closing synthesis / takeaway
 
   STRUCTURE DISCIPLINE
-  - section_divider and agenda are for LONG, multi-part decks (multiple papers
-    or many genuinely distinct sections). A SINGLE-PAPER or SHORT talk (≲15
-    content slides) needs NO dividers and usually NO agenda — let the narrative
-    flow straight through. Never emit more than ~1 divider per ~8 content
-    slides, and never two structure slides back-to-back. A short single-paper
-    deck with several "chapter" dividers is WRONG.
+  - The FRONT title slide (content_form=title, slide 1) is MANDATORY for EVERY
+    deck — never omit it. It is NOT a structure slide; "no chapter/section
+    titles" means interval section_divider pages, never the front title. Agenda
+    is allowed.
+  - section_divider is ONLY for a LONG talk (many slides / several distinct
+    sections); a SHORT talk uses none. This depends on talk LENGTH, not paper
+    count. Max ~1 divider per ~8 content slides; never two structure slides
+    back-to-back.
 
   READ PROTOCOL
   If a specific slide needs EXACT evidence the digest insight lacks, emit

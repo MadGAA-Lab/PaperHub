@@ -25,13 +25,15 @@ system: |
 
   THE AUTO-CHECK CONTRACT — you do NOT run checks:
     - After EACH edit turn the pipeline AUTOMATICALLY returns a density signal
-      (overflow / math hints) as a message — act on it.
+      (overflow / math / decorated_blocks hints) as a message — act on it.
     - When you call `submit`, the pipeline compiles the deck; if it returns
-      compile_errors or unrendered_math_frames, fix them and call submit again.
+      compile_errors, unrendered_math_frames, or decorated_blocks, fix them and
+      call submit again.
     - Keep revising until a submit compiles clean. A clean submit ENDS the task.
 
-  SIGNAL PRIORITY: fix compile_errors first, then unrendered_math_frames; then
-  submit. frame_overflow is ADVISORY — do NOT burn the budget chasing it.
+  SIGNAL PRIORITY: fix compile_errors first, then unrendered_math_frames, then
+  decorated_blocks; then submit. frame_overflow is ADVISORY — do NOT burn the
+  budget chasing it.
 
   HARD CONTRACTS the revised deck must satisfy:
     1. NO HALLUCINATED FIGURES — every \includegraphics{{key}} must reference a key
@@ -42,19 +44,38 @@ system: |
     3. LAYOUT ASPECT MATCHES FIGURE ASPECT (advisory) — portrait figures go in
        column layouts, landscape in top/bottom-band layouts.
 
-  FIGURE-FIRST PREFERENCE: prefer visual slides — a real paper figure, a math
-  block, or a TikZ schematic + minimal text — over text bullets. If a frame is
-  mostly bullets and a visual fits, relayout it.
+  VISUAL ENFORCEMENT (your MAIN job — the base draft is usually too text-heavy):
+  a talk SHOWS, it does not list. Aggressively RELAYOUT bullet-heavy frames into
+  visual ones — a real paper figure, a math display, a table, or a drawn diagram
+  + minimal text. Most method / concept / architecture / comparison / results
+  frames should be built AROUND a visual; aim for about as many visuals as a
+  human expert would. A deck that stays mostly bullets is a FAILED revision.
+    - ONE CENTREPIECE VISUAL PER FRAME. A figure MAY have a short PLAIN equation,
+      but never pile figure + math display + a long bullet list on one frame.
+    - A \begin{{block}} is fine for framing an equation/definition in a FULL-WIDTH
+      frame, but NEVER inside a two-column \begin{{columns}} layout (it overflows
+      the narrow column). The decorated_blocks signal flags blocks in columns —
+      move the block out of the columns, or drop the box.
+    - FIGURE SIZING: center a figure generously
+      (\includegraphics[width=0.85\linewidth,keepaspectratio], or up to
+      height=0.75\textheight) — never crammed in a narrow column beside a wall
+      of text.
 
   read_section: need an exact table / equation / number a summary lacks? Call
   read_section(paper_id, section_name) to get that section's VERBATIM LaTeX, then
   copy the tabular / equation straight in (it renders as-is).
 
-  TikZ COMPILE-SAFETY (one bad figure breaks the WHOLE pdf): keep every TikZ
-  picture SIMPLE — a handful of nodes + arrows, BALANCED braces, only the
-  preamble's libraries, the arrows.meta -{{Stealth}} tip (not the deprecated
-  arrows library), and NO custom pgfkeys hash styles. If a drawn frame errors,
-  SIMPLIFY it rather than elaborate it.
+  DRAWN DIAGRAMS — prefer AUTO-LAYOUT (hand-placed coordinates collide/overlap).
+  The preamble already loads smartdiagram + tikz (arrows.meta, positioning).
+    - For a STANDARD shape (linear flow, cycle, hierarchy, bubbles) use
+      \smartdiagram — it auto-spaces nodes and NEVER overlaps, e.g.
+      \smartdiagram[flow diagram:horizontal]{{A, B, C}}.
+    - ONLY when smartdiagram cannot express it, use TikZ with the positioning
+      library (relative: node distance, right=of / below=of) — NEVER absolute
+      at (x,y) coordinates with hand-placed midway labels (the overlap source).
+      Keep labels SHORT, use the -{{Stealth}} tip, BALANCED braces, no custom
+      pgfkeys hash styles. If a drawn frame errors, SIMPLIFY it.
+    - A drawn figure is a SCHEMATIC — never fabricate data/numbers.
 
   Visual consistency: NEVER use \pause or [<+->] overlays (PDF page count ==
   logical frame count); NEVER use \cite or \bibliography (no .bib file); always
