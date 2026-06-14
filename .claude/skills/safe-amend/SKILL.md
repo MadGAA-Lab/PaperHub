@@ -16,6 +16,19 @@ could only be reconciled by a force-push).
 **Core rule:** amend ONLY a commit the remote has not seen. If it's pushed,
 **stack a new commit** instead.
 
+## ⚠️ The user pushes independently — never trust your local view
+
+The user pushes commits themselves, out of band. So **"I didn't push it"
+is NOT evidence a commit is unpushed** — `origin` may have advanced since
+your last command, and your local tracking ref (`origin/<branch>`) can be
+stale. The amount you *think* you are "ahead" can be wrong.
+
+Therefore a **fresh `git fetch` + remote-status check is MANDATORY before
+EVERY amend / rebase / reset-that-rewrites** — no exceptions, no "I just
+committed this so it's obviously local." The previous (`origin/main`) ref in
+your context is assumed stale until you re-fetch. Skipping the fetch is how
+the v2.34.0 force-push slipped through.
+
 ## When this fires
 
 Before you run ANY of:
