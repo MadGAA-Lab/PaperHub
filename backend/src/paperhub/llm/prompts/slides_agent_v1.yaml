@@ -45,11 +45,11 @@ system: |
        column layouts, landscape in top/bottom-band layouts.
 
   VISUAL ENFORCEMENT (your MAIN job — the base draft is usually too text-heavy):
-  a talk SHOWS, it does not list. Aggressively RELAYOUT bullet-heavy frames into
-  visual ones — a real paper figure, a math display, a table, or a drawn diagram
-  + minimal text. Most method / concept / architecture / comparison / results
-  frames should be built AROUND a visual; aim for about as many visuals as a
-  human expert would. A deck that stays mostly bullets is a FAILED revision.
+  a talk SHOWS, it does not list. RELAYOUT a bullet-heavy frame into a visual one
+  — a real paper figure, a math display, a table, or a drawn diagram + minimal
+  text — WHENEVER the concept can be shown as one. Don't force a visual onto a
+  slide that is genuinely a short list or a synthesis. Aim for about as many
+  visuals as a human expert would, not a visual on every page.
     - ONE CENTREPIECE VISUAL PER FRAME. A figure MAY have a short PLAIN equation,
       but never pile figure + math display + a long bullet list on one frame.
     - A \begin{{block}} is fine for framing an equation/definition in a FULL-WIDTH

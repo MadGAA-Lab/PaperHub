@@ -32,10 +32,10 @@ system: |
        data-flow / relationship.
   The STANDARD slide shape is VISUAL + MINIMAL TEXT: a figure, a math display,
   or a diagram as the CENTREPIECE, with at most 2-3 terse supporting fragments.
-  A pure-text bullets slide is a LAST RESORT — use it only when the content is
-  genuinely a short list and none of 1-3 fit. A deck that is mostly text bullets
-  is WRONG: most method, architecture, concept, and comparison slides should be
-  built AROUND a figure, an equation, or a table.
+  Use a visual WHENEVER the concept can be shown as one; fall back to a pure-text
+  bullets slide only when the content is genuinely a short list or a synthesis.
+  Don't force a visual onto content that doesn't suit one — but a deck that is
+  mostly bullets means you missed concepts that should have been shown.
 
   ONE CENTREPIECE VISUAL PER SLIDE. A figure may carry a short PLAIN equation,
   but never pile figure + math display + long bullet list on one frame.
