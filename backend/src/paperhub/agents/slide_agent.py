@@ -661,13 +661,42 @@ async def run_slide_agent(
                             ],
                         }
                     )
+                    # Feed back ONLY the BLOCKING lints — never advisory
+                    # frame_overflow. The agent chases any overflow it is handed
+                    # ("tighten") even though it is advisory; on a content-dense
+                    # deck the overflow never clears, so the agent tightens
+                    # forever and never submits (live run 579 hit the 30-call cap
+                    # without one submit). Blocking lints DO clear, so the loop
+                    # converges; when none remain, nudge the agent to submit.
+                    blocking = {
+                        "unrendered_math_frames": [
+                            f.model_dump() for f in density.unrendered_math_frames
+                        ],
+                        "decorated_blocks": [
+                            b.model_dump() for b in density.decorated_blocks
+                        ],
+                        "long_diagram_nodes": [
+                            n.model_dump() for n in density.long_diagram_nodes
+                        ],
+                        "bare_visuals": [b.model_dump() for b in density.bare_visuals],
+                    }
+                    if any(blocking.values()):
+                        note = (
+                            "Fix these blocking issues, then call submit. "
+                            "(frame_overflow is advisory and intentionally "
+                            "omitted — do NOT keep tightening for it.)"
+                        )
+                    else:
+                        note = (
+                            "No blocking issues. If the content is complete, "
+                            "call submit now — do NOT keep tightening for "
+                            "frame overflow (it is advisory)."
+                        )
                     messages.append(
                         {
                             "role": "user",
                             "content": json.dumps(
-                                {
-                                    "density_feedback": density.model_dump(),
-                                },
+                                {"density_feedback": blocking, "note": note},
                                 ensure_ascii=False,
                             ),
                         }
