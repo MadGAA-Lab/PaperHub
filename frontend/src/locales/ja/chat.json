@@ -27,7 +27,7 @@
     "tooltip": "論文を添付 — PDFをアップロードまたはarXiv IDを貼り付け",
     "tabPdf": "PDFをアップロード",
     "tabArxiv": "arXiv IDを貼り付け",
-    "needSession": "セッションを作成するには、まずメッセージを送信してください。",
+    "needSession": "論文を添付するにはチャットを開始してください。",
     "pdfHint": "PDFファイル（≤ 30 MiB）",
     "pdfFileAria": "PDFファイル",
     "arxivHint": "arXiv IDまたはURL",

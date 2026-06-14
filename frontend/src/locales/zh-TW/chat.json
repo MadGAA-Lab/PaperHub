@@ -27,7 +27,7 @@
     "tooltip": "附加論文 — 上傳 PDF 或貼上 arXiv ID",
     "tabPdf": "上傳 PDF",
     "tabArxiv": "貼上 arXiv ID",
-    "needSession": "請先傳送訊息以建立工作階段。",
+    "needSession": "開始一個對話以附加論文。",
     "pdfHint": "PDF 檔案（≤ 30 MiB）",
     "pdfFileAria": "PDF 檔案",
     "arxivHint": "arXiv ID 或網址",

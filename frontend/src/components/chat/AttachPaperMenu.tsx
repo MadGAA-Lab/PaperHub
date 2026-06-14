@@ -57,10 +57,14 @@ export function AttachPaperMenu() {
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const sessions = useChatStore((s) => s.sessions);
   const appendReferenceLocal = useChatStore((s) => s.appendReferenceLocal);
+  const ensureBackendSession = useChatStore((s) => s.ensureBackendSession);
 
   const activeSession = sessions.find((s) => s.id === activeSessionId) ?? null;
-  const backendSessionId = activeSession?.backend_session_id ?? null;
-  const hasBackendSession = backendSessionId !== null;
+  // Gate on the *active session* existing, NOT on a backend row existing: a
+  // brand-new (unsent) session has no backend_session_id yet, but attaching a
+  // paper must still work — the handlers lazy-create the backend session,
+  // mirroring ReferenceSourcesPanel's "Add from library" path.
+  const hasActiveSession = activeSession !== null;
 
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -81,12 +85,14 @@ export function AttachPaperMenu() {
   async function handlePdfChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
-    // Snapshot the active session at the start. If it changes before the
-    // upload resolves, discard the result so we don't poison the wrong bucket.
-    const startedAt = currentBackendSessionId();
-    if (startedAt === null) return;
+    const activeId = useChatStore.getState().activeSessionId;
+    if (activeId === null) return;
     setBusy(true);
     try {
+      // Lazy-create the backend session so the FIRST attach in a fresh chat
+      // works (no message required). After this, the active session carries
+      // `startedAt`; a mid-flight session switch is still caught below.
+      const startedAt = await ensureBackendSession(activeId);
       const result = await uploadPdf(startedAt, file);
       if (currentBackendSessionId() !== startedAt) {
         toast.info(t("toast.sessionChanged"));
@@ -115,12 +121,13 @@ export function AttachPaperMenu() {
       setArxivError(t("attach.invalidArxiv"));
       return;
     }
-    // Snapshot the active session at the start. If it changes before the
-    // request resolves, discard the result.
-    const startedAt = currentBackendSessionId();
-    if (startedAt === null) return;
+    const activeId = useChatStore.getState().activeSessionId;
+    if (activeId === null) return;
     setBusy(true);
     try {
+      // Lazy-create the backend session (see handlePdfChange) so importing a
+      // paper works as the very first action in a new chat.
+      const startedAt = await ensureBackendSession(activeId);
       const result = await ingestPaper(startedAt, canonical);
       if (currentBackendSessionId() !== startedAt) {
         toast.info(t("toast.sessionChanged"));
@@ -180,7 +187,7 @@ export function AttachPaperMenu() {
             <TabsTrigger value="arxiv">{t("attach.tabArxiv")}</TabsTrigger>
           </TabsList>
 
-          {!hasBackendSession && (
+          {!hasActiveSession && (
             <p className="mt-2 text-xs text-muted-foreground">
               {t("attach.needSession")}
             </p>
@@ -196,7 +203,7 @@ export function AttachPaperMenu() {
                 type="file"
                 accept="application/pdf"
                 onChange={(e) => void handlePdfChange(e)}
-                disabled={busy || !hasBackendSession}
+                disabled={busy || !hasActiveSession}
                 aria-label={t("attach.pdfFileAria")}
                 className="block w-full text-xs file:mr-2 file:rounded-md file:border file:border-input file:bg-background file:px-2 file:py-1 file:text-xs file:font-medium hover:file:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
               />
@@ -217,7 +224,7 @@ export function AttachPaperMenu() {
                     if (arxivError) setArxivError(null);
                   }}
                   placeholder={t("attach.arxivPlaceholder")}
-                  disabled={busy || !hasBackendSession}
+                  disabled={busy || !hasActiveSession}
                   aria-label={t("attach.arxivInputAria")}
                   aria-invalid={arxivError !== null}
                 />
@@ -234,7 +241,7 @@ export function AttachPaperMenu() {
                 <Button
                   type="button"
                   size="sm"
-                  disabled={busy || !hasBackendSession || arxivInput.trim() === ""}
+                  disabled={busy || !hasActiveSession || arxivInput.trim() === ""}
                   onClick={() => void handleArxivSubmit()}
                 >
                   {t("attach.import")}

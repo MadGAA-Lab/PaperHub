@@ -27,7 +27,7 @@
     "tooltip": "Attach paper — upload PDF or paste arXiv ID",
     "tabPdf": "Upload PDF",
     "tabArxiv": "Paste arXiv ID",
-    "needSession": "Send a message first to create a session.",
+    "needSession": "Start a chat to attach papers.",
     "pdfHint": "PDF file (≤ 30 MiB)",
     "pdfFileAria": "PDF file",
     "arxivHint": "arXiv ID or URL",
