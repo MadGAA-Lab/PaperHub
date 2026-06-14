@@ -46,6 +46,13 @@ class Settings:
     # Memory-add conflict detector (small tier; classifier-shaped).
     memory_conflict_model: str
 
+    # Per-call LLM request timeout (seconds). Bounds EVERY litellm completion so
+    # a slow/unavailable provider can't ride the litellm default (~600 s) ×
+    # retries and hang a turn. The adapter uses it to fail the primary (flagship)
+    # call FAST and downgrade to the small tier; also set as litellm.request_timeout
+    # at boot as a backstop.
+    llm_timeout_s: float
+
     # ── 6. Agent tunables ───────────────────────────────────────────────
     # Maximum number of read_section() calls the subagent makes per paper
     # turn before the loop is force-stopped.
@@ -135,6 +142,19 @@ def flagship_tier_model() -> str:
     return os.environ.get("PAPERHUB_MODEL_FLAGSHIP") or _FLAGSHIP_TIER_DEFAULT
 
 
+def llm_timeout_s() -> float:
+    """Per-call LLM timeout in seconds (``PAPERHUB_LLM_TIMEOUT``, default 120).
+
+    Bounds every litellm completion so an unavailable flagship can't ride the
+    litellm default (~600 s) × retries. The adapter also uses this to fail the
+    primary (flagship) call FAST so it can downgrade to the small tier promptly.
+    A non-numeric value falls back to the 120 s default rather than crashing boot."""
+    try:
+        return float(os.environ.get("PAPERHUB_LLM_TIMEOUT", "120"))
+    except ValueError:
+        return 120.0
+
+
 def load_settings() -> Settings:
     workspace = Path(os.environ.get("PAPERHUB_WORKSPACE", "./workspace")).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
@@ -160,6 +180,7 @@ def load_settings() -> Settings:
         memory_conflict_model=os.environ.get(
             "PAPERHUB_MEMORY_CONFLICT_MODEL", small,
         ),
+        llm_timeout_s=llm_timeout_s(),
 
         # 6. Agent tunables.
         paper_qa_max_section_reads=int(

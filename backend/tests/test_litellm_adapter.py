@@ -1,15 +1,23 @@
+import json
 from typing import Any
 
+import aiosqlite
 import litellm
 import pytest
 
+from paperhub.db.migrate import apply_schema
 from paperhub.llm.adapter import LlmAdapter
 from paperhub.llm.litellm_adapter import (
     LiteLlmAdapter,
     _extract_json_object,
+    _should_downgrade,
 )
 from paperhub.llm.prompts.registry import PromptRegistry
 from paperhub.models.domain import RoutingDecision
+from paperhub.tracing.tracer import Tracer
+
+_ROUTER_VARS = {"user_message": "find papers on MoE", "enabled_refs_count": 0,
+                "slide_attached": False}
 
 _VALID_DECISION = (
     '{"intent":"paper_search","model_tier":"small",'
@@ -209,6 +217,187 @@ def test_extract_json_object_strips_fences_and_prose() -> None:
     assert _extract_json_object('```json\n{"a":1}\n```') == '{"a":1}'
     assert _extract_json_object('```\n{"a":1}\n```') == '{"a":1}'
     assert _extract_json_object('Here you go: {"a":1} done.') == '{"a":1}'
+
+
+# ---------------------------------------------------------------------------
+# Model fallback: flagship-first, downgrade-on-unavailable, raise if both fail
+# ---------------------------------------------------------------------------
+
+def _timeout(model: str) -> litellm.Timeout:
+    return litellm.Timeout(message="timed out", model=model, llm_provider="gemini")
+
+
+async def test_structured_downgrades_to_small_when_flagship_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flagship availability failure (timeout) downgrades to the small tier
+    for this call; the flagship is tried FIRST, then the fallback."""
+    calls: list[str] = []
+
+    async def fake(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs["model"])
+        if kwargs["model"] == "flagship/x":
+            raise _timeout("flagship/x")
+        return {"choices": [{"message": {"content": _VALID_DECISION}}]}
+
+    monkeypatch.setattr(litellm, "supports_response_schema", lambda model: False)
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    adapter = LiteLlmAdapter(fallback_model="small/y")
+    decision = await adapter.structured(
+        slot="router/v1", variables=_ROUTER_VARS,
+        response_model=RoutingDecision, model="flagship/x",
+    )
+    assert decision.intent == "paper_search"
+    assert calls == ["flagship/x", "small/y"]  # flagship first, then downgrade
+
+
+async def test_structured_raises_when_both_tiers_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the small tier ALSO fails, the error propagates — the provider is
+    likely down; there is no dumb fallback."""
+    async def fake(**kwargs: Any) -> dict[str, Any]:
+        raise _timeout(kwargs["model"])
+
+    monkeypatch.setattr(litellm, "supports_response_schema", lambda model: False)
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    adapter = LiteLlmAdapter(fallback_model="small/y")
+    with pytest.raises(litellm.Timeout):
+        await adapter.structured(
+            slot="router/v1", variables=_ROUTER_VARS,
+            response_model=RoutingDecision, model="flagship/x",
+        )
+
+
+async def test_structured_does_not_downgrade_on_permanent_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A permanent error (auth) is NOT downgraded — a smaller model can't fix
+    it, so it raises immediately with no second-tier call."""
+    calls: list[str] = []
+
+    async def fake(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs["model"])
+        raise litellm.AuthenticationError(
+            message="bad key", model=kwargs["model"], llm_provider="gemini",
+        )
+
+    monkeypatch.setattr(litellm, "supports_response_schema", lambda model: False)
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    adapter = LiteLlmAdapter(fallback_model="small/y")
+    with pytest.raises(litellm.AuthenticationError):
+        await adapter.structured(
+            slot="router/v1", variables=_ROUTER_VARS,
+            response_model=RoutingDecision, model="flagship/x",
+        )
+    assert calls == ["flagship/x"]  # no downgrade attempt
+
+
+async def test_structured_small_tier_call_raises_without_downgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call already on the small tier has no lower tier — it raises on
+    failure rather than looping."""
+    calls: list[str] = []
+
+    async def fake(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs["model"])
+        raise _timeout(kwargs["model"])
+
+    monkeypatch.setattr(litellm, "supports_response_schema", lambda model: False)
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    adapter = LiteLlmAdapter(fallback_model="small/y")
+    with pytest.raises(litellm.Timeout):
+        await adapter.structured(
+            slot="router/v1", variables=_ROUTER_VARS,
+            response_model=RoutingDecision, model="small/y",  # already the fallback
+        )
+    assert calls == ["small/y"]
+
+
+async def test_structured_downgrade_recorded_on_active_trace_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a downgrade happens inside a tracer step, the step's recorded result
+    carries ``_model_fallbacks`` so the trace shows 'flagship → small'."""
+    async def fake(**kwargs: Any) -> dict[str, Any]:
+        if kwargs["model"] == "flagship/x":
+            raise _timeout("flagship/x")
+        return {"choices": [{"message": {"content": _VALID_DECISION}}]}
+
+    monkeypatch.setattr(litellm, "supports_response_schema", lambda model: False)
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    async with aiosqlite.connect(":memory:") as conn:
+        await apply_schema(conn)
+        await conn.execute("INSERT INTO chat_sessions DEFAULT VALUES")
+        await conn.execute("INSERT INTO runs (session_id) VALUES (1)")
+        await conn.commit()
+        tracer = Tracer(conn, run_id=1, branch="")
+        adapter = LiteLlmAdapter(fallback_model="small/y")
+        async with tracer.step(agent="report", tool="report:outline", model="flagship/x"):
+            await adapter.structured(
+                slot="router/v1", variables=_ROUTER_VARS,
+                response_model=RoutingDecision, model="flagship/x",
+            )
+        async with conn.execute(
+            "SELECT result_summary_json FROM tool_calls ORDER BY step_index DESC LIMIT 1"
+        ) as cur:
+            row = await cur.fetchone()
+    assert row is not None and row[0] is not None
+    fallbacks = json.loads(row[0])["_model_fallbacks"]
+    assert fallbacks[0]["from"] == "flagship/x"
+    assert fallbacks[0]["to"] == "small/y"
+    assert "Timeout" in fallbacks[0]["reason"]
+
+
+async def test_stream_downgrades_to_small_when_flagship_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flagship stream that fails before emitting any token downgrades to the
+    small tier (mirrors structured)."""
+    models_called: list[str] = []
+
+    async def fake(**kwargs: Any):  # noqa: ANN003
+        models_called.append(kwargs["model"])
+
+        async def gen():
+            if kwargs["model"] == "flagship/x":
+                raise litellm.APIConnectionError(
+                    message="down", model="flagship/x", llm_provider="gemini",
+                )
+                yield  # pragma: no cover — makes this an async generator
+            for c in ["O", "K"]:
+                yield _chunk(c)
+        return gen()
+
+    monkeypatch.setattr("asyncio.sleep", _no_sleep)
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    adapter = LiteLlmAdapter(fallback_model="small/y")
+    out = [t async for t in adapter.stream(
+        slot="chitchat/v1", variables=_CHITCHAT_VARS, model="flagship/x",
+    )]
+    assert "".join(out) == "OK"
+    assert "flagship/x" in models_called and "small/y" in models_called
+
+
+def test_should_downgrade_classifies_errors() -> None:
+    """Availability errors downgrade; permanent client errors do not."""
+    assert _should_downgrade(_timeout("m")) is True
+    assert _should_downgrade(
+        litellm.APIConnectionError(message="x", model="m", llm_provider="g")
+    ) is True
+    assert _should_downgrade(
+        litellm.AuthenticationError(message="x", model="m", llm_provider="g")
+    ) is False
+    assert _should_downgrade(
+        litellm.BadRequestError(message="x", model="m", llm_provider="g")
+    ) is False
 
 
 async def test_structured_with_history_builds_correct_messages() -> None:

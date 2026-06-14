@@ -9,11 +9,38 @@ import litellm
 from litellm.exceptions import BadRequestError
 from pydantic import BaseModel
 
+from paperhub.config import llm_timeout_s, small_tier_model
 from paperhub.llm.prompts.registry import PromptRegistry
+from paperhub.tracing.tracer import note_model_fallback
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+# Errors that a smaller model CANNOT fix — a malformed/oversized/forbidden
+# request fails the same way on any tier, so we must NOT downgrade (it would
+# just waste a second call and mask the real cause). Everything else (timeout,
+# rate limit, 5xx, connection drop, model-not-found) is an AVAILABILITY signal:
+# the requested model isn't usable right now, so downgrading to the small tier
+# is worth a shot. Built by name so a litellm version missing one doesn't break.
+_PERMANENT_EXC: tuple[type[BaseException], ...] = tuple(
+    e
+    for e in (
+        getattr(litellm, "BadRequestError", None),
+        getattr(litellm, "AuthenticationError", None),
+        getattr(litellm, "PermissionDeniedError", None),
+        getattr(litellm, "ContextWindowExceededError", None),
+        getattr(litellm, "ContentPolicyViolationError", None),
+    )
+    if isinstance(e, type)
+)
+
+
+def _should_downgrade(exc: BaseException) -> bool:
+    """True if ``exc`` is an availability failure worth retrying on a smaller
+    model. Permanent client errors (bad request, auth, context-window, content
+    policy) return False — a downgrade can't fix them."""
+    return not isinstance(exc, _PERMANENT_EXC)
 
 
 def _supports_response_schema(model: str) -> bool:
@@ -89,8 +116,24 @@ def _is_transient_stream_error(exc: BaseException) -> bool:
 
 
 class LiteLlmAdapter:
-    def __init__(self, registry: PromptRegistry | None = None) -> None:
+    def __init__(
+        self,
+        registry: PromptRegistry | None = None,
+        *,
+        fallback_model: str | None = None,
+        timeout: float | None = None,
+    ) -> None:
         self._registry = registry or PromptRegistry()
+        # The tier a failing flagship call downgrades to. Defaults to the
+        # configured small tier (runtime-config-aware via env, which the DB
+        # settings overlay projects onto). A call already on this model has no
+        # lower tier, so it raises on failure (the provider is likely down).
+        self._fallback_model = (
+            fallback_model if fallback_model is not None else small_tier_model()
+        )
+        # Per-call wall-clock bound so an unavailable model fails FAST and we
+        # downgrade promptly, instead of riding litellm's ~600 s default.
+        self._timeout = timeout if timeout is not None else llm_timeout_s()
 
     def _messages(
         self,
@@ -123,7 +166,52 @@ class LiteLlmAdapter:
         history: list[dict[str, str]] | None = None,
         **kwargs: Any,
     ) -> T:
+        """Structured output with flagship-first, downgrade-on-unavailable.
+
+        Try ``model`` first; if it fails with an AVAILABILITY error (timeout,
+        rate-limit, 5xx, connection, model-not-found), downgrade to the small
+        tier for THIS call only and record the degrade on the trace step. A
+        permanent error (bad request / auth) is re-raised immediately. If the
+        fallback ALSO fails, that error propagates — the provider is likely down.
+        The downgrade is per-call, so the next turn tries the flagship again."""
         messages = self._messages(slot, variables, history)
+        timeout = kwargs.pop("timeout", self._timeout)
+        base: dict[str, Any] = dict(kwargs)
+        if timeout is not None:
+            base["timeout"] = timeout
+
+        fb = self._fallback_model
+        if not fb or model == fb:
+            # Already the small tier (or no fallback configured): no lower tier
+            # to fall to, so a failure simply propagates.
+            return await self._structured_call(messages, response_model, model, **base)
+
+        # Flagship tier: fail FAST (no internal retries) so we downgrade promptly
+        # rather than burning num_retries × timeout on a dead model.
+        primary = {"num_retries": 0, **base}
+        try:
+            return await self._structured_call(messages, response_model, model, **primary)
+        except Exception as exc:  # noqa: BLE001 — classified by _should_downgrade
+            if not _should_downgrade(exc):
+                raise
+            logger.warning(
+                "structured(%s): flagship %s unavailable (%s) — downgrading to %s",
+                slot, model, type(exc).__name__, fb,
+            )
+            note_model_fallback(model, fb, f"{type(exc).__name__}: {exc}"[:200])
+            fallback = {"num_retries": 1, **base}
+            return await self._structured_call(messages, response_model, fb, **fallback)
+
+    async def _structured_call(
+        self,
+        messages: list[dict[str, str]],
+        response_model: type[T],
+        model: str,
+        **kwargs: Any,
+    ) -> T:
+        """One structured call against a single ``model`` (native schema → json
+        mode fallback). Provider/availability errors propagate to the caller's
+        model-downgrade logic; only a json_schema-rejection is handled here."""
         # Providers with native structured output (OpenAI json_schema, Gemini
         # responseSchema, Anthropic tool-use): pass the Pydantic class directly so
         # the model is constrained at the API boundary, not just by prompt phrasing.
@@ -141,9 +229,9 @@ class LiteLlmAdapter:
                 # The registry claimed json_schema support but the provider
                 # rejected it (drift / partial support). Fall back to JSON mode.
                 logger.warning(
-                    "structured(%s): native response_format rejected by %s (%s); "
+                    "structured: native response_format rejected by %s (%s); "
                     "falling back to json_object mode",
-                    slot, model, exc,
+                    model, exc,
                 )
         # JSON-mode fallback for DeepSeek-class providers (issue #4): the schema
         # is injected into the prompt (no API-level enforcement available) and
@@ -206,50 +294,63 @@ class LiteLlmAdapter:
         history: list[dict[str, str]] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[str]:
-        # Streaming + transient-error retry-from-start. ``litellm.num_retries``
-        # only catches errors BEFORE the stream starts; mid-stream
-        # ``MidStreamFallbackError`` / ``APIConnectionError`` / 5xx are not
-        # retried by litellm itself because the partial stream can't be
-        # resumed.
-        #
-        # We yield tokens to the caller AS THEY ARRIVE (real streaming — the UI
-        # renders the answer progressively). Retry-from-start is only safe
-        # while NOTHING has been emitted yet: once a token reaches the caller,
-        # restarting would duplicate output, so a mid-stream transient failure
-        # propagates instead. In practice transient failures cluster at stream
-        # SETUP (connect / first chunk / initial 5xx) — exactly the window
-        # where restart is still safe — so this keeps the resilience that
-        # matters while removing the buffer that defeated streaming.
-        # Permanent errors (bad request, auth) propagate immediately.
-        max_attempts = 3
+        # Streaming + transient-error retry-from-start + flagship-first model
+        # downgrade. ``litellm.num_retries`` only catches errors BEFORE the
+        # stream starts; we yield tokens AS THEY ARRIVE (real streaming), so
+        # retry-from-start / downgrade is only safe while NOTHING has been
+        # emitted yet — once a token reaches the caller, restarting would
+        # duplicate output, so a mid-stream failure propagates. Within that
+        # safe window: retry the SAME model on a transient blip, and if it's
+        # genuinely unavailable, downgrade to the small tier for this call (and
+        # record it on the trace). Permanent errors (bad request, auth)
+        # propagate immediately without a downgrade.
+        timeout = kwargs.pop("timeout", self._timeout)
+        base: dict[str, Any] = dict(kwargs)
+        if timeout is not None:
+            base["timeout"] = timeout
+        messages = self._messages(slot, variables, history)
+        fb = self._fallback_model
+        models = [model] + ([fb] if (fb and model != fb) else [])
         backoff_base = 1.0  # 1s, 2s, 4s
         last_exc: BaseException | None = None
-        for attempt in range(1, max_attempts + 1):
-            emitted_any = False
-            try:
-                response = await litellm.acompletion(
-                    model=model,
-                    messages=self._messages(slot, variables, history),
-                    stream=True,
-                    **kwargs,
+
+        for mi, m in enumerate(models):
+            has_fallback_left = mi < len(models) - 1
+            # Fail the flagship FAST (fewer same-model retries) when a fallback
+            # tier is still available, so the downgrade is prompt.
+            max_attempts = 2 if has_fallback_left else 3
+            for attempt in range(1, max_attempts + 1):
+                emitted_any = False
+                try:
+                    response = await litellm.acompletion(
+                        model=m, messages=messages, stream=True, **base,
+                    )
+                    async for chunk in response:
+                        delta = chunk["choices"][0].get("delta", {}).get("content") or ""
+                        if delta:
+                            emitted_any = True
+                            yield delta
+                    return
+                except Exception as exc:  # noqa: BLE001 — classified below
+                    last_exc = exc
+                    if emitted_any:
+                        # Partial output already delivered — restart/downgrade
+                        # would duplicate it. Propagate.
+                        raise
+                    if attempt < max_attempts and _is_transient_stream_error(exc):
+                        await asyncio.sleep(backoff_base * (2 ** (attempt - 1)))
+                        continue
+                    break  # same-model attempts spent (nothing emitted)
+            # Downgrade to the next tier only on an availability failure.
+            if has_fallback_left and last_exc is not None and _should_downgrade(last_exc):
+                nxt = models[mi + 1]
+                logger.warning(
+                    "stream(%s): %s unavailable (%s) — downgrading to %s",
+                    slot, m, type(last_exc).__name__, nxt,
                 )
-                async for chunk in response:
-                    delta = chunk["choices"][0].get("delta", {}).get("content") or ""
-                    if delta:
-                        emitted_any = True
-                        yield delta
-                return
-            except Exception as exc:
-                last_exc = exc
-                # Can't restart once partial output reached the caller; and
-                # don't retry non-transient / exhausted-attempt errors.
-                if (
-                    emitted_any
-                    or attempt >= max_attempts
-                    or not _is_transient_stream_error(exc)
-                ):
-                    raise
-                await asyncio.sleep(backoff_base * (2 ** (attempt - 1)))
+                note_model_fallback(m, nxt, f"{type(last_exc).__name__}: {last_exc}"[:200])
+                continue
+            break  # permanent error, or no fallback left → stop
         # Defensive — the loop above either returns or raises.
         if last_exc is not None:
             raise last_exc

@@ -6,6 +6,29 @@ import pytest
 from paperhub.config import load_settings
 
 # ---------------------------------------------------------------------------
+# Per-call LLM timeout — PAPERHUB_LLM_TIMEOUT
+# ---------------------------------------------------------------------------
+
+
+def test_llm_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset → 120 s per-call LLM timeout (bounds a hung provider)."""
+    monkeypatch.delenv("PAPERHUB_LLM_TIMEOUT", raising=False)
+    assert load_settings().llm_timeout_s == 120.0
+
+
+def test_llm_timeout_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PAPERHUB_LLM_TIMEOUT sets the per-call bound."""
+    monkeypatch.setenv("PAPERHUB_LLM_TIMEOUT", "45")
+    assert load_settings().llm_timeout_s == 45.0
+
+
+def test_llm_timeout_non_numeric_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-numeric value never crashes boot — it falls back to 120 s."""
+    monkeypatch.setenv("PAPERHUB_LLM_TIMEOUT", "not-a-number")
+    assert load_settings().llm_timeout_s == 120.0
+
+
+# ---------------------------------------------------------------------------
 # 10. External lookup services — unpaywall_email
 # ---------------------------------------------------------------------------
 
