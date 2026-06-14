@@ -23,6 +23,7 @@ from paperhub.models.slide_domain import (
     CompileCheckResult,
     DecoratedBlockSignal,
     KeyFigureBundle,
+    LongDiagramNodeSignal,
     PaperContextBundle,
 )
 from paperhub.pipelines.slide_pipeline.compile import compile_with_revise
@@ -64,6 +65,56 @@ def detect_decorated_blocks(deck_tex: str) -> list[DecoratedBlockSignal]:
                     frame_index=idx,
                     frame_title=_frame_title(frame),
                     block_kinds=sorted(kinds),
+                )
+            )
+    return signals
+
+
+# Long-diagram-node lint: smartdiagram sizes a node to its label, so a
+# sentence-length label overflows into a giant overlapping bubble (live run 570
+# slide 6). A label that is a short noun phrase is fine; one over this many chars
+# is a sentence that belongs in bullets beside the diagram, not in the node.
+_SMARTDIAGRAM_RE = re.compile(r"\\smartdiagram(?:\[[^\]]*\])?\s*\{")
+_MAX_DIAGRAM_LABEL_CHARS = 50
+
+
+def _smartdiagram_bodies(frame_tex: str) -> list[str]:
+    """Return the brace-matched body of each \\smartdiagram in the frame."""
+    bodies: list[str] = []
+    for m in _SMARTDIAGRAM_RE.finditer(frame_tex):
+        depth = 1
+        i = m.end()
+        start = i
+        while i < len(frame_tex) and depth:
+            ch = frame_tex[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            i += 1
+        bodies.append(frame_tex[start : i - 1])
+    return bodies
+
+
+def detect_long_diagram_nodes(deck_tex: str) -> list[LongDiagramNodeSignal]:
+    """Flag frames whose \\smartdiagram has a sentence-length node label."""
+    signals: list[LongDiagramNodeSignal] = []
+    for idx, m in enumerate(_FRAME_SPAN_RE.finditer(deck_tex)):
+        frame = m.group(0)
+        longest = ""
+        for body in _smartdiagram_bodies(frame):
+            # node labels are the text tokens between braces/commas
+            for tok in re.split(r"[{},]", body):
+                tok = " ".join(tok.split())
+                if len(tok) > len(longest):
+                    longest = tok
+        if len(longest) > _MAX_DIAGRAM_LABEL_CHARS:
+            signals.append(
+                LongDiagramNodeSignal(
+                    frame_index=idx,
+                    frame_title=_frame_title(frame),
+                    longest_label_chars=len(longest),
+                    sample_label=longest[:120],
                 )
             )
     return signals
@@ -166,6 +217,7 @@ async def run_compile_check(
         frame_overflow=frame_overflow,
         unrendered_math_frames=unrendered_math,
         decorated_blocks=detect_decorated_blocks(deck_tex),
+        long_diagram_nodes=detect_long_diagram_nodes(deck_tex),
     )
 
 
@@ -194,11 +246,13 @@ async def run_density_check(
     )
     unrendered_math = audit_math_frames(deck_tex=deck_tex, bundles=bundles)
     decorated_blocks = detect_decorated_blocks(deck_tex)
+    long_diagram_nodes = detect_long_diagram_nodes(deck_tex)
     # ok is not meaningful here — there's no compile pass — but we set it to
     # True iff the deterministic checks alone pass, for symmetry.
     ok = (
         len(unrendered_math) == 0
         and len(decorated_blocks) == 0
+        and len(long_diagram_nodes) == 0
         and all(not s.exceeds_canvas_budget for s in frame_overflow)
     )
     return CompileCheckResult(
@@ -208,4 +262,5 @@ async def run_density_check(
         frame_overflow=frame_overflow,
         unrendered_math_frames=unrendered_math,
         decorated_blocks=decorated_blocks,
+        long_diagram_nodes=long_diagram_nodes,
     )

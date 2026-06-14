@@ -552,6 +552,7 @@ async def run_slide_agent(
                         check.compile_errors
                         or check.unrendered_math_frames
                         or check.decorated_blocks
+                        or check.long_diagram_nodes
                     ):
                         # Forced revision round: feed the failures back and keep
                         # going. Do NOT accept done. ``decorated_blocks`` are
@@ -565,11 +566,15 @@ async def run_slide_agent(
                                         "submit_rejected": True,
                                         "reason": (
                                             "Fix these before submitting again. "
-                                            "For decorated_blocks: the block box "
-                                            "is inside a two-column layout — move "
-                                            "it out of the columns (full-width "
-                                            "frame), or drop the box. A block is "
-                                            "fine in a full-width frame."
+                                            "decorated_blocks: the block box is "
+                                            "inside a two-column layout — move it "
+                                            "out of the columns (full-width "
+                                            "frame), or drop the box (a block is "
+                                            "fine full-width). long_diagram_nodes:"
+                                            " a smartdiagram node holds a "
+                                            "sentence — shorten every node to a "
+                                            "few-word label and move the detail "
+                                            "into bullets beside the diagram."
                                         ),
                                         "compile_errors": check.compile_errors,
                                         "unrendered_math_frames": [
@@ -579,6 +584,10 @@ async def run_slide_agent(
                                         "decorated_blocks": [
                                             b.model_dump()
                                             for b in check.decorated_blocks
+                                        ],
+                                        "long_diagram_nodes": [
+                                            n.model_dump()
+                                            for n in check.long_diagram_nodes
                                         ],
                                     },
                                     ensure_ascii=False,

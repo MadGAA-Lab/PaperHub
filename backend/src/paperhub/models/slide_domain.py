@@ -138,6 +138,22 @@ class DecoratedBlockSignal(BaseModel):
     block_kinds: list[str]  # e.g. ["block", "alertblock"]
 
 
+class LongDiagramNodeSignal(BaseModel):
+    """A \\smartdiagram whose node label holds a long sentence. smartdiagram
+    sizes nodes to their label, so a sentence-length node overflows into a giant
+    overlapping bubble (live run 570 slide 6: a ``descriptive diagram`` packed
+    full sentences into circles). Short labels (a noun phrase) render fine —
+    detail belongs in bullets beside the diagram. Detected deterministically and
+    fed back so the revise agent shortens the labels."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    frame_index: int  # 0-based over \begin{frame} occurrences
+    frame_title: str
+    longest_label_chars: int
+    sample_label: str  # the offending label (truncated)
+
+
 class CompileCheckResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -146,9 +162,10 @@ class CompileCheckResult(BaseModel):
     compile_errors: list[str]
     frame_overflow: list[FrameOverflowSignal]
     unrendered_math_frames: list[UnrenderedMathFrame]
-    # Decorated-box lint: NOT part of ``ok`` (a block-using deck still compiles),
-    # but the revise loop gates ``submit`` on it and feeds it back automatically.
+    # Layout lints: NOT part of ``ok`` (the deck still compiles), but the revise
+    # loop gates ``submit`` on them and feeds them back automatically.
     decorated_blocks: list[DecoratedBlockSignal] = Field(default_factory=list)
+    long_diagram_nodes: list[LongDiagramNodeSignal] = Field(default_factory=list)
 
 
 # --- F6.1: slide narrative outline (the sl_outline stage) ----------------

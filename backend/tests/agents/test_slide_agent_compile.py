@@ -2,6 +2,7 @@ import pytest
 
 from paperhub.agents.slide_agent_compile import (
     detect_decorated_blocks,
+    detect_long_diagram_nodes,
     run_compile_check,
     run_density_check,
 )
@@ -111,6 +112,34 @@ def test_detect_decorated_blocks_flags_only_block_in_columns() -> None:
 
 def test_detect_decorated_blocks_clean_deck() -> None:
     assert detect_decorated_blocks(_GOOD_DECK) == []
+
+
+_DIAGRAM_DECK = r"""\documentclass{beamer}
+\begin{document}
+\begin{frame}{Short labels are fine}
+\smartdiagram[flow diagram:horizontal]{Unified Framework, Multi-Subspace, RoPE Case}
+\end{frame}
+\begin{frame}{Sentence in node}
+\smartdiagram[descriptive diagram]{
+  {Formalism, {Additive mechanisms (ALiBi) admit a strict group-theoretic formulation}},
+  {Shared Laws, {Inherit exact relative distance laws of multiplicative methods}}
+}
+\end{frame}
+\end{document}
+"""
+
+
+def test_detect_long_diagram_nodes_flags_only_sentence_labels() -> None:
+    signals = detect_long_diagram_nodes(_DIAGRAM_DECK)
+    # The short-label flow diagram is fine; only the sentence-packed one flags.
+    assert len(signals) == 1
+    assert signals[0].frame_index == 1
+    assert signals[0].frame_title == "Sentence in node"
+    assert signals[0].longest_label_chars > 50
+
+
+def test_detect_long_diagram_nodes_clean_deck() -> None:
+    assert detect_long_diagram_nodes(_GOOD_DECK) == []
 
 
 @pytest.mark.asyncio
