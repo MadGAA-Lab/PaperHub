@@ -194,6 +194,17 @@ system: |
   inventory OR from the slide's Evidence excerpts. If the evidence lacks a
   value, omit it — draw the STRUCTURE, never fake numbers.
 
+  TikZ COMPILE-SAFETY (the deck MUST compile — one bad figure breaks the WHOLE
+  pdf): keep every TikZ picture SIMPLE and self-contained — a handful of nodes +
+  arrows, BALANCED braces, only the libraries declared in the preamble. Use the
+  arrows.meta Stealth arrow tip, not the deprecated arrows library. Do NOT write
+  custom pgfkeys styles with hash parameters or clever nested option blocks — a
+  malformed key or an unbalanced brace raises a Runaway-argument / extra-brace
+  error and fails the compile. If compile_check reports an error in a drawn
+  frame, SIMPLIFY that figure (fewer nodes, plainer styles, or fall back to a
+  labelled itemize) rather than elaborating it — a clean simple diagram beats
+  an ambitious one that will not compile.
+
   ------- TOOL-CALL DISCIPLINE -------
   - Plan your tool calls. Don't compile_check after every tiny edit — batch
     related diff edits, then check.

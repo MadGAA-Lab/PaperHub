@@ -121,10 +121,18 @@ class CompileResult:
 
 
 def _run_latex(engine: str, tex_name: str, workdir: Path) -> subprocess.CompletedProcess[str]:
-    cmd = [engine, "-interaction=nonstopmode", tex_name]
+    # ``-halt-on-error`` is load-bearing for the slide_agent loop: WITHOUT it,
+    # a brace/pgfkeys error in a TikZ frame (a "Runaway argument") makes pdflatex
+    # scan to EOF hunting the match and spin until the 180 s timeout — blocking
+    # the agent's compile_check for minutes on its FIRST compile, so it never
+    # gets the error back to fix. ``-halt-on-error`` stops at the first error in
+    # ~1-2 s with a clear log line; warnings (overfull boxes) are NOT errors, so
+    # a valid deck still compiles. The timeout is now just a backstop for a
+    # genuinely slow (but valid) compile.
+    cmd = [engine, "-interaction=nonstopmode", "-halt-on-error", tex_name]
     return subprocess.run(  # noqa: S603 — engine resolved via shutil.which, sandboxed workdir
         cmd, cwd=str(workdir), capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=300,
+        encoding="utf-8", errors="replace", timeout=180,
     )
 
 
