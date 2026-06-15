@@ -24,6 +24,10 @@ def _format_bundles_block(bundles: list[PaperContextBundle]) -> str:
     for b in bundles:
         rows.append(
             {
+                # paper_id is the REAL paper_content.id — use it for read_section
+                # and for the slide's "% cite: <paper_id>:<section>" marker.
+                # (paper_idx is just the 0-based position; never cite with it.)
+                "paper_id": b.paper_id,
                 "paper_idx": b.paper_idx,
                 "title": b.title,
                 "authors": b.authors[:5],

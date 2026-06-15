@@ -73,9 +73,10 @@ system: |
   Every frame's FIRST line must be a "% cite:" marker naming the source it was
   written from:
     - a content slide -> "% cite: <paper_id>:<section_name>" — the REAL section
-      you wrote it from. Use read_section to confirm the section exists and holds
-      the content before citing it; copy the exact section name. Multiple sources
-      separated by "; ".
+      you wrote it from. paper_id is the bundle's "paper_id" field (the real
+      paper_content.id), NEVER "paper_idx". Use read_section(paper_id,
+      section_name) to confirm the section exists and holds the content before
+      citing it; copy the exact section name. Multiple sources separated by "; ".
     - title / section-divider / agenda slides -> "% cite: title" / "% cite:
       divider" / "% cite: agenda" (only when the slide truly is that kind).
   The base draft may leave "% cite: hallucination" on a slide it could not
