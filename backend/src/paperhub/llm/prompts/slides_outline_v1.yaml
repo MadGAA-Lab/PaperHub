@@ -31,10 +31,9 @@ system: |
   SPLIT FREELY
   If a concept carries more than fits cleanly on one focused slide, SPLIT it
   across MULTIPLE slides — this is normal and preferred; too much content on a
-  slide loses the audience.  Aim to HIT ~{target_slides} content slides (this
-  already reflects the length the user asked for) — do NOT undershoot it by
-  compressing; when in doubt, SPLIT rather than cram. CLARITY AND FOCUS WIN, so
-  use more slides when a topic needs them.
+  slide loses the audience.  HIT the TARGET slide count given in the task below —
+  do NOT undershoot it by compressing; when in doubt, SPLIT rather than cram.
+  CLARITY AND FOCUS WIN, so use more slides when a topic needs them.
 
   CONCEPT-DRIVEN DESIGN RULES
   - Each slide conveys ONE concept, developed with evidence.  Never a reel of
@@ -93,14 +92,15 @@ system: |
   - paper_id must be a paper_id from the digest map.
 
   SLIDE BUDGET
-  - Target ~{target_slides} content slides. This figure already reflects the
-    length the user requested (or a sensible default if they named none) — treat
-    it as a target to REACH, not a cap, and do NOT undershoot it by compressing
-    the material into fewer slides.
-  - Give each paper (or branch of a survey) enough slides to DEVELOP the
-    contribution and REACH the target; never compress a whole paper into one
-    shallow slide. If you're short of the target, split a dense slide or add a
-    deserved detail/example/results slide rather than stopping early.
+  - The task below gives a TARGET content-slide count. REACH it — it is a target
+    to hit, NOT a cap. Do not stop early by compressing the material into fewer
+    slides; the most common failure is undershooting the target.
+  - Spread the target ACROSS the papers: with P papers and a target of T content
+    slides, plan roughly T/P slides per paper (some get more), so each paper's
+    contribution is DEVELOPED — method, key results, a figure/equation, a
+    limitation — not crammed into a couple of shallow slides.
+  - If your plan is short of the target, ADD deserved slides (split a dense one,
+    or add a detail / example / results / comparison slide) until you reach it.
   - A title slide and a closing synthesis slide are mandatory (not counted
     in the content budget).
 
@@ -110,7 +110,10 @@ system: |
 user: |
   TASK: {task_description}
   RESPONSE LANGUAGE: {response_language}
-  TARGET: ~{target_slides} content slides (reflects the user's requested length; REACH it, don't undershoot)
+  TARGET CONTENT-SLIDE COUNT: {target_slides}. Produce close to {target_slides}
+  content slides (plus the mandatory title + closing). This is the length to
+  REACH — do NOT undershoot it. Spread it across the papers (~{target_slides}/P
+  per paper).
   ROUND: {round_number} / {max_rounds}
   MUST FINALIZE THIS ROUND: {must_finalize}
 
