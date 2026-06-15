@@ -46,7 +46,6 @@ from paperhub.models.slide_domain import (
     PaperDigest,
     ReadRequest,
     RoundAction,
-    SourceSection,
 )
 from paperhub.tracing.tracer import Tracer
 
@@ -73,46 +72,6 @@ def _read_key(paper_id: int, section: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Deterministic case router — picks the loose per-case suggestion injected into
-# the outline prompt, so the agent sees ONE focused suggestion (not a fat
-# multi-case skeleton). The case is a pure function of paper count + survey
-# detection; the outline agent still DESIGNS the storyline.
-# ---------------------------------------------------------------------------
-
-def _route_case(digests: list[PaperDigest]) -> str:
-    if len(digests) >= 2:
-        return "multi"
-    if digests and _looks_like_survey(digests[0].title, digests[0].abstract):
-        return "survey"
-    return "single"
-
-
-# Per-case note injected by the router. NOT a predefined structure — the
-# outliner designs the storyline freely. A real constraint is added ONLY for the
-# multi-paper case (the failure mode: distinct works blended into one paper).
-_CASE_SUGGESTION: dict[str, str] = {
-    "single": (
-        "ONE paper. You have full freedom to design the storyline — there is no "
-        "required structure."
-    ),
-    "survey": (
-        "ONE (physical) survey paper that internally covers many works. You have "
-        "full freedom to design the storyline. It is a SINGLE paper, so it needs "
-        "no per-work dividers."
-    ),
-    "multi": (
-        "SEVERAL DISTINCT papers. You have full freedom to design the storyline "
-        "(order, framing, how the works connect), BUT the works must stay visibly "
-        "SEPARATE so the audience always knows which paper is on screen: put a "
-        "VISUAL INDICATOR at each work's boundary (a section_divider naming the "
-        "paper) and, when a slide presents an idea, make clear WHICH paper it is "
-        "from (e.g., 'In <paper>, ...'). Never blend distinct papers into one "
-        "undifferentiated single-paper narrative."
-    ),
-}
-
-
-# ---------------------------------------------------------------------------
 # Prompt-formatting helpers
 # ---------------------------------------------------------------------------
 
@@ -130,22 +89,12 @@ def _format_digest_block(digests: list[PaperDigest]) -> str:
             else ""
         )
         section_lines = "\n".join(f"- {s.name}: {s.insight}" for s in d.sections) or "- (none)"
-        # Surface each figure's CAPTION, not just its key — without the caption
-        # the outline can't tell what a figure shows and ignores the paper's
-        # figures entirely (they were opaque keys). The caption lets the outline
-        # leverage the right figure to support each slide.
-        fig_lines = (
-            "\n".join(
-                f"  - {f.key}: {f.caption}" if f.caption else f"  - {f.key}"
-                for f in d.figures
-            )
-            or "  (none)"
-        )
+        figs = ", ".join(f.key for f in d.figures) or "(none)"
         block = (
             f"### paper_id={d.paper_id}: {d.title}{survey_tag}\n"
             f"Abstract: {d.abstract[:600]}\n"
             f"Section insights:\n{section_lines}\n"
-            f"Figures (key: what it shows):\n{fig_lines}"
+            f"Figure keys: {figs}"
         )
         if d.key_equations:
             eqs = "\n".join(
@@ -196,7 +145,6 @@ def _resolve_slide(
     # --- grounding from cites_reads ---
     chunk_ids: list[int] = []
     support_excerpts: list[str] = []
-    source_sections: list[SourceSection] = []
     for raw in s.cites_reads:
         pid_str, sep, section = raw.partition(":")
         section = section.strip()
@@ -215,12 +163,6 @@ def _resolve_slide(
             continue
         chunk_ids.extend(res.chunk_ids)
         support_excerpts.append(f"[{section}] {res.text[:400]}")
-        # Per-section grounding for the deck_slides traceability north star —
-        # one entry per successfully-resolved cited section (no cross-section
-        # dedup; chunk_ids stay as read).
-        source_sections.append(
-            SourceSection(paper_id=pid, section_name=section, chunk_ids=list(res.chunk_ids))
-        )
 
     # Cap to avoid prompt bloat in downstream drafter
     support_excerpts = support_excerpts[:_MAX_SUPPORT_EXCERPTS]
@@ -236,50 +178,7 @@ def _resolve_slide(
         figure_key=figure_key,
         grounding_chunk_ids=sorted(set(chunk_ids)),
         support_excerpts=support_excerpts,
-        source_sections=source_sections,
     )
-
-
-def _ensure_front_title(
-    slides: list[OutlineSlide], talk_title: str, dropped: list[str]
-) -> list[OutlineSlide]:
-    """Guarantee the deck opens with a single front title slide.
-
-    The base writer renders 1:1 with the outline (it does NOT add slides), so an
-    outline whose first slide isn't a ``title`` produces a deck with NO
-    ``\\titlepage`` at all — the live run 569 regression. This deterministic
-    guard restores the front title the old all-in-one agent always emitted:
-    prepend a title slide when the first slide isn't one, and demote any
-    LATER ``title`` slide to a ``section_divider`` (an interval title page is a
-    layout smell the user explicitly rejects — single-paper decks want the front
-    title ONLY). Slides are renumbered 0..N-1 to keep the 1:1 deck_slides
-    contract.
-    """
-    if not slides or slides[0].content_form != "title":
-        slides = [
-            OutlineSlide(
-                slide_index=0,
-                goal="Title slide",
-                key_message=talk_title,
-                content_form="title",
-                transition_from_prev="",
-                speaker_note_hint="",
-                paper_id=None,
-                figure_key=None,
-                grounding_chunk_ids=[],
-                support_excerpts=[],
-                source_sections=[],
-            ),
-            *slides,
-        ]
-    # Demote any stray non-front title slide (interval title page).
-    fixed: list[OutlineSlide] = []
-    for i, s in enumerate(slides):
-        if i > 0 and s.content_form == "title":
-            dropped.append(f"slide{i}:interval-title->section_divider")
-            s = s.model_copy(update={"content_form": "section_divider"})
-        fixed.append(s.model_copy(update={"slide_index": i}))
-    return fixed
 
 
 def _resolve_outline(
@@ -302,7 +201,6 @@ def _resolve_outline(
         )
         for idx, s in enumerate(draft.slides)
     ]
-    resolved_slides = _ensure_front_title(resolved_slides, draft.talk_title, dropped)
     outline = DeckOutline(
         talk_title=draft.talk_title,
         narrative_pattern=narrative_pattern,
@@ -402,8 +300,6 @@ async def run_sl_outline(
         )
 
         digest_block = _format_digest_block(digests)  # constant per run
-        case = _route_case(digests)  # deterministic: single / survey / multi
-        case_suggestion = _CASE_SUGGESTION[case]
 
         for round_num in range(1, max_rounds + 1):
             rounds_used = round_num
@@ -416,7 +312,6 @@ async def run_sl_outline(
                     "task_description": task_description,
                     "response_language": response_language,
                     "target_slides": target_slides,
-                    "case_suggestion": case_suggestion,
                     "digest_block": digest_block,
                     "read_block": read_block,
                     "round_number": round_num,
@@ -517,46 +412,9 @@ async def run_sl_outline(
             narrative_pattern=narrative_pattern,
         )
 
-        # Degenerate-output gate: a finalized outline with almost no CONTENT
-        # slides (just title/divider/agenda) is a failure — base_write renders 1:1,
-        # so it would ship a 2-page deck (live run 574). Fall back to a per-paper
-        # minimal outline that at least covers every paper. The threshold scales
-        # with the target but stays low so it only catches catastrophic
-        # degeneration, never normal variation.
-        _structural = {"title", "section_divider", "agenda"}
-        content_slides = [s for s in outline.slides if s.content_form not in _structural]
-        # Fixed low floor: this is a CATASTROPHIC backstop (run 574 finalized with
-        # ZERO content slides), not a depth enforcer — depth is the prompt's job.
-        # A real talk always has >= 2 content slides; only a degenerate outline
-        # falls below.
-        min_content = 2
-        if len(content_slides) < min_content:
-            dropped.append(
-                f"outline-degenerate:{len(content_slides)}-content"
-                f"<{min_content}:fallback-minimal"
-            )
-            outline, fb_dropped = _resolve_outline(
-                _minimal_outline(digests, task_description),
-                reads_by_key=reads_by_key,
-                known_paper_ids=known_paper_ids,
-                known_fig_keys=known_fig_keys,
-                narrative_pattern="synthesis",
-            )
-            dropped.extend(fb_dropped)
-
-        # Grounding visibility (north-star traceback): how many CONTENT slides
-        # came back WITHOUT any source_sections. Recorded so an ungrounded deck is
-        # visible in the trace instead of silently shipping untraceable slides.
-        ungrounded = [
-            s.slide_index
-            for s in outline.slides
-            if s.content_form not in _structural and not s.source_sections
-        ]
-
         step.record_result(
             {
                 "talk_title": outline.talk_title,
-                "case": case,  # deterministic router: single / survey / multi
                 "narrative_pattern": outline.narrative_pattern,
                 "audience_intent": outline.audience_intent,
                 "narrative_arc": outline.narrative_arc,
@@ -566,7 +424,6 @@ async def run_sl_outline(
                 "round_log": round_log,
                 # Per-slide traceback evidence a future Sources UI needs.
                 "reads": {key: res.chunk_ids for key, res in reads_by_key.items()},
-                "ungrounded_content_slides": ungrounded,
                 "dropped": dropped,
             }
         )

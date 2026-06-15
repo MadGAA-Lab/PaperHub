@@ -1,20 +1,15 @@
-"""F6.2 slide_agent — the REVISE-ONLY tool-using agent (stage 2 of 3).
+"""F4.5 slide_agent — THE monolithic tool-using agent (stage 2 of 3).
 
-A deterministic Base Writer drafts the deck first; this agent only REVISES it.
-It requires a non-empty starting deck and receives PaperContextBundles +
-resolved preamble + canvas budget + layout examples; it emits the revised
-deck.tex via a bounded tool-call loop.
+Owns the deck across draft AND revise. Receives PaperContextBundles + resolved
+preamble + canvas budget + layout examples; emits the final deck.tex via a
+bounded tool-call loop.
 
-The agent's palette is EDIT-only (replace/insert/delete frame, replace
-preamble, read_section) + ``submit``. The must-do verification steps are
-PIPELINE GUARDS, not electable tools: this loop deterministically runs the
-density check after every edit turn and the compile check on ``submit``. The
-agent decides WHAT to edit; the pipeline decides WHEN to verify (always).
-
-Tool-call budget: default 30 calls (10-20 diff edits + submit cycles for a
-real-API run). Budget exhaustion ships the current deck state with
-satisfied=False — same fallback posture as compile_with_revise's
-imperfect-deck-shipping.
+Tool-call budget: default 30 calls (initial_draft + 1-2 compile_checks +
+10-20 diff edits + done = ~20-25 calls for a real-API run). Raised from 15
+after the real-API benchmark Run 342-346 saw all 5 cases hit the 15-call
+ceiling without successfully reaching done(). Budget exhaustion ships the
+current deck state with satisfied=False — same fallback posture as the
+existing compile_with_revise's imperfect-deck-shipping.
 """
 from __future__ import annotations
 
@@ -25,13 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from paperhub.agents.sl_cite import detect_cite_violations, load_valid_sections
-from paperhub.agents.sl_format import (
-    _format_bundles_block,
-    _format_figure_inventory_block,
-    _format_outline_block,
-)
-from paperhub.agents.sl_read import read_section_chunks
+from paperhub.agents._canvas_budget import load_canvas_budget
+from paperhub.agents._layout_examples import load_layout_examples
 from paperhub.agents.slide_agent_compile import (
     run_compile_check,
     run_density_check,
@@ -39,6 +29,7 @@ from paperhub.agents.slide_agent_compile import (
 from paperhub.agents.slide_agent_tools import (
     DeckState,
     apply_delete_frame,
+    apply_initial_draft,
     apply_insert_frame_after,
     apply_replace_frame,
     apply_replace_preamble,
@@ -128,21 +119,44 @@ def _tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
-                "name": "read_section",
+                "name": "initial_draft",
                 "description": (
-                    "Fetch the VERBATIM source text of one paper section (sliced "
-                    "from the flattened LaTeX). Use it to copy an exact results "
-                    "TABLE, an equation's full form, or a precise number that the "
-                    "bundle only summarizes. Args: paper_id (from the bundle) + "
-                    "section_name (a section listed in that paper's bundle)."
+                    "Write the complete deck.tex (preamble + every frame). "
+                    "Call ONCE at start when no deck exists."
                 ),
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "paper_id": {"type": "integer"},
-                        "section_name": {"type": "string"},
-                    },
-                    "required": ["paper_id", "section_name"],
+                    "properties": {"deck_tex": {"type": "string"}},
+                    "required": ["deck_tex"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "compile_check",
+                "description": (
+                    "Run pdflatex + overflow + math-frame audit. Returns "
+                    "structured signals."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "density_check",
+                "description": (
+                    "Run overflow + math audit WITHOUT pdflatex (speculative)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {"deck_tex_excerpt": {"type": "string"}},
+                    "required": [],
                 },
             },
         },
@@ -215,12 +229,10 @@ def _tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
-                "name": "submit",
+                "name": "done",
                 "description": (
-                    "Signal the deck is complete. The pipeline then compiles "
-                    "it; if there are compile errors or unrendered-math frames, "
-                    "they are returned to you to fix and you continue revising. "
-                    "Only call submit when you believe the deck is done."
+                    "Signal satisfied. Rejected if compile_errors or "
+                    "unrendered_math_frames are present."
                 ),
                 "parameters": {
                     "type": "object",
@@ -230,6 +242,113 @@ def _tool_schemas() -> list[dict[str, Any]]:
             },
         },
     ]
+
+
+def _format_bundles_block(bundles: list[PaperContextBundle]) -> str:
+    rows: list[dict[str, Any]] = []
+    for b in bundles:
+        rows.append(
+            {
+                "paper_idx": b.paper_idx,
+                "title": b.title,
+                "authors": b.authors[:5],
+                "year": b.year,
+                "narrative_summary": b.narrative_summary,
+                "key_figures": [
+                    {
+                        "key": f.key,
+                        "role": f.role,
+                        "interp": f.one_line_interpretation,
+                        "aspect": round(f.dimensions.aspect_ratio, 2),
+                    }
+                    for f in b.key_figures
+                ],
+                "key_equations": [
+                    {
+                        "latex": e.latex[:200],
+                        "role": e.role,
+                        "notation": e.notation_legend[:100],
+                    }
+                    for e in b.key_equations
+                ],
+                "section_excerpts": [
+                    {"section": s.section_name, "text": s.text[:600]}
+                    for s in b.section_excerpts
+                ],
+                "paper_newcommands": b.paper_newcommands[:30],
+            }
+        )
+    return json.dumps(rows, ensure_ascii=False, indent=2)
+
+
+def _format_figure_inventory_block(inv: dict[str, KeyFigureBundle]) -> str:
+    if not inv:
+        return "(empty — no figures)"
+    return "\n".join(
+        f"- {key}: aspect={fig.dimensions.aspect_ratio:.2f} "
+        f"({fig.dimensions.width_px}x{fig.dimensions.height_px}) role={fig.role}"
+        for key, fig in inv.items()
+    )
+
+
+def _format_canvas_budget_block() -> str:
+    cb = load_canvas_budget()
+    rows: list[str] = []
+    for layout in cb.layouts:
+        rows.append(
+            f"- {layout.name}: "
+            f"text_region={layout.text_region_cm[0]:.1f}x{layout.text_region_cm[1]:.1f}cm "
+            f"matches_aspect={layout.matches_aspect} "
+            f"hint={layout.text_structure_hint[:80]}"
+        )
+    return "\n".join(rows)
+
+
+def _format_layout_examples_block() -> str:
+    return "\n\n".join(
+        f"### {e.id}\npurpose: {e.purpose}\nwhen: {e.when_to_use}\n"
+        f"matches_aspect: {e.matches_aspect}\nexample:\n```latex\n{e.example}\n```"
+        for e in load_layout_examples()
+    )
+
+
+_EXCERPT_MAX_CHARS: Final[int] = 300
+
+
+def _format_outline_block(outline: DeckOutline | None) -> str:
+    """Render the approved outline for the drafter. The drafter MUST render
+    exactly one frame per slide, in order — no add/drop/split (the 1:1 contract
+    that keeps grounding mapped to pages by slide_index).
+
+    Each slide line now includes:
+    - ``[form: <content_form>]`` so the drafter knows the intended render style.
+    - An ``Evidence:`` sub-list of ``support_excerpts`` (truncated to
+      ``_EXCERPT_MAX_CHARS`` chars) so the drafter writes from fetched material
+      rather than hallucinating. Omitted when the slide has no excerpts.
+    """
+    if outline is None:
+        return ""
+    lines = [
+        "## APPROVED TALK OUTLINE — render EXACTLY one frame per slide below, "
+        "in this order. Do NOT add, drop, merge, or split slides.",
+        f"Talk title: {outline.talk_title}",
+        f"Audience intent: {outline.audience_intent}",
+        f"Narrative arc: {outline.narrative_arc}",
+        "",
+        "Slides:",
+    ]
+    for s in outline.slides:
+        fig = f" [figure: {s.figure_key}]" if s.figure_key else ""
+        msg = f" — {s.key_message}" if s.key_message else ""
+        form = f" [form: {s.content_form}]"
+        lines.append(f"{s.slide_index + 1}. {s.goal}{msg}{form}{fig}")
+        if s.support_excerpts:
+            lines.append("   Evidence:")
+            for excerpt in s.support_excerpts:
+                if len(excerpt) > _EXCERPT_MAX_CHARS:
+                    excerpt = excerpt[:_EXCERPT_MAX_CHARS] + "..."
+                lines.append(f"   - {excerpt}")
+    return "\n".join(lines)
 
 
 async def _dispatch_tool_call(
@@ -243,52 +362,37 @@ async def _dispatch_tool_call(
     session_id: int | None,
     conn: Any,
     script: str,
-) -> tuple[DeckState, str, CompileCheckResult | None]:
-    """Apply one EDIT tool call (or the ``submit`` placeholder).
+    pending_done_check: CompileCheckResult | None,
+) -> tuple[DeckState, str, CompileCheckResult | None, bool]:
+    """Apply one tool call.
 
-    Returns ``(new_state, result_str, compile_check_or_None)``. The third
-    element is vestigial (always ``None``): the must-do verification steps
-    (compile / density) are pipeline guards owned by the loop, not tool
-    dispatch. ``submit`` is handled by the loop too — dispatch returns a
-    neutral placeholder for it so the per-call tool-response message stays
-    valid.
+    Returns ``(new_state, result_str, compile_check_or_None, accepted_done)``.
+
+    ``accepted_done=True`` ONLY when ``name=='done'`` and the last
+    ``compile_check`` passed the gate (``compile_errors`` empty AND
+    ``unrendered_math_frames`` empty).
     """
     try:
-        if name == "submit":
-            # The loop owns submit (it runs the compile guard). Return a neutral
-            # placeholder result so the per-call tool-response message is valid.
-            return state, json.dumps({"ok": True, "submitted": True}), None
-        if name == "read_section":
-            # Agentic context-gather: pull the VERBATIM flattened-LaTeX text of a
-            # section so the agent can copy an exact table/equation/number the
-            # bundle only summarizes. Read-only; no state/compile change.
-            pid = int(args.get("paper_id", 0))
-            section = str(args.get("section_name", "")).strip()
-            known = {b.paper_id for b in bundles}
-            if pid not in known:
-                return state, json.dumps(
-                    {"error": f"paper_id {pid} is not in this deck; known: {sorted(known)}"}
-                ), None
-            if not section:
-                return state, json.dumps({"error": "section_name is required"}), None
-            if conn is None:
-                return state, json.dumps({"error": "no database connection"}), None
-            res = await read_section_chunks(
-                paper_content_id=pid, section_name=section, conn=conn,
+        if name == "initial_draft":
+            state = apply_initial_draft(state, deck_tex=str(args["deck_tex"]))
+            return state, json.dumps({"ok": True, "deck_set": True}), None, False
+        if name == "compile_check":
+            check = await run_compile_check(
+                deck_tex=state.deck_tex,
+                bundles=bundles,
+                figure_inventory=figure_inventory,
+                workdir=workdir,
+                script=script,  # type: ignore[arg-type]
             )
-            text = res.text or ""
-            cap = 8000  # enough for a results table; bounds prompt growth
-            return state, json.dumps(
-                {
-                    "paper_id": pid,
-                    "section_name": section,
-                    "chunk_ids": res.chunk_ids,
-                    "text": text[:cap],
-                    "truncated": len(text) > cap,
-                    "empty": not text,
-                },
-                ensure_ascii=False,
-            ), None
+            return state, check.model_dump_json(), check, False
+        if name == "density_check":
+            density = await run_density_check(
+                deck_tex=str(args.get("deck_tex_excerpt", state.deck_tex)),
+                bundles=bundles,
+                script=script,  # type: ignore[arg-type]
+                figure_inventory=figure_inventory,
+            )
+            return state, density.model_dump_json(), None, False
         if name == "replace_frame":
             state = apply_replace_frame(
                 state,
@@ -299,6 +403,7 @@ async def _dispatch_tool_call(
                 state,
                 json.dumps({"ok": True, "frame_index": int(args["frame_index"])}),
                 None,
+                False,
             )
         if name == "insert_frame_after":
             state = apply_insert_frame_after(
@@ -310,6 +415,7 @@ async def _dispatch_tool_call(
                 state,
                 json.dumps({"ok": True, "inserted_after": int(args["frame_index"])}),
                 None,
+                False,
             )
         if name == "delete_frame":
             state = apply_delete_frame(state, frame_index=int(args["frame_index"]))
@@ -317,6 +423,7 @@ async def _dispatch_tool_call(
                 state,
                 json.dumps({"ok": True, "deleted": int(args["frame_index"])}),
                 None,
+                False,
             )
         if name == "replace_preamble":
             new_preamble = str(args["new_preamble"])
@@ -329,13 +436,63 @@ async def _dispatch_tool_call(
                     source="agent_inferred",
                     conn=conn,
                 )
-            return state, json.dumps({"ok": True, "persisted": persist}), None
-        return state, json.dumps({"error": f"unknown tool {name!r}"}), None
+            return state, json.dumps({"ok": True, "persisted": persist}), None, False
+        if name == "done":
+            if pending_done_check is None:
+                return (
+                    state,
+                    json.dumps(
+                        {
+                            "error": (
+                                "done() rejected — call compile_check first to "
+                                "verify contracts"
+                            )
+                        }
+                    ),
+                    None,
+                    False,
+                )
+            if pending_done_check.compile_errors:
+                return (
+                    state,
+                    json.dumps(
+                        {
+                            "error": (
+                                "done() rejected — compile_errors are non-empty; "
+                                "fix them first"
+                            ),
+                            "compile_errors": pending_done_check.compile_errors,
+                        }
+                    ),
+                    None,
+                    False,
+                )
+            if pending_done_check.unrendered_math_frames:
+                return (
+                    state,
+                    json.dumps(
+                        {
+                            "error": (
+                                "done() rejected — contract #2 violated: "
+                                "math-content frames lack math blocks"
+                            ),
+                            "unrendered_math_frames": [
+                                f.model_dump()
+                                for f in pending_done_check.unrendered_math_frames
+                            ],
+                        }
+                    ),
+                    None,
+                    False,
+                )
+            return state, json.dumps({"ok": True, "done_accepted": True}), None, True
+        return state, json.dumps({"error": f"unknown tool {name!r}"}), None, False
     except Exception as exc:  # noqa: BLE001 — surface to LLM as a normal error
         return (
             state,
             json.dumps({"error": f"{type(exc).__name__}: {exc}"}),
             None,
+            False,
         )
 
 
@@ -359,31 +516,18 @@ async def run_slide_agent(
     registry: PromptRegistry | None = None,
     llm_acompletion: LlmAcompletion | None = None,
 ) -> SlideAgentResult:
-    # Revise-only: a deterministic Base Writer must have drafted the deck first.
-    # An empty / whitespace starting deck is a programmer error, not something
-    # this agent recovers from (it no longer has an initial_draft tool).
-    if existing_deck_tex is None or not existing_deck_tex.strip():
-        raise ValueError("revise-only: a base deck is required")
-
     reg = registry or PromptRegistry()
     prompt = reg.get("slides_agent/v1")
     if llm_acompletion is None:
         import litellm
 
-        # Direct litellm.acompletion (not the adapter) — tool-calling isn't
-        # exposed by the adapter's structured/stream, so the flagship->small
-        # DOWNGRADE does NOT apply here; only this loop's own transient retry
-        # does. Timeout IS covered by the litellm.request_timeout backstop set at
-        # app boot, so a dead provider can't hang. On flagship unavailability the
-        # loop ships the base deck unrevised (satisfied=False) — intentional
-        # graceful degradation, not a crash.
         llm_acompletion = litellm.acompletion
 
     state = DeckState(
-        deck_tex=existing_deck_tex,
+        deck_tex=existing_deck_tex or "",
         preamble=resolved_preamble,
         workdir=workdir,
-        dirty=True,
+        dirty=bool(existing_deck_tex),
     )
 
     user = prompt.user_template.format(
@@ -394,8 +538,14 @@ async def run_slide_agent(
         bundles_block=_format_bundles_block(bundles),
         n_bundles=len(bundles),
         figure_inventory_block=_format_figure_inventory_block(figure_inventory),
-        deck_state_label="EXISTING — diff-edit it",
-        existing_deck_block=existing_deck_tex,
+        canvas_budget_block=_format_canvas_budget_block(),
+        layout_examples_block=_format_layout_examples_block(),
+        deck_state_label=(
+            "EXISTING — diff-edit it"
+            if existing_deck_tex
+            else "EMPTY — call initial_draft first"
+        ),
+        existing_deck_block=existing_deck_tex or "(no deck yet)",
     )
     system = prompt.system.format(
         response_language=response_language,
@@ -406,11 +556,6 @@ async def run_slide_agent(
         {"role": "user", "content": user},
     ]
     tools_schema = _tool_schemas()
-
-    # Evidence set for the rule-based cite gate: (paper_id, section) pairs that
-    # actually have chunks. A frame's cite is valid only against this set, so a
-    # cite to an unknown paper/section (no evidence) is rejected as a hallucination.
-    valid_sections = await load_valid_sections([b.paper_id for b in bundles], conn)
 
     pending_compile_check: CompileCheckResult | None = None
     preamble_persisted = False
@@ -429,12 +574,6 @@ async def run_slide_agent(
             }
         )
         tool_call_log: list[dict[str, Any]] = []
-        # Per-turn pipeline-guard feedback the agent received (density after edit
-        # turns, compile after submit). The tool_call_log only records the model's
-        # tool calls — without this we cannot see WHAT signal drove the revise
-        # loop (enrich-then-diagnose: the density/compile feedback is what the
-        # agent reacted to each turn).
-        feedback_log: list[dict[str, Any]] = []
 
         try:
             while tool_calls_used < max_tool_calls:
@@ -447,11 +586,11 @@ async def run_slide_agent(
                         tool_choice="auto",
                     )
                 except Exception as exc:
-                    # Transient retry exhausted (or non-transient error). The
-                    # deck always starts non-empty (revise-only), so a transient
-                    # failure ships the current deck imperfect (mirrors the
-                    # budget-exhaustion ship-imperfect path). The guard stays as
-                    # defense-in-depth.
+                    # Transient retry exhausted (or non-transient error). If we
+                    # have ANY deck state from a prior tool call, ship it
+                    # imperfect (mirrors the budget-exhaustion ship-imperfect
+                    # path). If the deck is empty (initial_draft never landed),
+                    # re-raise — there's nothing to ship.
                     if _is_transient(exc) and state.deck_tex:
                         tool_call_log.append(
                             {
@@ -467,8 +606,7 @@ async def run_slide_agent(
                 msg = response["choices"][0]["message"]
                 tool_calls = msg.get("tool_calls") or []
                 if not tool_calls:
-                    # Agent gave up without a clean submit — ship current state
-                    # as imperfect.
+                    # Agent gave up without done() — ship current state as imperfect.
                     break
 
                 messages.append(
@@ -478,18 +616,6 @@ async def run_slide_agent(
                         "tool_calls": tool_calls,
                     }
                 )
-
-                # Per-turn signals for the pipeline guards (decided after the
-                # turn, not by the model): did the model request submit, and did
-                # any edit actually land this turn?
-                submit_requested = False
-                edit_applied = False
-                _EDIT_TOOLS = {
-                    "replace_frame",
-                    "insert_frame_after",
-                    "delete_frame",
-                    "replace_preamble",
-                }
 
                 for call in tool_calls:
                     if tool_calls_used >= max_tool_calls:
@@ -501,7 +627,7 @@ async def run_slide_agent(
                     except json.JSONDecodeError:
                         args = {}
 
-                    state, result_str, _ = await _dispatch_tool_call(
+                    state, result_str, new_check, this_done = await _dispatch_tool_call(
                         name=name,
                         args=args,
                         state=state,
@@ -511,9 +637,10 @@ async def run_slide_agent(
                         session_id=session_id,
                         conn=conn,
                         script=script,
+                        pending_done_check=pending_compile_check,
                     )
-                    if name == "submit":
-                        submit_requested = True
+                    if new_check is not None:
+                        pending_compile_check = new_check
                     if name == "replace_preamble":
                         try:
                             parsed = json.loads(result_str)
@@ -521,22 +648,15 @@ async def run_slide_agent(
                             parsed = {}
                         if isinstance(parsed, dict) and parsed.get("persisted"):
                             preamble_persisted = True
-                    if name in _EDIT_TOOLS:
-                        # An edit landed iff dispatch reported ok (it surfaces
-                        # apply errors as {"error": ...} without raising).
-                        try:
-                            parsed_edit = json.loads(result_str)
-                        except json.JSONDecodeError:
-                            parsed_edit = {}
-                        if isinstance(parsed_edit, dict) and parsed_edit.get("ok"):
-                            edit_applied = True
+                    if this_done:
+                        accepted_done = True
 
                     tool_call_log.append(
                         {
                             "tool": name,
                             "args_redacted": (
                                 {
-                                    k: (v[:500] if isinstance(v, str) else v)
+                                    k: (v[:200] if isinstance(v, str) else v)
                                     for k, v in args.items()
                                 }
                                 if isinstance(args, dict)
@@ -554,187 +674,10 @@ async def run_slide_agent(
                         }
                     )
 
-                # Pipeline guards run AFTER the turn — the agent never elects a
-                # check tool; the loop deterministically verifies.
-                if submit_requested:
-                    # Submit → compile guard. The compile is a pipeline run, not
-                    # a model tool call: do NOT increment tool_calls_used.
-                    check = await run_compile_check(
-                        deck_tex=state.deck_tex,
-                        bundles=bundles,
-                        figure_inventory=figure_inventory,
-                        workdir=workdir,
-                        script=script,  # type: ignore[arg-type]
-                    )
-                    pending_compile_check = check
-                    cite_violations = detect_cite_violations(state.deck_tex, valid_sections)
-                    feedback_log.append(
-                        {
-                            "turn_tool_calls": tool_calls_used,
-                            "phase": "submit_compile",
-                            "ok": check.ok,
-                            "page_count": check.page_count,
-                            "compile_errors": check.compile_errors[:5],
-                            "unrendered_math_frames": len(check.unrendered_math_frames),
-                            "decorated_blocks": [b.model_dump() for b in check.decorated_blocks],
-                            "long_diagram_nodes": [n.model_dump() for n in check.long_diagram_nodes],
-                            "bare_visuals": [b.model_dump() for b in check.bare_visuals],
-                            "cite_violations": [v.model_dump() for v in cite_violations],
-                            "frame_overflow": [
-                                {"frame_index": s.frame_index, "frame_title": s.frame_title,
-                                 "overage_tokens": s.overage_tokens,
-                                 "exceeds_canvas_budget": s.exceeds_canvas_budget,
-                                 "recommendation": s.recommendation}
-                                for s in check.frame_overflow
-                            ],
-                        }
-                    )
-                    if (
-                        check.compile_errors
-                        or check.unrendered_math_frames
-                        or check.decorated_blocks
-                        or check.long_diagram_nodes
-                        or check.bare_visuals
-                        or cite_violations
-                    ):
-                        # Forced revision round: feed the failures back and keep
-                        # going. Do NOT accept done. ``decorated_blocks`` are
-                        # block boxes placed INSIDE a two-column layout (they
-                        # overflow the narrow column); a block is fine full-width.
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": json.dumps(
-                                    {
-                                        "submit_rejected": True,
-                                        "reason": (
-                                            "Fix these before submitting again. "
-                                            "decorated_blocks: the block box is "
-                                            "inside a two-column layout — move it "
-                                            "out of the columns (full-width "
-                                            "frame), or drop the box (a block is "
-                                            "fine full-width). long_diagram_nodes:"
-                                            " a smartdiagram node holds a "
-                                            "sentence — shorten every node to a "
-                                            "few-word label and move the detail "
-                                            "into bullets beside the diagram. "
-                                            "bare_visuals: a figure/table/"
-                                            "equation stands alone with no "
-                                            "explanation — add a \\caption{...} "
-                                            "(or a notation legend for an "
-                                            "equation), or a sentence of "
-                                            "explanatory text beside it. "
-                                            "cite_violations: EVERY frame needs a "
-                                            "valid '% cite:' marker as its first "
-                                            "line — a content slide cites a REAL "
-                                            "section it was written from "
-                                            "(% cite: <paper_id>:<section>); use "
-                                            "read_section to confirm the source, "
-                                            "then write the exact section name. "
-                                            "title/divider/agenda slides use "
-                                            "% cite: title|divider|agenda. A slide "
-                                            "with no real source is a hallucination "
-                                            "and must be re-sourced."
-                                        ),
-                                        "compile_errors": check.compile_errors,
-                                        "unrendered_math_frames": [
-                                            f.model_dump()
-                                            for f in check.unrendered_math_frames
-                                        ],
-                                        "decorated_blocks": [
-                                            b.model_dump()
-                                            for b in check.decorated_blocks
-                                        ],
-                                        "long_diagram_nodes": [
-                                            n.model_dump()
-                                            for n in check.long_diagram_nodes
-                                        ],
-                                        "bare_visuals": [
-                                            b.model_dump()
-                                            for b in check.bare_visuals
-                                        ],
-                                        "cite_violations": [
-                                            v.model_dump() for v in cite_violations
-                                        ],
-                                    },
-                                    ensure_ascii=False,
-                                ),
-                            }
-                        )
-                        continue
-                    accepted_done = True
+                    if accepted_done:
+                        break
+                if accepted_done:
                     break
-                elif edit_applied:
-                    # Edit turn (no submit) → density guard. Also a pipeline run,
-                    # not a model tool call. Feed the signals back automatically
-                    # so the agent sees density feedback without asking.
-                    density = await run_density_check(
-                        deck_tex=state.deck_tex,
-                        bundles=bundles,
-                        script=script,  # type: ignore[arg-type]
-                        figure_inventory=figure_inventory,
-                    )
-                    feedback_log.append(
-                        {
-                            "turn_tool_calls": tool_calls_used,
-                            "phase": "edit_density",
-                            "unrendered_math_frames": len(density.unrendered_math_frames),
-                            "decorated_blocks": [b.model_dump() for b in density.decorated_blocks],
-                            "long_diagram_nodes": [n.model_dump() for n in density.long_diagram_nodes],
-                            "bare_visuals": [b.model_dump() for b in density.bare_visuals],
-                            "frame_overflow": [
-                                {"frame_index": s.frame_index, "frame_title": s.frame_title,
-                                 "overage_tokens": s.overage_tokens,
-                                 "exceeds_canvas_budget": s.exceeds_canvas_budget,
-                                 "recommendation": s.recommendation}
-                                for s in density.frame_overflow
-                            ],
-                        }
-                    )
-                    # Feed back ONLY the BLOCKING lints — never advisory
-                    # frame_overflow. The agent chases any overflow it is handed
-                    # ("tighten") even though it is advisory; on a content-dense
-                    # deck the overflow never clears, so the agent tightens
-                    # forever and never submits (live run 579 hit the 30-call cap
-                    # without one submit). Blocking lints DO clear, so the loop
-                    # converges; when none remain, nudge the agent to submit.
-                    blocking = {
-                        "unrendered_math_frames": [
-                            f.model_dump() for f in density.unrendered_math_frames
-                        ],
-                        "decorated_blocks": [
-                            b.model_dump() for b in density.decorated_blocks
-                        ],
-                        "long_diagram_nodes": [
-                            n.model_dump() for n in density.long_diagram_nodes
-                        ],
-                        "bare_visuals": [b.model_dump() for b in density.bare_visuals],
-                        "cite_violations": [
-                            v.model_dump()
-                            for v in detect_cite_violations(state.deck_tex, valid_sections)
-                        ],
-                    }
-                    if any(blocking.values()):
-                        note = (
-                            "Fix these blocking issues, then call submit. "
-                            "(frame_overflow is advisory and intentionally "
-                            "omitted — do NOT keep tightening for it.)"
-                        )
-                    else:
-                        note = (
-                            "No blocking issues. If the content is complete, "
-                            "call submit now — do NOT keep tightening for "
-                            "frame overflow (it is advisory)."
-                        )
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": json.dumps(
-                                {"density_feedback": blocking, "note": note},
-                                ensure_ascii=False,
-                            ),
-                        }
-                    )
         finally:
             # Defense-in-depth: always record the partial trace, even if an
             # unexpected exception escapes the loop body. Without this the
@@ -751,7 +694,6 @@ async def run_slide_agent(
                         else None
                     ),
                     "tool_call_log": tool_call_log,
-                    "feedback_log": feedback_log,
                 }
             )
 

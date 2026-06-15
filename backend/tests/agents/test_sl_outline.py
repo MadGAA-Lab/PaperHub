@@ -346,15 +346,6 @@ async def test_clamp_bad_paper_figure_read(conn: aiosqlite.Connection) -> None:
                     figure_key="bad-key",             # NOT in digests
                     cites_reads=["73:NeverRead"],     # never fetched
                 ),
-                # A second valid content slide so the degenerate-outline gate
-                # (min 2 content slides) does NOT fire — this test exercises
-                # clamping, not degeneration.
-                OutlineSlideDraft(
-                    goal="Valid slide",
-                    key_message="ok",
-                    content_form="bullets",
-                    paper_id=73,
-                ),
             ],
         ),
     )
@@ -374,9 +365,7 @@ async def test_clamp_bad_paper_figure_read(conn: aiosqlite.Connection) -> None:
         max_rounds=4,
     )
 
-    # slides[0] is now the deterministic front title; the bad content slide is
-    # the first non-title slide.
-    slide = next(s for s in result.outline.slides if s.content_form != "title")
+    slide = result.outline.slides[0]
     assert slide.paper_id is None
     assert slide.figure_key is None
     assert slide.grounding_chunk_ids == []
@@ -408,120 +397,3 @@ def test_outline_prompt_loads_and_has_slots() -> None:
         "{must_finalize}",
     ):
         assert key in slot.user_template, f"missing slot {key!r}"
-
-
-# ---------------------------------------------------------------------------
-# Test 6: deterministic front-title guard
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_front_title_prepended_when_missing(conn: aiosqlite.Connection) -> None:
-    """An outline whose first slide isn't a title gets a front title prepended
-    (the base writer renders 1:1, so a missing title slide = no \\titlepage —
-    the live run 569 regression). Slides are renumbered 0..N-1."""
-    finalize = RoundAction(
-        action="finalize",
-        narrative_pattern="single_paper",
-        outline=DeckOutlineDraft(
-            talk_title="GRAPE",
-            narrative_pattern="single_paper",
-            audience_intent="x",
-            narrative_arc="y",
-            slides=[
-                OutlineSlideDraft(
-                    goal="Motivation", key_message="m",
-                    content_form="bullets", paper_id=73,
-                ),
-                OutlineSlideDraft(
-                    goal="Takeaway", key_message="t", content_form="synthesis",
-                ),
-            ],
-        ),
-    )
-    result = await run_sl_outline(
-        digests=_digests(), task_description="t", response_language="English",
-        target_slides=8, adapter=_ScriptedAdapter([finalize]), tracer=_tracer(conn),
-        model="m", read_fn=_ReadTracker({}), max_rounds=4,
-    )
-    slides = result.outline.slides
-    assert slides[0].content_form == "title"
-    assert slides[0].key_message == "GRAPE"  # talk_title carried onto the title
-    assert slides[1].goal == "Motivation"    # original first slide shifted down
-    assert [s.slide_index for s in slides] == list(range(len(slides)))  # renumbered
-
-
-@pytest.mark.asyncio
-async def test_front_title_not_duplicated(conn: aiosqlite.Connection) -> None:
-    """When the outline already opens with a title, no extra title is added."""
-    finalize = RoundAction(
-        action="finalize",
-        narrative_pattern="single_paper",
-        outline=DeckOutlineDraft(
-            talk_title="GRAPE",
-            narrative_pattern="single_paper",
-            audience_intent="x",
-            narrative_arc="y",
-            slides=[
-                OutlineSlideDraft(goal="Title", key_message="", content_form="title"),
-                OutlineSlideDraft(
-                    goal="Body", key_message="m", content_form="bullets", paper_id=73,
-                ),
-            ],
-        ),
-    )
-    result = await run_sl_outline(
-        digests=_digests(), task_description="t", response_language="English",
-        target_slides=8, adapter=_ScriptedAdapter([finalize]), tracer=_tracer(conn),
-        model="m", read_fn=_ReadTracker({}), max_rounds=4,
-    )
-    titles = [s for s in result.outline.slides if s.content_form == "title"]
-    assert len(titles) == 1
-    assert result.outline.slides[0].content_form == "title"
-
-
-
-
-@pytest.mark.asyncio
-async def test_degenerate_outline_falls_back_to_minimal(conn: aiosqlite.Connection) -> None:
-    """An outline finalized with no content slides (just a title) is degenerate;
-    the gate replaces it with a per-paper minimal outline so base_write can't
-    ship a 2-page deck (live run 574)."""
-    finalize = RoundAction(
-        action="finalize",
-        narrative_pattern="synthesis",
-        outline=DeckOutlineDraft(
-            talk_title="T",
-            narrative_pattern="synthesis",
-            audience_intent="x",
-            narrative_arc="y",
-            slides=[OutlineSlideDraft(goal="Title", key_message="", content_form="title")],
-        ),
-    )
-    result = await run_sl_outline(
-        digests=_digests(), task_description="t", response_language="English",
-        target_slides=8, adapter=_ScriptedAdapter([finalize]), tracer=_tracer(conn),
-        model="m", read_fn=_ReadTracker({}), max_rounds=4,
-    )
-    structural = {"title", "section_divider", "agenda"}
-    content = [s for s in result.outline.slides if s.content_form not in structural]
-    assert len(content) >= 3  # minimal fallback covers both digest papers + synthesis
-
-    async with conn.execute(
-        "SELECT result_summary_json FROM tool_calls ORDER BY step_index DESC LIMIT 1"
-    ) as cur:
-        row = await cur.fetchone()
-    assert row is not None
-    assert any("outline-degenerate" in d for d in json.loads(row[0])["dropped"])
-
-
-def test_route_case_deterministic() -> None:
-    from paperhub.agents.sl_outline import _route_case
-    one = _digests()[:1]               # 1 non-survey paper
-    two = _digests()                   # 2 papers
-    assert _route_case(one) == "single"
-    assert _route_case(two) == "multi"
-    # survey: a single paper whose title/abstract looks like a survey
-    survey = [PaperDigest(paper_id=9, title="A Survey of Attention Mechanisms",
-                          abstract="This survey reviews ...", sections=[DigestSection(name="S", insight="i")],
-                          figures=[])]
-    assert _route_case(survey) == "survey"

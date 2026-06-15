@@ -20,11 +20,8 @@ from typing import Literal
 
 from paperhub.agents._canvas_budget import load_canvas_budget
 from paperhub.models.slide_domain import (
-    BareVisualSignal,
     CompileCheckResult,
-    DecoratedBlockSignal,
     KeyFigureBundle,
-    LongDiagramNodeSignal,
     PaperContextBundle,
 )
 from paperhub.pipelines.slide_pipeline.compile import compile_with_revise
@@ -35,156 +32,6 @@ Script = Literal["en", "cjk"]
 
 _COMPILE_ERR_RE = re.compile(r"^!\s.+|^l\.\d+\s.+", re.MULTILINE)
 _FRAME_COUNT_RE = re.compile(r"\\begin\{frame\}")
-
-# Decorated-box lint: a beamer ``block`` / ``exampleblock`` / ``alertblock``
-# titled box is FINE in a full-width frame, but INSIDE a two-column
-# (``\begin{columns}``) layout it overflows the narrow column and breaks the
-# slide (live run 569: a block-wrapped equation beside a figure). Only blocks
-# nested in a columns environment are flagged.
-_FRAME_SPAN_RE = re.compile(r"\\begin\{frame\}.*?\\end\{frame\}", re.DOTALL)
-_COLUMNS_SPAN_RE = re.compile(r"\\begin\{columns\}.*?\\end\{columns\}", re.DOTALL)
-_BLOCK_RE = re.compile(r"\\begin\{(block|exampleblock|alertblock)\}")
-_FRAMETITLE_RE = re.compile(r"\\begin\{frame\}\s*(?:\[[^\]]*\])?\s*\{(.*?)\}", re.DOTALL)
-
-
-def _frame_title(frame_tex: str) -> str:
-    m = _FRAMETITLE_RE.search(frame_tex)
-    return (m.group(1).strip() if m else "")[:80]
-
-
-def detect_decorated_blocks(deck_tex: str) -> list[DecoratedBlockSignal]:
-    """Flag frames that put a decorated box INSIDE a two-column layout."""
-    signals: list[DecoratedBlockSignal] = []
-    for idx, m in enumerate(_FRAME_SPAN_RE.finditer(deck_tex)):
-        frame = m.group(0)
-        kinds: set[str] = set()
-        for cols in _COLUMNS_SPAN_RE.finditer(frame):
-            kinds.update(_BLOCK_RE.findall(cols.group(0)))
-        if kinds:
-            signals.append(
-                DecoratedBlockSignal(
-                    frame_index=idx,
-                    frame_title=_frame_title(frame),
-                    block_kinds=sorted(kinds),
-                )
-            )
-    return signals
-
-
-# Long-diagram-node lint: smartdiagram sizes a node to its label, so a
-# sentence-length label overflows into a giant overlapping bubble (live run 570
-# slide 6). A label that is a short noun phrase is fine; one over this many chars
-# is a sentence that belongs in bullets beside the diagram, not in the node.
-_SMARTDIAGRAM_RE = re.compile(r"\\smartdiagram(?:\[[^\]]*\])?\s*\{")
-_MAX_DIAGRAM_LABEL_CHARS = 50
-
-
-def _smartdiagram_bodies(frame_tex: str) -> list[str]:
-    """Return the brace-matched body of each \\smartdiagram in the frame."""
-    bodies: list[str] = []
-    for m in _SMARTDIAGRAM_RE.finditer(frame_tex):
-        depth = 1
-        i = m.end()
-        start = i
-        while i < len(frame_tex) and depth:
-            ch = frame_tex[i]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-            i += 1
-        bodies.append(frame_tex[start : i - 1])
-    return bodies
-
-
-def detect_long_diagram_nodes(deck_tex: str) -> list[LongDiagramNodeSignal]:
-    """Flag frames whose \\smartdiagram has a sentence-length node label."""
-    signals: list[LongDiagramNodeSignal] = []
-    for idx, m in enumerate(_FRAME_SPAN_RE.finditer(deck_tex)):
-        frame = m.group(0)
-        longest = ""
-        for body in _smartdiagram_bodies(frame):
-            # node labels are the text tokens between braces/commas
-            for tok in re.split(r"[{},]", body):
-                tok = " ".join(tok.split())
-                if len(tok) > len(longest):
-                    longest = tok
-        if len(longest) > _MAX_DIAGRAM_LABEL_CHARS:
-            signals.append(
-                LongDiagramNodeSignal(
-                    frame_index=idx,
-                    frame_title=_frame_title(frame),
-                    longest_label_chars=len(longest),
-                    sample_label=longest[:120],
-                )
-            )
-    return signals
-
-
-# Bare-visual lint: a figure / table / equation presented with NO caption and
-# essentially NO explanatory text leaves the audience unsure what it means. A
-# visual WITH explanatory side text is fine. Conservative threshold (only flag a
-# visual that is truly alone) so a figure+bullets slide is never flagged.
-_MIN_EXPLAIN_WORDS = 8
-_INCLUDEGRAPHICS_RE = re.compile(r"\\includegraphics(?:\[[^\]]*\])?\s*\{[^}]*\}")
-_TABULAR_ENV_RE = re.compile(r"\\begin\{tabular\}.*?\\end\{tabular\}", re.DOTALL)
-_MATH_ENV_RE = re.compile(
-    r"\\\[.*?\\\]|\\begin\{(?:equation|align|align\*|gather|gather\*|equation\*)\}.*?"
-    r"\\end\{(?:equation|align|align\*|gather|gather\*|equation\*)\}",
-    re.DOTALL,
-)
-_CAPTION_RE = re.compile(r"\\caption\s*\{")
-_LATEX_CMD_RE = re.compile(r"\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?")
-
-
-def _explanatory_words(frame_tex: str) -> int:
-    """Count plain-prose words left after removing the visual + LaTeX scaffolding.
-
-    Strips frame title, every visual environment (figure/table/math/diagram), and
-    LaTeX commands/braces; what remains is the explanatory text the audience can
-    read. Inline math ($...$) inside a sentence is kept (it is part of prose).
-    """
-    s = frame_tex
-    s = re.sub(r"\\begin\{frame\}\s*(?:\[[^\]]*\])?\s*\{.*?\}", " ", s, count=1, flags=re.DOTALL)
-    s = re.sub(r"\\begin\{tikzpicture\}.*?\\end\{tikzpicture\}", " ", s, flags=re.DOTALL)
-    s = _TABULAR_ENV_RE.sub(" ", s)
-    s = _MATH_ENV_RE.sub(" ", s)
-    for body in _smartdiagram_bodies(s):
-        s = s.replace(body, " ")
-    s = _SMARTDIAGRAM_RE.sub(" ", s)
-    s = _INCLUDEGRAPHICS_RE.sub(" ", s)
-    s = _LATEX_CMD_RE.sub(" ", s)  # drop remaining commands (\item, \textbf, ...)
-    s = re.sub(r"[{}$&\\]", " ", s)
-    # words = alphabetic tokens of length >= 2 (ignores stray symbols / single letters)
-    return len([w for w in re.findall(r"[A-Za-z][A-Za-z'-]+", s) if len(w) >= 2])
-
-
-def detect_bare_visuals(deck_tex: str) -> list[BareVisualSignal]:
-    """Flag frames whose figure/table/equation has no caption AND no explanation."""
-    signals: list[BareVisualSignal] = []
-    for idx, m in enumerate(_FRAME_SPAN_RE.finditer(deck_tex)):
-        frame = m.group(0)
-        if _CAPTION_RE.search(frame):
-            continue  # a caption already explains the visual
-        if _INCLUDEGRAPHICS_RE.search(frame):
-            kind = "figure"
-        elif _TABULAR_ENV_RE.search(frame):
-            kind = "table"
-        elif _MATH_ENV_RE.search(frame):
-            kind = "equation"
-        else:
-            continue  # no standalone visual element on this frame
-        words = _explanatory_words(frame)
-        if words < _MIN_EXPLAIN_WORDS:
-            signals.append(
-                BareVisualSignal(
-                    frame_index=idx,
-                    frame_title=_frame_title(frame),
-                    kind=kind,
-                    explain_words=words,
-                )
-            )
-    return signals
 
 
 def _parse_compile_errors(log: str) -> list[str]:
@@ -283,9 +130,6 @@ async def run_compile_check(
         compile_errors=compile_errors,
         frame_overflow=frame_overflow,
         unrendered_math_frames=unrendered_math,
-        decorated_blocks=detect_decorated_blocks(deck_tex),
-        long_diagram_nodes=detect_long_diagram_nodes(deck_tex),
-        bare_visuals=detect_bare_visuals(deck_tex),
     )
 
 
@@ -313,17 +157,10 @@ async def run_density_check(
         script=script,
     )
     unrendered_math = audit_math_frames(deck_tex=deck_tex, bundles=bundles)
-    decorated_blocks = detect_decorated_blocks(deck_tex)
-    long_diagram_nodes = detect_long_diagram_nodes(deck_tex)
-    bare_visuals = detect_bare_visuals(deck_tex)
     # ok is not meaningful here — there's no compile pass — but we set it to
     # True iff the deterministic checks alone pass, for symmetry.
-    ok = (
-        len(unrendered_math) == 0
-        and len(decorated_blocks) == 0
-        and len(long_diagram_nodes) == 0
-        and len(bare_visuals) == 0
-        and all(not s.exceeds_canvas_budget for s in frame_overflow)
+    ok = len(unrendered_math) == 0 and all(
+        not s.exceeds_canvas_budget for s in frame_overflow
     )
     return CompileCheckResult(
         ok=ok,
@@ -331,7 +168,4 @@ async def run_density_check(
         compile_errors=[],
         frame_overflow=frame_overflow,
         unrendered_math_frames=unrendered_math,
-        decorated_blocks=decorated_blocks,
-        long_diagram_nodes=long_diagram_nodes,
-        bare_visuals=bare_visuals,
     )

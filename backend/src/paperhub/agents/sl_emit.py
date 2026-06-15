@@ -29,8 +29,7 @@ from typing import Protocol
 
 import aiosqlite
 
-from paperhub.agents.sl_cite import frame_grounding_json
-from paperhub.models.slide_domain import DeckOutline, KeyFigureBundle
+from paperhub.models.slide_domain import KeyFigureBundle
 from paperhub.pipelines.slide_pipeline.deck_slides_map import build_deck_slides
 from paperhub.pipelines.slide_pipeline.figure_inventory import (
     verify_and_fix_graphics,
@@ -446,7 +445,6 @@ async def run_sl_emit(
     conn: aiosqlite.Connection,
     speaker_notes: dict[int, str] | None = None,  # opt-in NOTES path
     recompile: RecompileFn | None = None,
-    outline: DeckOutline | None = None,  # GENERATE: per-slide source-section grounding
 ) -> EmitResult:
     # 1. Contract #1: figure-key audit.
     inventory_keys: set[str] = set(figure_inventory.keys())
@@ -598,26 +596,17 @@ async def run_sl_emit(
     # and mangled every note via the restore-by-index loop. Unifying both
     # paths on build_deck_slides eliminates the asymmetry.
     inputs = build_deck_slides(audited_tex, page_count)
-    # North-star traceability (write-time): each frame carries a "% cite:" marker
-    # the slide agent wrote from the section it actually used. Parse each row's
-    # own frame_tex (self-contained — no index mapping) and resolve its content
-    # cites to chunk_ids. A title/divider/agenda/hallucination/unmarked frame
-    # records []. ``outline`` is no longer used for grounding (kept for API
-    # compatibility); the cite gate already rejected unsourced content frames
-    # before this point.
-    _ = outline  # grounding now comes from per-frame cite markers, not the outline
     for s in inputs:
         note_text = (speaker_notes or {}).get(s.slide_index)
-        source_sections_json = await frame_grounding_json(s.frame_tex, conn)
         await conn.execute(
             """
             INSERT INTO deck_slides (
                 deck_id, slide_index, frame_tex, note_text, note_language,
-                page_start, page_end, source_sections_json
-            ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?)
+                page_start, page_end
+            ) VALUES (?, ?, ?, ?, NULL, ?, ?)
             """,
             (deck_id, s.slide_index, s.frame_tex, note_text,
-             s.page_start, s.page_end, source_sections_json),
+             s.page_start, s.page_end),
         )
     await conn.commit()
 

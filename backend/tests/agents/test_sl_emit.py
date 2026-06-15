@@ -7,12 +7,7 @@ import pytest_asyncio
 
 from paperhub.agents.sl_emit import EmitResult, run_sl_emit
 from paperhub.db.migrate import apply_schema
-from paperhub.models.slide_domain import (
-    FigureDimensions,
-    KeyFigureBundle,
-    OutlineSlide,
-    SourceSection,
-)
+from paperhub.models.slide_domain import FigureDimensions, KeyFigureBundle
 
 
 @pytest_asyncio.fixture
@@ -248,103 +243,6 @@ async def test_emit_recompiles_after_audit_so_pdf_matches_finalized_tex(
     ) as cur:
         row = await cur.fetchone()
     assert row is not None and row[0] == 1
-
-
-def _outline_slide(idx: int, *, content_form: str, source_sections: list[SourceSection]) -> OutlineSlide:
-    return OutlineSlide(
-        slide_index=idx,
-        goal="g",
-        key_message="k",
-        content_form=content_form,
-        transition_from_prev="",
-        speaker_note_hint="",
-        paper_id=None,
-        figure_key=None,
-        grounding_chunk_ids=[],
-        support_excerpts=[],
-        source_sections=source_sections,
-    )
-
-
-@pytest.mark.asyncio
-async def test_emit_records_per_slide_source_sections_from_cite_markers(
-    conn: aiosqlite.Connection, tmp_path: Path
-) -> None:
-    """North star (write-time): each content deck_slides row records the paper
-    section(s) from its own ``% cite:`` marker, resolved to chunk_ids. The title
-    frame is dropped; a structural (divider) frame records ``[]``."""
-    import json
-
-    await conn.execute(
-        "INSERT INTO paper_content "
-        "(content_key, kind, arxiv_id, title, authors_json, "
-        "source_path, source_dir_path, html_path) VALUES (?,?,?,?,?,?,?,?)",
-        ("arxiv:emit-cite", "arxiv", "emit-0000.00000", "T", "[]",
-         "/tmp/s.tex", "/tmp", "/tmp/s.html"),
-    )
-    async with conn.execute("SELECT last_insert_rowid()") as cur:
-        pid = int((await cur.fetchone())[0])  # type: ignore[index]
-    await conn.execute(
-        "INSERT INTO chunks (paper_content_id, section, text, char_start, char_end) "
-        "VALUES (?,?,?,?,?)",
-        (pid, "Method", "Method chunk text", 0, 16),
-    )
-    async with conn.execute("SELECT last_insert_rowid()") as cur:
-        chunk_id = int((await cur.fetchone())[0])  # type: ignore[index]
-    await conn.commit()
-
-    deck = (
-        "\\documentclass{beamer}\n\\begin{document}\n"
-        "\\begin{frame}{}\n% cite: title\n\\titlepage\\end{frame}\n"
-        f"\\begin{{frame}}{{A}}\n% cite: {pid}:Method\nbody of A\\end{{frame}}\n"
-        "\\begin{frame}{Part Two}\n% cite: divider\n\\end{frame}\n"
-        "\\end{document}\n"
-    )
-    workdir = tmp_path / "slides"
-    workdir.mkdir()
-    (workdir / "deck.tex").write_text(deck, encoding="utf-8")
-
-    result = await run_sl_emit(
-        session_id=1, run_id=1, deck_tex=deck, workdir=workdir, page_count=3,
-        status="ok", contributing_paper_ids=[pid], figure_inventory={}, conn=conn,
-    )
-
-    async with conn.execute(
-        "SELECT slide_index, source_sections_json FROM deck_slides "
-        "WHERE deck_id=? ORDER BY slide_index",
-        (result.deck_id,),
-    ) as cur:
-        rows = await cur.fetchall()
-    assert [r[0] for r in rows] == [0, 1]  # 2 content frames (title dropped)
-    # content frame 0 (frame A) -> its cite marker resolved to the section's chunks
-    assert json.loads(rows[0][1]) == [
-        {"paper_id": pid, "section_name": "Method", "chunk_ids": [chunk_id]}
-    ]
-    # content frame 1 (divider) -> structural marker -> []
-    assert rows[1][1] == "[]"
-
-
-@pytest.mark.asyncio
-async def test_emit_records_empty_source_sections_when_no_outline(
-    conn: aiosqlite.Connection, tmp_path: Path
-) -> None:
-    """EDIT/NOTES flows pass no outline; every row gets ``[]`` for shape
-    consistency."""
-    workdir = tmp_path / "slides"
-    workdir.mkdir()
-    (workdir / "deck.tex").write_text(_DECK, encoding="utf-8")
-    result = await run_sl_emit(
-        session_id=1, run_id=1, deck_tex=_DECK, workdir=workdir,
-        page_count=2, status="ok", contributing_paper_ids=[],
-        figure_inventory={}, conn=conn,
-    )
-    async with conn.execute(
-        "SELECT source_sections_json FROM deck_slides WHERE deck_id=?",
-        (result.deck_id,),
-    ) as cur:
-        rows = await cur.fetchall()
-    assert rows
-    assert all(r[0] == "[]" for r in rows)
 
 
 @pytest.mark.asyncio

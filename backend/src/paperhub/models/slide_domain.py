@@ -123,73 +123,6 @@ class UnrenderedMathFrame(BaseModel):
     recommendation: str  # human-readable hint for the agent
 
 
-class DecoratedBlockSignal(BaseModel):
-    """A frame that puts a beamer decorated box (``block`` / ``exampleblock`` /
-    ``alertblock``) INSIDE a two-column ``columns`` layout. A block is fine in a
-    full-width frame, but in a narrow column it overflows and breaks the slide
-    (live run 569: a ``\\begin{block}``-wrapped equation beside a figure mangled
-    the 2-column). Detected deterministically and fed back so the revise agent
-    moves the block out of the columns (or drops the box)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    frame_index: int  # 0-based over \begin{frame} occurrences
-    frame_title: str
-    block_kinds: list[str]  # e.g. ["block", "alertblock"]
-
-
-class LongDiagramNodeSignal(BaseModel):
-    """A \\smartdiagram whose node label holds a long sentence. smartdiagram
-    sizes nodes to their label, so a sentence-length node overflows into a giant
-    overlapping bubble (live run 570 slide 6: a ``descriptive diagram`` packed
-    full sentences into circles). Short labels (a noun phrase) render fine —
-    detail belongs in bullets beside the diagram. Detected deterministically and
-    fed back so the revise agent shortens the labels."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    frame_index: int  # 0-based over \begin{frame} occurrences
-    frame_title: str
-    longest_label_chars: int
-    sample_label: str  # the offending label (truncated)
-
-
-class CiteViolationSignal(BaseModel):
-    """A frame whose source-cite marker is missing, structural-on-content, or
-    cites a section with no evidence. Every frame must carry a ``% cite:`` marker
-    (content → real ``<paper_id>:<section_name>``; structural → title/divider/
-    agenda). A content slide with no real cited section is a HALLUCINATION (no
-    source). Detected deterministically and fed back so the agent rewrites the
-    slide from a real source. Reasons: ``missing`` (no marker), ``fake_structural``
-    (title/divider marker on a real content slide), ``no_evidence`` (cited section
-    not found in the paper's chunks), ``content_uncited`` (content slide with no
-    content cite)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    frame_index: int  # 0-based over \begin{frame} occurrences
-    frame_title: str
-    reason: str  # missing | fake_structural | no_evidence | content_uncited
-    detail: str  # the offending marker / cited section, for the agent
-
-
-class BareVisualSignal(BaseModel):
-    """A frame whose figure / table / equation is presented BARE — no
-    ``\\caption`` (or notation legend) AND essentially no explanatory text. A
-    standalone visual with nothing telling the audience what it means is bad
-    design (live run 575: a math block with only equations, no legend; figures
-    with no captions). Detected deterministically and fed back so the revise
-    agent adds a caption/legend or a sentence of explanation. A visual that
-    already has explanatory side text is fine and is NOT flagged."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    frame_index: int  # 0-based over \begin{frame} occurrences
-    frame_title: str
-    kind: str  # "figure" | "table" | "equation"
-    explain_words: int  # explanatory words found outside the visual (for context)
-
-
 class CompileCheckResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -198,11 +131,6 @@ class CompileCheckResult(BaseModel):
     compile_errors: list[str]
     frame_overflow: list[FrameOverflowSignal]
     unrendered_math_frames: list[UnrenderedMathFrame]
-    # Layout lints: NOT part of ``ok`` (the deck still compiles), but the revise
-    # loop gates ``submit`` on them and feeds them back automatically.
-    decorated_blocks: list[DecoratedBlockSignal] = Field(default_factory=list)
-    long_diagram_nodes: list[LongDiagramNodeSignal] = Field(default_factory=list)
-    bare_visuals: list[BareVisualSignal] = Field(default_factory=list)
 
 
 # --- F6.1: slide narrative outline (the sl_outline stage) ----------------
@@ -236,7 +164,7 @@ class OutlineSlideDraft(BaseModel):
     figure_key: str | None = None  # inventory key, if the slide centres on a figure
     grounding_sections: list[str] = Field(default_factory=list)  # legacy: bundle section names (unused in F6.1+)
     cites_aims: list[str] = Field(default_factory=list)  # legacy (unused in F6.1-R): the aims whose gathered chunks ground this slide
-    cites_reads: list[str] = Field(default_factory=list)  # REQUIRED on every content slide: the digest section key(s) "<paper_id>:<section_name>" the slide is built from (read or not) — the slide's source attribution (north-star traceback)
+    cites_reads: list[str] = Field(default_factory=list)  # read keys "<paper_id>:<section_name>" whose evidence grounds this slide
 
 
 class DeckOutlineDraft(BaseModel):
@@ -280,21 +208,6 @@ class RoundAction(BaseModel):
     outline: DeckOutlineDraft | None = None  # when action == "finalize"
 
 
-class SourceSection(BaseModel):
-    """One (paper, section) the slide was grounded in, with the chunk ids read.
-
-    Persisted per slide into ``deck_slides.source_sections_json`` — the
-    traceability north star for slides: every page records the paper
-    section(s) it was written from.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    paper_id: int
-    section_name: str
-    chunk_ids: list[int]
-
-
 class OutlineSlide(BaseModel):
     """A planned slide after deterministic resolution (grounding + index)."""
 
@@ -310,9 +223,6 @@ class OutlineSlide(BaseModel):
     figure_key: str | None
     grounding_chunk_ids: list[int]  # union of read_chunk_ids from each cited aim's PaperContextBundle
     support_excerpts: list[str] = Field(default_factory=list)  # gathered evidence for the drafter
-    # Per-slide source-section grounding for the deck_slides traceability north
-    # star — one entry per cited (paper, section) with that section's chunk ids.
-    source_sections: list[SourceSection] = Field(default_factory=list)
 
 
 class DeckOutline(BaseModel):

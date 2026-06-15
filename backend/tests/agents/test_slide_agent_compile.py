@@ -1,9 +1,6 @@
 import pytest
 
 from paperhub.agents.slide_agent_compile import (
-    detect_bare_visuals,
-    detect_decorated_blocks,
-    detect_long_diagram_nodes,
     run_compile_check,
     run_density_check,
 )
@@ -74,121 +71,6 @@ async def test_density_check_no_compile_runs_overflow_only(tmp_path):
     assert len(result.frame_overflow) == 1
     assert result.compile_errors == []
     assert result.page_count == 0   # density_check never runs pdflatex
-
-
-# A block INSIDE a two-column layout (the breaking case) vs a block in a
-# full-width frame (perfectly fine).
-_BLOCK_DECK = r"""\documentclass{beamer}
-\begin{document}
-\begin{frame}{Title}\titlepage\end{frame}
-\begin{frame}{Two column block}
-\begin{columns}
-\begin{column}{0.5\textwidth}
-\begin{block}{Formula}
-\[ E = mc^2 \]
-\end{block}
-\end{column}
-\begin{column}{0.5\textwidth}
-right
-\end{column}
-\end{columns}
-\end{frame}
-\begin{frame}{Full-width block is fine}
-\begin{block}{Definition}
-\[ a^2 + b^2 = c^2 \]
-\end{block}
-\end{frame}
-\end{document}
-"""
-
-
-def test_detect_decorated_blocks_flags_only_block_in_columns() -> None:
-    signals = detect_decorated_blocks(_BLOCK_DECK)
-    # Only the block INSIDE \begin{columns} is flagged; the full-width block is fine.
-    assert len(signals) == 1
-    assert signals[0].frame_index == 1            # 0-based over \begin{frame}
-    assert signals[0].frame_title == "Two column block"
-    assert "block" in signals[0].block_kinds
-
-
-def test_detect_decorated_blocks_clean_deck() -> None:
-    assert detect_decorated_blocks(_GOOD_DECK) == []
-
-
-_DIAGRAM_DECK = r"""\documentclass{beamer}
-\begin{document}
-\begin{frame}{Short labels are fine}
-\smartdiagram[flow diagram:horizontal]{Unified Framework, Multi-Subspace, RoPE Case}
-\end{frame}
-\begin{frame}{Sentence in node}
-\smartdiagram[descriptive diagram]{
-  {Formalism, {Additive mechanisms (ALiBi) admit a strict group-theoretic formulation}},
-  {Shared Laws, {Inherit exact relative distance laws of multiplicative methods}}
-}
-\end{frame}
-\end{document}
-"""
-
-
-def test_detect_long_diagram_nodes_flags_only_sentence_labels() -> None:
-    signals = detect_long_diagram_nodes(_DIAGRAM_DECK)
-    # The short-label flow diagram is fine; only the sentence-packed one flags.
-    assert len(signals) == 1
-    assert signals[0].frame_index == 1
-    assert signals[0].frame_title == "Sentence in node"
-    assert signals[0].longest_label_chars > 50
-
-
-def test_detect_long_diagram_nodes_clean_deck() -> None:
-    assert detect_long_diagram_nodes(_GOOD_DECK) == []
-
-
-_BARE_DECK = r"""\documentclass{beamer}
-\begin{document}
-\begin{frame}{Bare figure}
-\includegraphics[width=\linewidth]{p0-fig-001}
-\end{frame}
-\begin{frame}{Figure with caption is fine}
-\includegraphics[width=\linewidth]{p0-fig-001}
-\caption{The GRAPE architecture overview.}
-\end{frame}
-\begin{frame}{Figure with explanatory bullets is fine}
-\includegraphics[width=0.6\linewidth]{p0-fig-001}
-\begin{itemize}
-\item The architecture maps positions to rotation matrices end to end.
-\item It recovers RoPE as a constrained special case of the framework.
-\end{itemize}
-\end{frame}
-\begin{frame}{Bare equation}
-\[ E = mc^2 \]
-\end{frame}
-\begin{frame}{Equation with a legend is fine}
-\[ \mathbf{G}(n) = \exp(n\,\omega\,\mathbf{L}) \]
-where the generator rotates each token position by a learned per-head angle omega.
-\end{frame}
-\end{document}
-"""
-
-
-def test_detect_bare_visuals_flags_only_unexplained() -> None:
-    sigs = detect_bare_visuals(_BARE_DECK)
-    flagged = {(s.frame_index, s.kind) for s in sigs}
-    # frame 0 (bare figure) and frame 3 (bare equation) are flagged; the
-    # captioned, bulleted, and legend frames are fine.
-    assert flagged == {(0, "figure"), (3, "equation")}
-
-
-def test_detect_bare_visuals_clean_deck() -> None:
-    # _GOOD_DECK has a single short-bullet frame, no standalone visual.
-    assert detect_bare_visuals(_GOOD_DECK) == []
-
-
-@pytest.mark.asyncio
-async def test_density_check_surfaces_decorated_blocks() -> None:
-    result = await run_density_check(deck_tex=_BLOCK_DECK, bundles=[_bundle()], script="en")
-    assert len(result.decorated_blocks) == 1
-    assert result.decorated_blocks[0].frame_title == "Two column block"
-    assert result.ok is False  # a block-in-columns deck is not "clean"
 
 
 @pytest.mark.asyncio

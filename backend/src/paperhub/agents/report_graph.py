@@ -37,7 +37,7 @@ import json
 import re
 import shutil
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -57,8 +57,6 @@ from paperhub.agents.report_pipeline import (
     parse_slide_budget,
     revise_tex,
 )
-from paperhub.agents.sl_base_write import run_base_write
-from paperhub.agents.sl_cite import frame_grounding_json
 from paperhub.agents.sl_emit import run_sl_emit
 from paperhub.agents.sl_outline import run_sl_outline
 from paperhub.agents.sl_read import ReadResult, read_section_chunks
@@ -862,24 +860,6 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
         outline = outline_result.outline
         await _flush_steps()
 
-        # Deterministic base draft — one tool-free pass turns the outline +
-        # bundles into a complete deck.tex so the revise agent always starts
-        # from a non-empty base deck instead of an empty document.
-        async with _stage_heartbeat(writer, run_id, "report:base_write"):
-            base_deck = await run_base_write(
-                outline=outline,
-                bundles=bundles,
-                resolved_preamble=preamble_with_title,
-                response_language=lang,
-                adapter=deps.adapter,
-                tracer=deps.tracer,
-                model=deps.section_model,
-                task_description=effective_query(state)
-                or state.get("user_message", ""),
-                figure_inventory=figure_inventory,
-            )
-        await _flush_steps()
-
         async with _stage_heartbeat(writer, run_id, "report:drafting"):
             agent_result = await run_slide_agent(
                 bundles=bundles,
@@ -887,7 +867,7 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
                 response_language=lang,
                 resolved_preamble=preamble_with_title,
                 workdir=slides_dir,
-                existing_deck_tex=base_deck,  # GENERATE — revise from the base draft
+                existing_deck_tex=None,  # GENERATE — no prior deck content
                 figure_inventory=figure_inventory,
                 memory_context=_mem,
                 outline=outline,
@@ -955,7 +935,6 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
                 figure_inventory=figure_inventory,
                 conn=deps.conn,
                 recompile=_recompile,
-                outline=outline,
             )
         await _flush_steps()
 
@@ -1357,21 +1336,10 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
         assert fresh is not None
 
         if result.ok:
-            # Preserve per-slide source grounding on edits: re-parse each frame's
-            # "% cite:" marker (the agent keeps it when rewriting) so an edit
-            # never NULLs deck_slides.source_sections_json.
-            _edited = build_deck_slides(result.tex, result.page_count)
-            _grounded = [
-                replace(
-                    s,
-                    source_sections_json=await frame_grounding_json(
-                        s.frame_tex, deps.conn
-                    ),
-                )
-                for s in _edited
-            ]
             await replace_deck_slides(
-                deps.conn, deck_id=fresh.id, slides=_grounded,
+                deps.conn,
+                deck_id=fresh.id,
+                slides=build_deck_slides(result.tex, result.page_count),
             )
             # Restore notes onto the matching slide_index — but skip the
             # ``wipe`` set (slides whose content was rewritten this turn:
