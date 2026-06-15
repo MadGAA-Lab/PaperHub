@@ -1341,7 +1341,9 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
                 deps.conn,
                 deck_id=fresh.id,
                 slides=await with_grounding(
-                    build_deck_slides(result.tex, result.page_count), deps.conn
+                    build_deck_slides(result.tex, result.page_count),
+                    result.tex,
+                    deps.conn,
                 ),
             )
             # Restore notes onto the matching slide_index — but skip the

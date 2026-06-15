@@ -31,6 +31,18 @@ _CITE_RE = re.compile(
 )
 _STRUCTURAL = {"title", "divider", "agenda"}
 
+# One Beamer frame plus any ``% cite:`` comment line(s) immediately preceding
+# ``\begin{frame}``. The agent may place the marker INSIDE the frame OR on the
+# line just before it; frame extraction (build_deck_slides) keeps only the
+# ``\begin{frame}…\end{frame}`` body, dropping a preceding comment — so grounding
+# is resolved from the raw deck here, where the marker still travels with its
+# frame. Group 2 is byte-identical to the extracted frame_tex, used as the join
+# key (no fragile index alignment).
+_FRAME_BLOCK_RE = re.compile(
+    r"((?:[ \t]*%[ \t]*cite:[^\n]*\n\s*)?)(\\begin\{frame\}.*?\\end\{frame\})",
+    re.DOTALL,
+)
+
 
 def parse_cite(frame_tex: str) -> tuple[str, list[tuple[int, str]]] | None:
     """Parse a frame's ``% cite:`` marker.
@@ -98,15 +110,25 @@ async def frame_grounding_json(frame_tex: str, conn: Any) -> str:
 
 
 async def with_grounding(
-    slides: list[DeckSlideInput], conn: Any
+    slides: list[DeckSlideInput], deck_tex: str, conn: Any
 ) -> list[DeckSlideInput]:
     """Return ``slides`` with each one's ``source_sections_json`` resolved from
     its frame's ``% cite:`` marker. The single enrich point shared by every
     deck-write path (sl_emit GENERATE, the EDIT flow, the RESTORE flow) so
-    grounding is computed identically everywhere and never dropped on an edit."""
+    grounding is computed identically everywhere and never dropped on an edit.
+
+    Grounding is resolved from ``deck_tex`` (the full source), not from the
+    stored ``frame_tex``: the agent often places the marker on the line just
+    BEFORE ``\\begin{frame}``, which frame extraction strips out. Each frame is
+    matched to its slide by exact frame-body equality (group 2 == frame_tex),
+    so title-drop / ordering never misaligns the grounding."""
+    by_frame: dict[str, str] = {}
+    for m in _FRAME_BLOCK_RE.finditer(deck_tex):
+        block = m.group(1) + m.group(2)
+        by_frame[m.group(2)] = await frame_grounding_json(block, conn)
     return [
         dataclasses.replace(
-            s, source_sections_json=await frame_grounding_json(s.frame_tex, conn)
+            s, source_sections_json=by_frame.get(s.frame_tex, "[]")
         )
         for s in slides
     ]

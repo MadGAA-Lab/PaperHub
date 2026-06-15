@@ -535,7 +535,9 @@ async def restore_deck_version(
                 conn,
                 deck_id=fresh.id,
                 slides=await with_grounding(
-                    build_deck_slides(result_tex, result_page_count), conn
+                    build_deck_slides(result_tex, result_page_count),
+                    result_tex,
+                    conn,
                 ),
             )
             if bundled_notes:

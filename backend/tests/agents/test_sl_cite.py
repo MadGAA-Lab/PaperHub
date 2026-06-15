@@ -2,8 +2,13 @@ import json
 
 import pytest
 
-from paperhub.agents.sl_cite import frame_grounding_json, parse_cite
+from paperhub.agents.sl_cite import (
+    frame_grounding_json,
+    parse_cite,
+    with_grounding,
+)
 from paperhub.db.connection import open_db
+from paperhub.db.deck_slides import DeckSlideInput
 from paperhub.db.migrate import apply_schema
 
 
@@ -83,3 +88,29 @@ async def test_frame_grounding_structural_is_empty(tmp_path) -> None:
         await _seed_chunks(conn)
         assert await frame_grounding_json("% cite: title\n", conn) == "[]"
         assert await frame_grounding_json("\\begin{frame}{x}\\end{frame}", conn) == "[]"
+
+
+@pytest.mark.asyncio
+async def test_with_grounding_marker_before_frame(tmp_path) -> None:
+    """The agent places % cite: on the line BEFORE \\begin{frame}; frame
+    extraction strips it, so with_grounding must resolve from the full deck."""
+    # Frame body as build_deck_slides would store it (NO marker — stripped).
+    frame_body = "\\begin{frame}{Intro}\n  \\begin{itemize}\\item a\\end{itemize}\n\\end{frame}"
+    title_body = "\\begin{frame}{}\n\\titlepage\n\\end{frame}"
+    deck_tex = (
+        "\\begin{document}\n"
+        "% cite: title\n" + title_body + "\n\n"
+        "% cite: 38:1 INTRODUCTION\n" + frame_body + "\n"
+        "\\end{document}\n"
+    )
+    slides = [
+        DeckSlideInput(slide_index=0, frame_tex=frame_body, page_start=2, page_end=2),
+    ]
+    async with open_db(str(tmp_path / "t.db")) as conn:
+        await apply_schema(conn)
+        await _seed_chunks(conn)
+        out = await with_grounding(slides, deck_tex, conn)
+        ss = json.loads(out[0].source_sections_json)
+        assert ss == [
+            {"paper_id": 38, "section_name": "1 INTRODUCTION", "chunk_ids": [11, 12]}
+        ]

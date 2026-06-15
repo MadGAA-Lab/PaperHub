@@ -598,7 +598,9 @@ async def run_sl_emit(
     # paths on build_deck_slides eliminates the asymmetry.
     # Resolve per-slide source grounding from each frame's % cite: marker
     # (north-star traceback). Non-blocking: an unsourced frame persists "[]".
-    inputs = await with_grounding(build_deck_slides(audited_tex, page_count), conn)
+    inputs = await with_grounding(
+        build_deck_slides(audited_tex, page_count), audited_tex, conn
+    )
     for s in inputs:
         note_text = (speaker_notes or {}).get(s.slide_index)
         await conn.execute(
