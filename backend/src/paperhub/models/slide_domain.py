@@ -154,6 +154,25 @@ class LongDiagramNodeSignal(BaseModel):
     sample_label: str  # the offending label (truncated)
 
 
+class CiteViolationSignal(BaseModel):
+    """A frame whose source-cite marker is missing, structural-on-content, or
+    cites a section with no evidence. Every frame must carry a ``% cite:`` marker
+    (content → real ``<paper_id>:<section_name>``; structural → title/divider/
+    agenda). A content slide with no real cited section is a HALLUCINATION (no
+    source). Detected deterministically and fed back so the agent rewrites the
+    slide from a real source. Reasons: ``missing`` (no marker), ``fake_structural``
+    (title/divider marker on a real content slide), ``no_evidence`` (cited section
+    not found in the paper's chunks), ``content_uncited`` (content slide with no
+    content cite)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    frame_index: int  # 0-based over \begin{frame} occurrences
+    frame_title: str
+    reason: str  # missing | fake_structural | no_evidence | content_uncited
+    detail: str  # the offending marker / cited section, for the agent
+
+
 class BareVisualSignal(BaseModel):
     """A frame whose figure / table / equation is presented BARE — no
     ``\\caption`` (or notation legend) AND essentially no explanatory text. A
@@ -217,7 +236,7 @@ class OutlineSlideDraft(BaseModel):
     figure_key: str | None = None  # inventory key, if the slide centres on a figure
     grounding_sections: list[str] = Field(default_factory=list)  # legacy: bundle section names (unused in F6.1+)
     cites_aims: list[str] = Field(default_factory=list)  # legacy (unused in F6.1-R): the aims whose gathered chunks ground this slide
-    cites_reads: list[str] = Field(default_factory=list)  # read keys "<paper_id>:<section_name>" whose evidence grounds this slide
+    cites_reads: list[str] = Field(default_factory=list)  # REQUIRED on every content slide: the digest section key(s) "<paper_id>:<section_name>" the slide is built from (read or not) — the slide's source attribution (north-star traceback)
 
 
 class DeckOutlineDraft(BaseModel):
