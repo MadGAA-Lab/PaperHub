@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { StreamLanguage } from "@codemirror/language";
+import { EditorView } from "@codemirror/view";
 import { stex } from "@codemirror/legacy-modes/mode/stex";
 import { useTranslation } from "react-i18next";
 import { useTheme } from "next-themes";
@@ -41,13 +42,22 @@ export function SlideLatexEditor({
 }: Props) {
   const { t } = useTranslation("slides");
   const { resolvedTheme } = useTheme();
-  const extensions = useMemo(() => [StreamLanguage.define(stex)], []);
+  // Wrap long lines so a wide LaTeX line can never force the editor (and with
+  // it the header's Save/Cancel) past the panel's right edge.
+  const extensions = useMemo(
+    () => [StreamLanguage.define(stex), EditorView.lineWrapping],
+    [],
+  );
 
   return (
-    <div className="flex flex-1 min-h-0 flex-col bg-card">
+    // min-w-0 is load-bearing: as a flex child the editor's default
+    // min-width:auto would let CodeMirror's content set the width and overflow
+    // the panel (pushing the Save/Cancel header off-screen). min-w-0 lets it
+    // shrink to the available width; overflow-hidden clips the rest.
+    <div className="flex flex-1 min-h-0 min-w-0 flex-col overflow-hidden bg-card">
       {/* Header: scope banner + Save / Cancel */}
       <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border shrink-0">
-        <span className="text-xs font-medium text-muted-foreground truncate">
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-muted-foreground">
           {scope === "frame"
             ? t("editor.scopeFrame", "Editing this frame")
             : t("editor.scopeDeck", "Editing the whole deck")}
@@ -96,8 +106,10 @@ export function SlideLatexEditor({
         </div>
       )}
 
-      {/* The editor fills the rest and scrolls internally. */}
-      <div className="flex-1 min-h-0 overflow-auto">
+      {/* The editor fills the rest and scrolls internally. min-w-0 keeps it
+          within the panel; max-w-full + the wrapped lines stop any horizontal
+          overflow. */}
+      <div className="flex-1 min-h-0 min-w-0 overflow-auto">
         <CodeMirror
           value={value}
           onChange={onChange}
@@ -105,6 +117,7 @@ export function SlideLatexEditor({
           theme={resolvedTheme === "dark" ? "dark" : "light"}
           extensions={extensions}
           height="100%"
+          className="max-w-full text-xs"
           basicSetup={{ lineNumbers: true, foldGutter: true }}
         />
       </div>
