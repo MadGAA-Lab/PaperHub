@@ -141,6 +141,10 @@ CREATE TABLE IF NOT EXISTS deck_slides (
     note_language TEXT,                      -- independent of the deck/slide language
     page_start INTEGER NOT NULL,             -- 1-based PDF page this frame starts on
     page_end INTEGER NOT NULL,               -- 1-based PDF page this frame ends on
+    source_sections_json TEXT NOT NULL DEFAULT '[]',  -- per-slide source grounding:
+                                             -- JSON [{paper_id, section_name, chunk_ids}],
+                                             -- resolved from the frame's % cite: marker
+                                             -- (north-star traceback; not shown on slide)
     UNIQUE (deck_id, slide_index)
 );
 

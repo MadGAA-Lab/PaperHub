@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from paperhub.db.connection import open_db
@@ -39,6 +41,27 @@ async def test_replace_and_get(tmp_path) -> None:
         rows = await get_deck_slides(conn, deck_id=deck_id)
         assert [r.slide_index for r in rows] == [0, 1]
         assert rows[0].note_text is None and rows[0].page_end == 1
+
+
+@pytest.mark.asyncio
+async def test_source_sections_round_trip(tmp_path) -> None:
+    """Per-slide grounding (source_sections_json) persists and defaults to []."""
+    grounding = json.dumps(
+        [{"paper_id": 38, "section_name": "1 INTRODUCTION", "chunk_ids": [11, 12]}]
+    )
+    async with open_db(str(tmp_path / "t.db")) as conn:
+        await apply_schema(conn)
+        deck_id = await _seed_deck(conn)
+        await replace_deck_slides(conn, deck_id=deck_id, slides=[
+            DeckSlideInput(slide_index=0, frame_tex="f0", page_start=1, page_end=1,
+                           source_sections_json=grounding),
+            DeckSlideInput(slide_index=1, frame_tex="f1", page_start=2, page_end=2),
+        ])
+        rows = await get_deck_slides(conn, deck_id=deck_id)
+        assert json.loads(rows[0].source_sections_json)[0]["paper_id"] == 38
+        assert json.loads(rows[0].source_sections_json)[0]["chunk_ids"] == [11, 12]
+        # Unsourced / structural slide defaults to an empty array, never NULL.
+        assert rows[1].source_sections_json == "[]"
 
 
 @pytest.mark.asyncio

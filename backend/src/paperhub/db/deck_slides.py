@@ -21,6 +21,10 @@ class DeckSlideInput:
     page_end: int
     note_text: str | None = None
     note_language: str | None = None
+    # Per-slide source grounding (north-star traceback): a JSON array of
+    # {paper_id, section_name, chunk_ids} resolved from the frame's % cite:
+    # marker. Defaults to "[]" (ungrounded / structural slide).
+    source_sections_json: str = "[]"
 
 
 @dataclass(frozen=True)
@@ -33,6 +37,7 @@ class DeckSlideRow:
     note_language: str | None
     page_start: int
     page_end: int
+    source_sections_json: str = "[]"
 
 
 async def replace_deck_slides(
@@ -42,10 +47,11 @@ async def replace_deck_slides(
     await conn.execute("DELETE FROM deck_slides WHERE deck_id = ?", (deck_id,))
     await conn.executemany(
         "INSERT INTO deck_slides (deck_id, slide_index, frame_tex, note_text, "
-        "note_language, page_start, page_end) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "note_language, page_start, page_end, source_sections_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (deck_id, s.slide_index, s.frame_tex, s.note_text,
-             s.note_language, s.page_start, s.page_end)
+             s.note_language, s.page_start, s.page_end, s.source_sections_json)
             for s in slides
         ],
     )
@@ -58,7 +64,8 @@ async def get_deck_slides(
     """Return all frames for `deck_id`, ordered by `slide_index`."""
     async with conn.execute(
         "SELECT id, deck_id, slide_index, frame_tex, note_text, note_language, "
-        "page_start, page_end FROM deck_slides WHERE deck_id = ? ORDER BY slide_index",
+        "page_start, page_end, source_sections_json "
+        "FROM deck_slides WHERE deck_id = ? ORDER BY slide_index",
         (deck_id,),
     ) as cur:
         rows = await cur.fetchall()
@@ -66,6 +73,7 @@ async def get_deck_slides(
         DeckSlideRow(
             id=r[0], deck_id=r[1], slide_index=r[2], frame_tex=r[3],
             note_text=r[4], note_language=r[5], page_start=r[6], page_end=r[7],
+            source_sections_json=r[8] if r[8] is not None else "[]",
         )
         for r in rows
     ]
