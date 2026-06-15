@@ -141,6 +141,34 @@ export interface DeckEventData {
   version_id?: string | null;
 }
 
+/** One cited source on a slide (F6.2 grounding): the chunks of a paper section
+ *  the slide was written from. Empty `chunk_ids` = an "unsourced" cite (the
+ *  marker named a section with no evidence). */
+export interface SlideSourceSection {
+  paper_id: number;
+  section_name: string;
+  chunk_ids: number[];
+}
+
+/** Per-slide detail for the manual frame editor + the Sources strip
+ *  (GET /sessions/{id}/deck/slides). */
+export interface DeckSlideDetail {
+  slide_index: number;
+  page_start: number;
+  page_end: number;
+  frame_tex: string;
+  source_sections: SlideSourceSection[];
+}
+
+/** Result of a manual recompile (PUT /deck/slides/{page}/tex or /deck/tex). A
+ *  compile failure is a normal outcome: `ok:false` with the pdflatex `log`. */
+export interface ManualEditResult {
+  ok: boolean;
+  status: string;
+  page_count?: number;
+  log?: string;
+}
+
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;

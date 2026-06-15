@@ -10,6 +10,8 @@ import type {
   MemoryStatus,
   MemoryScope,
   DeckMeta,
+  DeckSlideDetail,
+  ManualEditResult,
   ToolCallRecord,
   ForkResult,
 } from "@/types/domain";
@@ -429,6 +431,48 @@ export async function fetchDeckPdfData(
 /** Build the URL for downloading the session's deck LaTeX source. */
 export function deckTexUrl(sessionId: number): string {
   return `${API_BASE_URL}/sessions/${sessionId}/deck/tex`;
+}
+
+/** Fetch the deck LaTeX source as TEXT (for the manual whole-deck editor) —
+ *  distinct from `deckTexUrl`, which is a download link. */
+export async function getDeckTexText(sessionId: number): Promise<string> {
+  const res = await fetch(deckTexUrl(sessionId));
+  if (!res.ok) throw new Error(`API ${res.status}`);
+  return res.text();
+}
+
+/** Fetch per-slide detail (frame source + source grounding) for the manual
+ *  frame editor + the per-page Sources strip (GET /deck/slides). */
+export async function getDeckSlides(
+  sessionId: number,
+): Promise<DeckSlideDetail[]> {
+  return apiFetch<DeckSlideDetail[]>(`/sessions/${sessionId}/deck/slides`);
+}
+
+/** Manually edit the frame occupying `page` and recompile the whole deck.
+ *  A compile failure resolves to `{ok:false, log}` (HTTP 200), NOT a throw —
+ *  the editor renders the log and keeps the last-good PDF on screen. */
+export async function putFrameTex(
+  sessionId: number,
+  page: number,
+  frameTex: string,
+): Promise<ManualEditResult> {
+  return apiFetch<ManualEditResult>(
+    `/sessions/${sessionId}/deck/slides/${page}/tex`,
+    { method: "PUT", body: JSON.stringify({ frame_tex: frameTex }) },
+  );
+}
+
+/** Manually replace the entire deck source and recompile. Same `{ok:false,log}`
+ *  contract on a compile failure as `putFrameTex`. */
+export async function putDeckTex(
+  sessionId: number,
+  tex: string,
+): Promise<ManualEditResult> {
+  return apiFetch<ManualEditResult>(`/sessions/${sessionId}/deck/tex`, {
+    method: "PUT",
+    body: JSON.stringify({ tex }),
+  });
 }
 
 /** Fetch a run's recorded agent trace (tool_calls), lazily, after a refresh
