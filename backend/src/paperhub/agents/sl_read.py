@@ -14,6 +14,16 @@ from pydantic import BaseModel, ConfigDict
 _READ_TEXT_CAP: int = 6000
 
 
+def _norm_section(section: str) -> str:
+    """Normalize a section name for lenient matching (lowercase + collapse
+    whitespace) — IDENTICAL to the cite gate's normalization (sl_cite), so a cite
+    the gate accepts ALWAYS resolves to the same chunks here. Without this the
+    gate (normalized) and resolution (exact) could disagree: a gate-valid cite
+    like ``73:method`` would resolve to no chunks when the DB section is
+    ``Method`` — grounding present in name, empty in evidence."""
+    return " ".join(section.split()).lower()
+
+
 class ReadResult(BaseModel):
     """The text and contributing chunk IDs for a single section fetch."""
 
@@ -54,6 +64,27 @@ async def read_section_chunks(
         (paper_content_id, section_name),
     ) as cur:
         rows = await cur.fetchall()
+
+    if not rows:
+        # Normalized fallback: the cite gate accepts a section by its normalized
+        # form, so resolve the canonical DB section name that matches and fetch
+        # its chunks — otherwise a gate-valid cite could ship with empty chunks.
+        target = _norm_section(section_name)
+        async with conn.execute(
+            "SELECT DISTINCT section FROM chunks WHERE paper_content_id = ?",
+            (paper_content_id,),
+        ) as cur:
+            sections = [r[0] for r in await cur.fetchall() if r[0] is not None]
+        canonical = next((s for s in sections if _norm_section(s) == target), None)
+        if canonical is None:
+            return ReadResult(text="", chunk_ids=[])
+        async with conn.execute(
+            "SELECT id, text FROM chunks "
+            "WHERE paper_content_id = ? AND section = ? "
+            "ORDER BY char_start",
+            (paper_content_id, canonical),
+        ) as cur:
+            rows = await cur.fetchall()
 
     if not rows:
         return ReadResult(text="", chunk_ids=[])
