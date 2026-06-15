@@ -512,3 +512,16 @@ async def test_degenerate_outline_falls_back_to_minimal(conn: aiosqlite.Connecti
         row = await cur.fetchone()
     assert row is not None
     assert any("outline-degenerate" in d for d in json.loads(row[0])["dropped"])
+
+
+def test_route_case_deterministic() -> None:
+    from paperhub.agents.sl_outline import _route_case
+    one = _digests()[:1]               # 1 non-survey paper
+    two = _digests()                   # 2 papers
+    assert _route_case(one) == "single"
+    assert _route_case(two) == "multi"
+    # survey: a single paper whose title/abstract looks like a survey
+    survey = [PaperDigest(paper_id=9, title="A Survey of Attention Mechanisms",
+                          abstract="This survey reviews ...", sections=[DigestSection(name="S", insight="i")],
+                          figures=[])]
+    assert _route_case(survey) == "survey"

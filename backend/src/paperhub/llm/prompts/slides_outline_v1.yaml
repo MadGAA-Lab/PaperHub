@@ -35,8 +35,9 @@ system: |
   (~{target_slides}) is a rough guide, but CLARITY AND FOCUS WIN — use more
   slides when a topic needs them rather than cramming everything onto one.
 
-  CONCEPT-DRIVEN DESIGN RULES
-  - Each slide conveys ONE concept, developed with evidence.  Never a reel of
+  GOOD-SLIDE PRINCIPLES (design freely within these — they are NOT a fixed
+  structure; the storyline is yours):
+  - Each slide conveys ONE concept, developed with evidence. Never a reel of
     highlight bullets.
   - LEVERAGE THE PAPER'S RICH CONTENT to support the talk. The digest lists each
     paper's FIGURES (with captions — read them to know what each shows), KEY
@@ -47,47 +48,20 @@ system: |
     to the content: use `bullets` when the point is genuinely a short list, and
     do NOT force a visual where the source has none. The failure mode to avoid is
     leaving the paper's figures/tables/equations UNUSED while defaulting to text.
-  - Open with a problem/tension framing slide — never with a taxonomy or a
-    raw result.
-  - For multi-paper decks, SYNTHESIZE: each paper-to-paper transition must say
-    how the next slide builds on, contrasts with, or answers a gap in the
-    previous one.
-  - End with a synthesis slide that fuses the threads into one actionable
-    takeaway.
-  - A SURVEY paper is internally multi-work: decompose it into its surveyed
-    branches or methods as separate threads; do NOT collapse a survey into one
-    shallow slide.
 
-  NARRATIVE PATTERN — choose one based on paper count, relationship, and user
-  task; the chosen pattern dictates the slide skeleton:
-  - single_paper   : single paper deep-dive
-  - sequence       : papers build on each other chronologically
-  - comparison     : two or more papers compared head-to-head
-  - synthesis      : multiple papers fused into one argument
-  - tutorial       : step-by-step instructional arc
-  - application    : method -> how to apply it -> case study
-  - taxonomy       : survey / classification of a field
+  You design the actual storyline; the note below is just context for THIS deck,
+  not a structure to follow:
+  {case_suggestion}
 
-  PER-CASE SKELETON — the three cases you MUST nail; adapt the arc to the case:
-  - SINGLE PAPER (single_paper): a continuous deep-dive. FRONT TITLE (always
-    slide 1) -> problem / motivation -> the method shown via its KEY FIGURE or
-    EQUATION -> results as the paper's RESULTS TABLE -> takeaway. The FRONT title
-    page is ALWAYS present — one flowing arc, ~8-15 slides.
-  - SURVEY / FIELD WALKTHROUGH (taxonomy): a single survey paper is internally
-    MANY works. Decompose the field into its main branches/methods; give each
-    branch ONE short thread (the problem it solves + its key idea, shown
-    visually), then a synthesis that compares the branches. Use a section_divider
-    ONLY when there are several genuinely distinct branches.
-  - MULTIPLE PAPERS COMPARED (comparison): head-to-head. frame the shared
-    problem -> one thread per paper (each with its key visual) -> a COMPARISON
-    TABLE (axes x papers) -> a synthesis of the trade-offs. Every paper-to-paper
-    transition states how the next contrasts with / improves on the previous.
-
-  CONTENT FORM — pick the right visual for each slide:
+  CONTENT FORM — the visual forms available; pick whichever fits each slide
+  (these are options to choose from, not a checklist or a quota):
   - title            : the deck's FRONT title page (\titlepage) — ALWAYS the
                        first slide of EVERY deck; never omitted
   - agenda           : table of contents (long multi-part decks only)
-  - section_divider  : part header — use SPARINGLY (see STRUCTURE DISCIPLINE)
+  - section_divider  : part header — announces moving to a DIFFERENT PART of the
+                       talk, telling the audience "this is a new part": e.g. now a
+                       DIFFERENT paper, or now the COMPARISON section. Use it only
+                       at a genuine part boundary (see STRUCTURE DISCIPLINE)
   - problem          : motivating the gap
   - method           : how the method works
   - concept_figure   : a mechanism shown as a FIGURE — either a paper figure

@@ -73,6 +73,46 @@ def _read_key(paper_id: int, section: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Deterministic case router — picks the loose per-case suggestion injected into
+# the outline prompt, so the agent sees ONE focused suggestion (not a fat
+# multi-case skeleton). The case is a pure function of paper count + survey
+# detection; the outline agent still DESIGNS the storyline.
+# ---------------------------------------------------------------------------
+
+def _route_case(digests: list[PaperDigest]) -> str:
+    if len(digests) >= 2:
+        return "multi"
+    if digests and _looks_like_survey(digests[0].title, digests[0].abstract):
+        return "survey"
+    return "single"
+
+
+# Per-case note injected by the router. NOT a predefined structure — the
+# outliner designs the storyline freely. A real constraint is added ONLY for the
+# multi-paper case (the failure mode: distinct works blended into one paper).
+_CASE_SUGGESTION: dict[str, str] = {
+    "single": (
+        "ONE paper. You have full freedom to design the storyline — there is no "
+        "required structure."
+    ),
+    "survey": (
+        "ONE (physical) survey paper that internally covers many works. You have "
+        "full freedom to design the storyline. It is a SINGLE paper, so it needs "
+        "no per-work dividers."
+    ),
+    "multi": (
+        "SEVERAL DISTINCT papers. You have full freedom to design the storyline "
+        "(order, framing, how the works connect), BUT the works must stay visibly "
+        "SEPARATE so the audience always knows which paper is on screen: put a "
+        "VISUAL INDICATOR at each work's boundary (a section_divider naming the "
+        "paper) and, when a slide presents an idea, make clear WHICH paper it is "
+        "from (e.g., 'In <paper>, ...'). Never blend distinct papers into one "
+        "undifferentiated single-paper narrative."
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
 # Prompt-formatting helpers
 # ---------------------------------------------------------------------------
 
@@ -362,6 +402,8 @@ async def run_sl_outline(
         )
 
         digest_block = _format_digest_block(digests)  # constant per run
+        case = _route_case(digests)  # deterministic: single / survey / multi
+        case_suggestion = _CASE_SUGGESTION[case]
 
         for round_num in range(1, max_rounds + 1):
             rounds_used = round_num
@@ -374,6 +416,7 @@ async def run_sl_outline(
                     "task_description": task_description,
                     "response_language": response_language,
                     "target_slides": target_slides,
+                    "case_suggestion": case_suggestion,
                     "digest_block": digest_block,
                     "read_block": read_block,
                     "round_number": round_num,
@@ -513,6 +556,7 @@ async def run_sl_outline(
         step.record_result(
             {
                 "talk_title": outline.talk_title,
+                "case": case,  # deterministic router: single / survey / multi
                 "narrative_pattern": outline.narrative_pattern,
                 "audience_intent": outline.audience_intent,
                 "narrative_arc": outline.narrative_arc,
