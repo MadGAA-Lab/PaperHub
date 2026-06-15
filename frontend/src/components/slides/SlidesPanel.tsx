@@ -13,8 +13,10 @@ import {
   ChevronLeft,
   ChevronRight,
   Download,
+  FileCode,
   Loader2,
   Pencil,
+  PencilLine,
   Presentation,
   X,
 } from "lucide-react";
@@ -25,11 +27,23 @@ import {
   FILMSTRIP_MAX_WIDTH,
   NOTE_MIN_HEIGHT,
 } from "@/store/slides";
-import { fetchDeckPdfData, deckPdfUrl, deckTexUrl } from "@/lib/api";
+import { useChatStore } from "@/store/chat";
+import {
+  fetchDeckPdfData,
+  deckPdfUrl,
+  deckTexUrl,
+  getDeckSlides,
+  getDeckTexText,
+  putFrameTex,
+  putDeckTex,
+  putSlideSources,
+} from "@/lib/api";
 import { pushWidth } from "@/lib/stableWidth";
 import { Button } from "@/components/ui/button";
 import { usePresentation } from "@/hooks/usePresentation";
 import { PresenterControls } from "@/components/slides/PresenterControls";
+import { SlideLatexEditor } from "@/components/slides/SlideLatexEditor";
+import { SourcesStrip } from "@/components/slides/SourcesStrip";
 
 // pdf.js needs a worker; resolve it from the installed pdfjs-dist via Vite's
 // import.meta.url so the worker is bundled + served from the app origin.
@@ -105,6 +119,40 @@ export function SlidesPanel({
   const filmstripWidth = useSlidesStore((s) => s.filmstripWidth);
   const setFilmstripWidth = useSlidesStore((s) => s.setFilmstripWidth);
 
+  // --- F6.2 manual editing + Sources strip ---
+  const editorMode = useSlidesStore(
+    (s) => s.editorModeBySession[sessionId] ?? "off",
+  );
+  const setEditorMode = useSlidesStore((s) => s.setEditorMode);
+  const slidesSources = useSlidesStore(
+    (s) => s.slidesSourcesBySession[sessionId],
+  );
+  const setSlidesSources = useSlidesStore((s) => s.setSlidesSources);
+  const bumpDeckRevision = useSlidesStore((s) => s.bumpDeckRevision);
+  // paper_content_id → title for the Sources chips, from the session's refs.
+  const references = useChatStore((s) => s.referencesBySession[sessionId]);
+  const titleByPaperId = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const r of references ?? []) m.set(r.paper_content_id, r.title);
+    return m;
+  }, [references]);
+  // The Add-source picker offers the session's papers (its references) — the
+  // reliable, always-populated list. The backend validates the same scope.
+  const pickerPapers = useMemo(
+    () =>
+      (references ?? []).map((r) => ({
+        paper_content_id: r.paper_content_id,
+        title: r.title,
+      })),
+    [references],
+  );
+
+  // Local editor draft + state (the persisted bits — mode + sources — live in
+  // the store so a panel remount during Q&A doesn't lose them).
+  const [editorDraft, setEditorDraft] = useState("");
+  const [editorErrorLog, setEditorErrorLog] = useState<string | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+
   // Currently-loaded PDF bytes + the (session, revision) they belong to. We
   // keep the last good bytes on screen while a newer revision of the SAME
   // session is fetching so an edit-complete reload swaps in under the mask
@@ -149,6 +197,10 @@ export function SlidesPanel({
     roRef.current = null;
     if (!el) return;
     const measure = () => {
+      // While the panel is hidden (kept mounted on a Canvas swap) clientWidth is
+      // 0; ignore it and KEEP the last good width so the rasterized pages aren't
+      // re-rendered to 0 and back — the swap stays instant (no reload flash).
+      if (el.clientWidth === 0) return;
       const next = Math.max(0, el.clientWidth - 16);
       // Flap guard: reject a width that bounces back across a scrollbar
       // threshold so the layout can't oscillate forever (issue #6).
@@ -171,6 +223,7 @@ export function SlidesPanel({
     filmRoRef.current = null;
     if (!el) return;
     const measure = () => {
+      if (el.clientWidth === 0) return; // hidden — keep the last width (see main area)
       const next = Math.max(32, el.clientWidth - 12);
       const step = pushWidth(thumbWidthRecent.current, next);
       thumbWidthRecent.current = step.recent;
@@ -220,6 +273,23 @@ export function SlidesPanel({
     };
   }, [sessionId, revision, busy, fetchKey, loadedKey]);
 
+  // Fetch per-slide detail (frame source + grounding) for the editor + Sources
+  // strip, keyed on (session, revision) so a recompile refreshes it. Gated on
+  // !busy: mid-edit the deck_slides rows are being rewritten. A 404 (no deck)
+  // clears it.
+  useEffect(() => {
+    if (busy) return;
+    let cancelled = false;
+    getDeckSlides(sessionId)
+      .then((rows) => {
+        if (!cancelled) setSlidesSources(sessionId, rows);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, revision, busy, setSlidesSources]);
+
   // pdfjs TRANSFERS (detaches) the ArrayBuffer it's given to its worker, so
   // pass a fresh COPY each time (same pattern as PdfView.tsx). Only render the
   // bytes if they belong to THIS session (on a session switch the old session's
@@ -244,6 +314,17 @@ export function SlidesPanel({
     !busy && bytes !== null && loadedSid === sessionId && loadedRev !== revision;
   const pdfRendering = file !== null && renderedKey !== fetchKey;
   const masked = busy || restoringVersion || reloading || pdfRendering;
+  // The mask heading reflects WHY it's up: a version restore, a genuine
+  // update/reload (an edit recompiled → new bytes), or just the first-load
+  // parse/raster of an UNCHANGED deck (``pdfRendering`` alone). The last case
+  // is a plain "Loading", not "Updating" — saying "Updating slides…" when
+  // nothing changed is misleading.
+  const updating = busy || reloading;
+  const maskHeading = restoringVersion
+    ? t("panel.mask.restoring")
+    : updating
+      ? t("panel.mask.updating")
+      : t("panel.mask.loading", "Loading slides…");
   // Restore wins as the stage label when both are present so the user knows
   // why the panel masked (version switch vs. chat-turn edit). The chat-turn's
   // ``stage`` prop carries live slide-agent stage names when ``busy`` is set.
@@ -251,18 +332,36 @@ export function SlidesPanel({
     ? t("panel.mask.restoring")
     : stage;
 
+  // Navigate to a page (clamped). In frame-edit mode the editor FOLLOWS the
+  // active page: it loads that page's frame source, discarding an unsaved draft
+  // (the editor tracks whichever slide you're on). No-op for the draft when not
+  // editing a frame. Shared by the keyboard, the header arrows, and the
+  // filmstrip so every navigation path keeps the editor in sync.
+  const goTo = useCallback(
+    (page: number) => {
+      const clamped = Math.min(Math.max(page, 1), numPages || 1);
+      setCurrentPage(sessionId, clamped);
+      if (editorMode === "frame") {
+        const tgt = (slidesSources ?? []).find(
+          (s) => s.page_start <= clamped && clamped <= s.page_end,
+        );
+        // Load the CONTENT (cite markers stripped) — the editor is content-only.
+        setEditorDraft(tgt?.content_tex ?? tgt?.frame_tex ?? "");
+        setEditorErrorLog(null);
+      }
+    },
+    [numPages, sessionId, editorMode, slidesSources, setCurrentPage],
+  );
+
   // Keyboard navigation.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "ArrowLeft") {
-        setCurrentPage(sessionId, Math.max(1, currentPage - 1));
-      } else if (e.key === "ArrowRight") {
-        setCurrentPage(sessionId, Math.min(numPages || 1, currentPage + 1));
-      }
+      if (e.key === "ArrowLeft") goTo(currentPage - 1);
+      else if (e.key === "ArrowRight") goTo(currentPage + 1);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [sessionId, currentPage, numPages, setCurrentPage]);
+  }, [currentPage, goTo]);
 
   // Draggable vertical divider — mirrors useCanvasResize but on the Y axis.
   const onDividerPointerDown = useCallback(
@@ -316,12 +415,87 @@ export function SlidesPanel({
     [filmstripWidth, setFilmstripWidth],
   );
 
-  const goTo = (page: number) => {
-    const clamped = Math.min(Math.max(page, 1), numPages || 1);
-    setCurrentPage(sessionId, clamped);
+  const speakerNote = speakerNotes[String(currentPage)];
+
+  // The slide whose page span covers the current page (the owner of a
+  // continuation page) — drives the frame editor + the Sources strip.
+  const currentSlide = useMemo(
+    () =>
+      (slidesSources ?? []).find(
+        (s) => s.page_start <= currentPage && currentPage <= s.page_end,
+      ) ?? null,
+    [slidesSources, currentPage],
+  );
+  const currentSources = currentSlide?.source_sections ?? [];
+
+  const canEdit = deck?.status === "ok" && !busy;
+  const editing = editorMode !== "off";
+
+  // Enter "edit current frame" — load the slide CONTENT only (cite markers
+  // stripped; grounding is managed via the Sources reference editor below).
+  const beginEditFrame = () => {
+    if (!currentSlide) return;
+    setEditorErrorLog(null);
+    setEditorDraft(currentSlide.content_tex ?? currentSlide.frame_tex);
+    setEditorMode(sessionId, "frame");
   };
 
-  const speakerNote = speakerNotes[String(currentPage)];
+  // Persist the current slide's grounding from the Sources reference editor —
+  // deterministic, NO recompile (the % cite: marker is a LaTeX comment). Then
+  // refresh the per-slide detail so the strip + chips reflect the new sources.
+  const setCurrentSlideSources = async (
+    pairs: { paper_id: number; section_name: string }[],
+  ) => {
+    await putSlideSources(sessionId, currentPage, pairs);
+    try {
+      setSlidesSources(sessionId, await getDeckSlides(sessionId));
+    } catch {
+      /* a transient refetch failure self-heals on the next load */
+    }
+  };
+  // Enter "edit all deck" — fetch the whole deck.tex as text.
+  const beginEditDeck = async () => {
+    setEditorErrorLog(null);
+    try {
+      setEditorDraft(await getDeckTexText(sessionId));
+      setEditorMode(sessionId, "deck");
+    } catch {
+      setEditorErrorLog("failed to load deck source");
+    }
+  };
+  const cancelEdit = () => {
+    setEditorMode(sessionId, "off");
+    setEditorErrorLog(null);
+  };
+  // Save → recompile in the background → reload the deck, staying on the
+  // current page. A compile failure keeps the editor open with the log.
+  const saveEdit = async () => {
+    setSavingEdit(true);
+    setEditorErrorLog(null);
+    try {
+      const res =
+        editorMode === "frame"
+          ? await putFrameTex(sessionId, currentPage, editorDraft)
+          : await putDeckTex(sessionId, editorDraft);
+      if (res.ok) {
+        setEditorMode(sessionId, "off");
+        // Force a cache-busted PDF refetch + refresh the per-slide detail; the
+        // current page is left untouched (clamped on PDF load if the deck shrank).
+        bumpDeckRevision(sessionId);
+        try {
+          setSlidesSources(sessionId, await getDeckSlides(sessionId));
+        } catch {
+          /* a transient slides refetch failure self-heals on the next load */
+        }
+      } else {
+        setEditorErrorLog(res.log ?? "compile failed");
+      }
+    } catch (e) {
+      setEditorErrorLog(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingEdit(false);
+    }
+  };
 
   // --- manual speaker-note editing ---
   // Track WHICH page is being edited (not a bare bool) so navigating to another
@@ -401,6 +575,22 @@ export function SlidesPanel({
           <ChevronRight className="h-3 w-3" />
         </Button>
 
+        {/* Edit all deck (whole deck.tex) — left of Present */}
+        <Button
+          type="button"
+          size="icon-xs"
+          variant={editorMode === "deck" ? "default" : "ghost"}
+          aria-label={t("editor.editDeck", "Edit all deck LaTeX")}
+          aria-pressed={editorMode === "deck"}
+          disabled={!canEdit}
+          onClick={() =>
+            editorMode === "deck" ? cancelEdit() : void beginEditDeck()
+          }
+          title={t("editor.editDeck", "Edit all deck LaTeX")}
+        >
+          <FileCode className="h-3 w-3" />
+        </Button>
+
         {/* Present button */}
         <Button
           type="button"
@@ -438,6 +628,22 @@ export function SlidesPanel({
         >
           {t("panel.download.tex")}
         </a>
+
+        {/* Edit current frame — top-right corner, mirroring the note pencil */}
+        <Button
+          type="button"
+          size="icon-xs"
+          variant={editorMode === "frame" ? "default" : "ghost"}
+          aria-label={t("editor.editFrame", "Edit this frame's LaTeX")}
+          aria-pressed={editorMode === "frame"}
+          disabled={!canEdit || currentSlide === null}
+          onClick={() =>
+            editorMode === "frame" ? cancelEdit() : beginEditFrame()
+          }
+          title={t("editor.editFrame", "Edit this frame's LaTeX")}
+        >
+          <PencilLine className="h-3 w-3" />
+        </Button>
       </div>
 
       {/* Body: single Document wraps filmstrip rail + main slide area.
@@ -450,7 +656,15 @@ export function SlidesPanel({
       {file ? (
         <Document
           file={file}
-          onLoadSuccess={(pdf) => setNumPages(pdf.numPages)}
+          onLoadSuccess={(pdf) => {
+            setNumPages(pdf.numPages);
+            // After a manual recompile the deck may have fewer pages; keep the
+            // user on the highest valid page instead of a now-empty index
+            // (A1 — "stays on the current active page").
+            if (currentPage > pdf.numPages) {
+              setCurrentPage(sessionId, pdf.numPages);
+            }
+          }}
           className="flex flex-1 min-h-0 overflow-hidden"
         >
           {/* Left filmstrip rail */}
@@ -505,7 +719,21 @@ export function SlidesPanel({
               (the live-preview snappiness this UX needs). Memory cost is
               bounded by the deck budget (8–30 slides) at ~2 MB per rasterised
               canvas. Width drives all pages, but is deferred (useDeferredValue)
-              so a resize-drag doesn't rasterise N pages per pixel. */}
+              so a resize-drag doesn't rasterise N pages per pixel.
+
+              While the manual editor is open it REPLACES this column (the
+              filmstrip stays so the user can still navigate between frames). */}
+          {editing ? (
+            <SlideLatexEditor
+              value={editorDraft}
+              onChange={setEditorDraft}
+              onSave={() => void saveEdit()}
+              onCancel={cancelEdit}
+              scope={editorMode === "frame" ? "frame" : "deck"}
+              saving={savingEdit}
+              errorLog={editorErrorLog}
+            />
+          ) : (
           <div
             ref={measureMainArea}
             className="flex-1 min-h-0 overflow-auto bg-neutral-100 dark:bg-neutral-900 p-2"
@@ -564,6 +792,7 @@ export function SlidesPanel({
               );
             })}
           </div>
+          )}
         </Document>
       ) : (
         <div className="flex flex-1 min-h-0 overflow-hidden" />
@@ -595,9 +824,7 @@ export function SlidesPanel({
               <span className="h-2 w-2 rounded-full bg-muted-foreground motion-safe:animate-pulse [animation-delay:400ms]" />
             </div>
             <span className="text-sm font-medium text-foreground">
-              {restoringVersion
-                ? t("panel.mask.restoring")
-                : t("panel.mask.updating")}
+              {maskHeading}
             </span>
             {stageLabel && !restoringVersion && (
               <span className="px-4 text-center text-xs text-muted-foreground">
@@ -607,6 +834,30 @@ export function SlidesPanel({
           </div>
         )}
       </div>
+
+      {/* Sources (this page). Read mode (not editing): chips → Citation Canvas.
+          Editing the current frame: a deterministic reference editor (× / + Add).
+          Editing the whole deck: source editing is per-slide, so it's disabled
+          with a hint. */}
+      {file && editorMode !== "deck" && (
+        <SourcesStrip
+          sources={currentSources}
+          titleByPaperId={titleByPaperId}
+          editable={editorMode === "frame"}
+          references={pickerPapers}
+          onSetSources={setCurrentSlideSources}
+        />
+      )}
+      {file && editorMode === "deck" && (
+        <div className="shrink-0 border-t border-border bg-muted/10 px-3 py-1.5">
+          <span className="text-[11px] italic text-muted-foreground">
+            {t(
+              "sources.deckEditDisabled",
+              "Source editing is per-slide — use Edit current frame",
+            )}
+          </span>
+        </div>
+      )}
 
       {/* Draggable divider (outside Document — no pdfjs dependency) */}
       <div

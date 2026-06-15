@@ -46,6 +46,13 @@ class Settings:
     # Memory-add conflict detector (small tier; classifier-shaped).
     memory_conflict_model: str
 
+    # Per-call LLM request timeout (seconds). Bounds EVERY litellm completion so
+    # a slow/unavailable provider can't ride the litellm default (~600 s) ×
+    # retries and hang a turn. The adapter uses it to fail the primary (flagship)
+    # call FAST and downgrade to the small tier; also set as litellm.request_timeout
+    # at boot as a backstop.
+    llm_timeout_s: float
+
     # ── 6. Agent tunables ───────────────────────────────────────────────
     # Maximum number of read_section() calls the subagent makes per paper
     # turn before the loop is force-stopped.
@@ -114,6 +121,12 @@ class Settings:
     # (backward-compat with dashboards / API consumers).
     slide_style_profile: str
 
+    # Fallback deck length (content slides) used by the outline ONLY when the
+    # user's request states no length. An explicit count / range in the request
+    # (read by the outline LLM, any language) always overrides this. Configurable
+    # via PAPERHUB_SLIDE_DEFAULT_LENGTH (.env or the runtime Settings panel).
+    slide_default_length: int
+
 
 _SMALL_TIER_DEFAULT = "gemini/gemini-3.1-flash-lite"
 _FLAGSHIP_TIER_DEFAULT = "gemini/gemini-2.5-pro"
@@ -133,6 +146,19 @@ def flagship_tier_model() -> str:
     (paper_qa synthesis, sql answer, slide notes/plan/section). Per-slot
     env vars still win."""
     return os.environ.get("PAPERHUB_MODEL_FLAGSHIP") or _FLAGSHIP_TIER_DEFAULT
+
+
+def llm_timeout_s() -> float:
+    """Per-call LLM timeout in seconds (``PAPERHUB_LLM_TIMEOUT``, default 120).
+
+    Bounds every litellm completion so an unavailable flagship can't ride the
+    litellm default (~600 s) × retries. The adapter also uses this to fail the
+    primary (flagship) call FAST so it can downgrade to the small tier promptly.
+    A non-numeric value falls back to the 120 s default rather than crashing boot."""
+    try:
+        return float(os.environ.get("PAPERHUB_LLM_TIMEOUT", "120"))
+    except ValueError:
+        return 120.0
 
 
 def load_settings() -> Settings:
@@ -160,6 +186,7 @@ def load_settings() -> Settings:
         memory_conflict_model=os.environ.get(
             "PAPERHUB_MEMORY_CONFLICT_MODEL", small,
         ),
+        llm_timeout_s=llm_timeout_s(),
 
         # 6. Agent tunables.
         paper_qa_max_section_reads=int(
@@ -206,5 +233,8 @@ def load_settings() -> Settings:
             os.environ.get("PAPERHUB_SLIDE_STYLE_PROFILE")
             or os.environ.get("PAPERHUB_SLIDE_THEME")
             or _DEFAULT_SLIDE_PROFILE
+        ),
+        slide_default_length=int(
+            os.environ.get("PAPERHUB_SLIDE_DEFAULT_LENGTH", "15")
         ),
     )

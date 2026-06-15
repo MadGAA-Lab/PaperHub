@@ -1,9 +1,10 @@
 import asyncio
+import contextvars
 import json
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import aiosqlite
@@ -20,6 +21,11 @@ class _StepBuffer:
     token_out: int | None = None
     forced_status: str | None = None
     forced_error: str | None = None
+    # Model downgrades recorded DURING the step (e.g. the LLM adapter falling
+    # back from an unavailable flagship to the small tier). Folded into the
+    # written result as ``_model_fallbacks`` so the trace shows "flagship
+    # unavailable → used <small>" without the caller threading anything.
+    model_fallbacks: list[dict[str, str]] = field(default_factory=list)
 
     def record_args(self, args: dict[str, Any]) -> None:
         self.args = args
@@ -43,6 +49,30 @@ class _StepBuffer:
         mark_error: a rejection is a deliberate policy stop, not a fault."""
         self.forced_status = "rejected"
         self.forced_error = message
+
+
+# The trace step currently in scope on THIS task. Set by ``Tracer.step`` around
+# its ``yield`` so code called inside the ``async with`` block (notably the LLM
+# adapter) can annotate the step WITHOUT the caller threading the buffer through.
+# Same-task only — an LLM call awaited inside a node's step shares this context.
+# (This is the in-task case; the cross-task MCP case in CLAUDE.md is different —
+# there a ContextVar can't reach the caller, so MCP uses the _meta payload.)
+_CURRENT_STEP: contextvars.ContextVar[_StepBuffer | None] = contextvars.ContextVar(
+    "paperhub_current_step", default=None,
+)
+
+
+def note_model_fallback(from_model: str, to_model: str, reason: str) -> None:
+    """Record a model downgrade onto the currently-active trace step.
+
+    Safe no-op when there is no active step (the LLM call happens outside any
+    ``tracer.step``). Used by the adapter when a flagship call is unavailable
+    and it downgrades to the small tier — so the trace shows the degrade."""
+    buf = _CURRENT_STEP.get()
+    if buf is not None:
+        buf.model_fallbacks.append(
+            {"from": from_model, "to": to_model, "reason": reason},
+        )
 
 
 class Tracer:
@@ -77,6 +107,9 @@ class Tracer:
         started = time.monotonic()
         status: str = "ok"
         error: str | None = None
+        # Expose THIS step to code awaited inside the block (the LLM adapter)
+        # so a model downgrade annotates it; reset on exit (same task/context).
+        cv_token = _CURRENT_STEP.set(buf)
         try:
             yield buf
         except asyncio.CancelledError:
@@ -96,6 +129,8 @@ class Tracer:
                 status, error = "error", buf.forced_error
             await self._write(buf, index, agent, tool, model, parent_step,
                               started, status, error)
+        finally:
+            _CURRENT_STEP.reset(cv_token)
 
     async def _write(
         self,
@@ -111,7 +146,14 @@ class Tracer:
     ) -> None:
         latency_ms = int((time.monotonic() - started) * 1000)
         args_json = json.dumps(redact(buf.args)) if buf.args is not None else None
-        result_json = json.dumps(redact(buf.result)) if buf.result is not None else None
+        # Fold any model-downgrade notes into the result so the trace records
+        # "flagship unavailable → small" even when the step had no other result.
+        result_payload = buf.result
+        if buf.model_fallbacks:
+            result_payload = {**(buf.result or {}), "_model_fallbacks": buf.model_fallbacks}
+        result_json = (
+            json.dumps(redact(result_payload)) if result_payload is not None else None
+        )
         await self._conn.execute(
             "INSERT INTO tool_calls (run_id, branch, step_index, parent_step, "
             "agent, tool, model, args_redacted_json, result_summary_json, "

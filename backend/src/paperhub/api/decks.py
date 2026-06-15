@@ -13,29 +13,42 @@ connection via ``async with open_db(settings.db_path) as conn``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import dataclasses
 import json
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
+import aiosqlite
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from paperhub.agents.sl_cite import serialize_cite, with_grounding
+from paperhub.agents.sl_read import read_section_chunks
 from paperhub.config import load_settings
 from paperhub.db.connection import open_db
 from paperhub.db.deck_slides import (
     get_deck_slides,
     rebuild_speaker_notes_json,
     replace_deck_slides,
+    update_slide_grounding,
     update_slide_note,
 )
-from paperhub.db.decks import get_deck
+from paperhub.db.decks import get_deck, upsert_deck
+from paperhub.models.slide_domain import SourceSection
 from paperhub.pipelines.slide_pipeline import compile as compile_mod
 from paperhub.pipelines.slide_pipeline.beamer_helpers import (
     extract_frames_from_beamer,
 )
 from paperhub.pipelines.slide_pipeline.deck_slides_map import build_deck_slides
+from paperhub.pipelines.slide_pipeline.frame_splice import (
+    set_frame_cite_marker,
+    splice_frame,
+    strip_cite,
+)
 from paperhub.pipelines.slide_pipeline.history import VersionHistory
 
 
@@ -43,6 +56,31 @@ class NoteEdit(BaseModel):
     """Body for a manual speaker-note edit."""
 
     text: str
+
+
+class SlideSourceInput(BaseModel):
+    """One (paper, section) the user grounds a slide to."""
+
+    paper_id: int
+    section_name: str
+
+
+class SlideSourcesEdit(BaseModel):
+    """Body for the structured per-slide source (grounding) editor."""
+
+    sources: list[SlideSourceInput]
+
+
+class FrameEdit(BaseModel):
+    """Body for a manual single-frame LaTeX edit."""
+
+    frame_tex: str
+
+
+class DeckEdit(BaseModel):
+    """Body for a manual whole-deck LaTeX edit."""
+
+    tex: str
 
 router = APIRouter(tags=["decks"])
 
@@ -144,6 +182,45 @@ async def get_deck_meta(session_id: int) -> dict[str, Any]:
         "contributing_paper_ids": deck.contributing_paper_ids,
         "updated_at": deck.updated_at,
     }
+
+
+@router.get("/sessions/{session_id}/deck/slides")
+async def get_deck_slides_detail(session_id: int) -> list[dict[str, Any]]:
+    """Return one entry per slide of the current deck — the frame source + the
+    per-slide source grounding — for the manual frame editor AND the per-page
+    Sources strip (F6.2). 404 when the session has no deck.
+
+    Each entry: ``{slide_index, page_start, page_end, frame_tex, source_sections}``
+    where ``source_sections`` is the PARSED ``source_sections_json`` (a list of
+    ``{paper_id, section_name, chunk_ids}``; malformed → ``[]``).
+    """
+    settings = load_settings()
+    async with open_db(settings.db_path) as conn:
+        deck = await get_deck(conn, session_id=session_id)
+        if deck is None:
+            raise HTTPException(status_code=404, detail="no deck for this session")
+        rows = await get_deck_slides(conn, deck_id=deck.id)
+
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        try:
+            sections = json.loads(r.source_sections_json)
+            if not isinstance(sections, list):
+                sections = []
+        except (ValueError, TypeError):
+            sections = []
+        out.append({
+            "slide_index": r.slide_index,
+            "page_start": r.page_start,
+            "page_end": r.page_end,
+            "frame_tex": r.frame_tex,
+            # content_tex = the frame with cite markers stripped — the LaTeX
+            # editor shows slide CONTENT only; grounding is managed structurally
+            # via the Sources reference editor, never by hand-editing comments.
+            "content_tex": strip_cite(r.frame_tex),
+            "source_sections": sections,
+        })
+    return out
 
 
 @router.get("/sessions/{session_id}/deck/pdf")
@@ -293,6 +370,321 @@ async def edit_deck_note(
         )
         notes = await rebuild_speaker_notes_json(conn, deck_id=deck.id)
     return {"speaker_notes": notes, "has_notes": bool(notes)}
+
+
+# ── F6.2 manual LaTeX editing ────────────────────────────────────────────
+# Two power-user editors (Slides panel): "edit current frame" splices one
+# frame back into deck.tex; "edit all deck" replaces the whole source. Both
+# recompile the WHOLE deck mechanically (the user's LaTeX verbatim — NO LLM,
+# NO figure audit) and share ``_manual_recompile_and_persist``. The candidate
+# compiles under a SCRATCH tex-name so a broken edit never clobbers the
+# last-good deck.tex/deck.pdf; a compile failure returns ``ok=false`` + the
+# pdflatex log (HTTP 200 — a compile error is a normal editor outcome).
+
+_CANDIDATE_STEM = "deck_candidate"
+
+
+async def _identity_revise(_log: str, tex: str) -> str:
+    """No-op revise: a manual edit is applied verbatim (no LLM cleanup)."""
+    return tex
+
+
+def _cleanup_candidate(slides_dir: Path) -> None:
+    """Remove the scratch compile artifacts (best-effort)."""
+    for ext in ("tex", "pdf", "aux", "log", "out", "nav", "snm", "toc"):
+        with contextlib.suppress(OSError):
+            (slides_dir / f"{_CANDIDATE_STEM}.{ext}").unlink()
+
+
+async def _manual_recompile_and_persist(
+    conn: aiosqlite.Connection,
+    *,
+    session_id: int,
+    deck: Any,
+    candidate_tex: str,
+    description: str,
+    preserved_notes: dict[str, str],
+    preserved_grounding: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Compile ``candidate_tex`` under a scratch tex-name; on success promote it
+    to deck.tex/deck.pdf, snapshot a version, upsert the deck, rebuild
+    deck_slides, and reapply ``preserved_notes`` by slide_index. Returns the
+    JSON body the endpoint sends back.
+
+    Grounding: a CONTENT edit (a single frame, ``preserved_grounding`` given)
+    carries each slide's existing ``source_sections`` forward by slide_index —
+    editing slide CONTENT must not change its source (that is managed
+    structurally via the Sources editor). A whole-deck edit
+    (``preserved_grounding=None``) re-derives grounding from the raw ``% cite:``
+    markers the user edited directly (``with_grounding``).
+
+    On compile failure the last-good deck.tex/deck.pdf are untouched (they are
+    never written unless the candidate compiled) and ``{ok:false, ...}`` is
+    returned with the pdflatex log tail.
+    """
+    slides_dir = _slides_workdir(session_id)
+    result = await compile_mod.compile_with_revise(
+        tex=candidate_tex,
+        workdir=slides_dir,
+        tex_name=f"{_CANDIDATE_STEM}.tex",
+        revise=_identity_revise,
+        max_retries=1,
+    )
+    if not result.ok:
+        await asyncio.to_thread(_cleanup_candidate, slides_dir)
+        return {"ok": False, "status": "error", "log": result.log[-4000:]}
+
+    deck_path = slides_dir / "deck.tex"
+    pdf_path = slides_dir / "deck.pdf"
+    candidate_pdf = slides_dir / f"{_CANDIDATE_STEM}.pdf"
+
+    def _promote() -> str | None:
+        deck_path.write_text(result.tex, encoding="utf-8")
+        if candidate_pdf.exists():
+            shutil.copy2(candidate_pdf, pdf_path)
+        version_id = VersionHistory(str(slides_dir)).save_version(
+            result.tex, description, preserved_notes
+        )
+        _cleanup_candidate(slides_dir)
+        return version_id
+
+    new_version_id = await asyncio.to_thread(_promote)
+
+    pdf_ok = await asyncio.to_thread(pdf_path.exists)
+    await upsert_deck(
+        conn,
+        session_id=session_id,
+        # run_id=None is deliberate: a manual edit is NOT a chat turn, so it
+        # stamps no `runs.deck_version_id` and gets no per-turn DeckChip on
+        # replay (version history still records it via the snapshot below).
+        run_id=None,
+        tex_path=str(deck_path),
+        pdf_path=str(pdf_path) if pdf_ok else None,
+        speaker_notes=deck.speaker_notes,
+        plan=deck.plan,
+        page_count=result.page_count,
+        contributing_paper_ids=deck.contributing_paper_ids,
+        status="ok",
+        current_version_id=new_version_id or deck.current_version_id,
+    )
+
+    fresh = await get_deck(conn, session_id=session_id)
+    if fresh is not None:
+        built = build_deck_slides(result.tex, result.page_count)
+        if preserved_grounding is None:
+            inputs = await with_grounding(built, result.tex, conn)
+        else:
+            # Content edit: carry each slide's existing grounding forward by
+            # slide_index (default "[]" for a slide that had none).
+            inputs = [
+                dataclasses.replace(
+                    s,
+                    source_sections_json=preserved_grounding.get(
+                        str(s.slide_index), "[]"
+                    ),
+                )
+                for s in built
+            ]
+        await replace_deck_slides(conn, deck_id=fresh.id, slides=inputs)
+        if preserved_notes:
+            for r in await get_deck_slides(conn, deck_id=fresh.id):
+                nt = preserved_notes.get(str(r.slide_index))
+                if nt:
+                    await update_slide_note(
+                        conn,
+                        deck_id=fresh.id,
+                        slide_index=r.slide_index,
+                        note_text=nt,
+                        note_language="",
+                    )
+        await rebuild_speaker_notes_json(conn, deck_id=fresh.id)
+    await conn.commit()
+    return {"ok": True, "status": "ok", "page_count": result.page_count}
+
+
+def _current_notes_by_index(rows: list[Any]) -> dict[str, str]:
+    """Map ``{str(slide_index): note_text}`` for the rows that have a note —
+    the notes carried across a manual recompile (rebuild_deck_slides wipes
+    them, so they are reapplied by slide_index afterwards)."""
+    return {str(r.slide_index): r.note_text for r in rows if r.note_text}
+
+
+def _current_grounding_by_index(rows: list[Any]) -> dict[str, str]:
+    """Map ``{str(slide_index): source_sections_json}`` — the grounding carried
+    forward across a CONTENT recompile (editing slide content must not change
+    its source; that is managed via the Sources editor)."""
+    return {str(r.slide_index): r.source_sections_json for r in rows}
+
+
+@router.put("/sessions/{session_id}/deck/slides/{page}/tex")
+async def edit_deck_frame(
+    session_id: int, page: int, body: FrameEdit
+) -> dict[str, Any]:
+    """Replace the frame occupying ``page`` with the user's edited LaTeX and
+    recompile the whole deck. 404 if no deck / no slide covers the page; a
+    compile failure returns ``{ok:false, status:"error", log}`` (HTTP 200).
+    """
+    settings = load_settings()
+    async with open_db(settings.db_path) as conn:
+        deck = await get_deck(conn, session_id=session_id)
+        if deck is None:
+            raise HTTPException(status_code=404, detail="no deck for this session")
+        rows = await get_deck_slides(conn, deck_id=deck.id)
+        target = next(
+            (r for r in rows if r.page_start <= page <= r.page_end), None
+        )
+        if target is None:
+            raise HTTPException(
+                status_code=404, detail=f"no slide covering page {page}"
+            )
+        deck_tex = await asyncio.to_thread(
+            Path(deck.tex_path).read_text, encoding="utf-8"
+        )
+        try:
+            # The editor sends CONTENT only (no cite marker). Splice it in for
+            # the frame body; grounding is carried forward by slide_index (a
+            # content edit doesn't change the slide's source — that's the
+            # Sources editor's job), so no marker handling here.
+            candidate = splice_frame(deck_tex, target.frame_tex, body.frame_tex)
+        except ValueError as exc:
+            # Absent / ambiguous frame — surface as a 409 so the editor can tell
+            # the user to use "Edit all deck" instead of guessing.
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return await _manual_recompile_and_persist(
+            conn,
+            session_id=session_id,
+            deck=deck,
+            candidate_tex=candidate,
+            description="manual frame edit",
+            preserved_notes=_current_notes_by_index(rows),
+            preserved_grounding=_current_grounding_by_index(rows),
+        )
+
+
+@router.put("/sessions/{session_id}/deck/tex")
+async def edit_deck_tex(session_id: int, body: DeckEdit) -> dict[str, Any]:
+    """Replace the entire deck source with the user's edited LaTeX and
+    recompile. 404 if no deck; a compile failure returns
+    ``{ok:false, status:"error", log}`` (HTTP 200)."""
+    if not body.tex.strip():
+        raise HTTPException(status_code=400, detail="empty deck source")
+    settings = load_settings()
+    async with open_db(settings.db_path) as conn:
+        deck = await get_deck(conn, session_id=session_id)
+        if deck is None:
+            raise HTTPException(status_code=404, detail="no deck for this session")
+        rows = await get_deck_slides(conn, deck_id=deck.id)
+        return await _manual_recompile_and_persist(
+            conn,
+            session_id=session_id,
+            deck=deck,
+            candidate_tex=body.tex,
+            description="manual deck edit",
+            preserved_notes=_current_notes_by_index(rows),
+        )
+
+
+@router.put("/sessions/{session_id}/deck/slides/{page}/sources")
+async def edit_deck_slide_sources(
+    session_id: int, page: int, body: SlideSourcesEdit
+) -> dict[str, Any]:
+    """Set the slide's grounding from the structured Sources editor — a
+    DETERMINISTIC, comment-only change (no recompile): resolve each
+    ``(paper_id, section_name)`` to its chunks, persist ``source_sections`` for
+    the slide, and rewrite the frame's ``% cite:`` marker in deck.tex so the DB
+    and source stay in sync. Returns ``{ok, source_sections}``.
+
+    404 if there is no deck / no slide covering the page.
+    """
+    settings = load_settings()
+    async with open_db(settings.db_path) as conn:
+        deck = await get_deck(conn, session_id=session_id)
+        if deck is None:
+            raise HTTPException(status_code=404, detail="no deck for this session")
+        rows = await get_deck_slides(conn, deck_id=deck.id)
+        target = next(
+            (r for r in rows if r.page_start <= page <= r.page_end), None
+        )
+        if target is None:
+            raise HTTPException(
+                status_code=404, detail=f"no slide covering page {page}"
+            )
+
+        # Guard: a slide may only be grounded to a paper attached to THIS
+        # session (the same set the Add-source picker offers). Blocks grounding
+        # to an arbitrary/off-session paper id from a hand-rolled request.
+        async with conn.execute(
+            "SELECT paper_content_id FROM papers WHERE session_id = ?",
+            (session_id,),
+        ) as cur:
+            session_papers = {int(r[0]) for r in await cur.fetchall()}
+        off_session = sorted(
+            {s.paper_id for s in body.sources if s.paper_id not in session_papers}
+        )
+        if off_session:
+            raise HTTPException(
+                status_code=400,
+                detail=f"paper(s) {off_session} are not in this session",
+            )
+
+        # Resolve each (paper, section) to its chunk ids (deterministic — the
+        # section comes from the paper's real list, so it grounds to real chunks).
+        resolved: list[SourceSection] = []
+        for src in body.sources:
+            res = await read_section_chunks(
+                paper_content_id=src.paper_id,
+                section_name=src.section_name,
+                conn=conn,
+            )
+            resolved.append(
+                SourceSection(
+                    paper_id=src.paper_id,
+                    section_name=src.section_name,
+                    chunk_ids=list(res.chunk_ids),
+                )
+            )
+        # Guard: never persist a source that resolves to NO chunks — that is the
+        # exact "claims a section but grounds to nothing" record we must avoid.
+        hollow = [
+            f"{ss.paper_id}:{ss.section_name}" for ss in resolved if not ss.chunk_ids
+        ]
+        if hollow:
+            raise HTTPException(
+                status_code=400,
+                detail=f"no chunks resolved for {', '.join(hollow)}",
+            )
+        sections_json = json.dumps([ss.model_dump() for ss in resolved])
+
+        # Rewrite the frame's marker in deck.tex (best-effort — keeps the source
+        # consistent for a later whole-deck edit / regenerate); update the DB
+        # row (authoritative for the Sources strip). NO recompile: % cite: is a
+        # LaTeX comment, invisible to the compiled PDF.
+        marker = serialize_cite(
+            [(s.paper_id, s.section_name) for s in resolved]
+        )
+        new_frame_tex = target.frame_tex
+        if _exists(deck.tex_path):
+            try:
+                deck_tex = await asyncio.to_thread(
+                    Path(deck.tex_path).read_text, encoding="utf-8"
+                )
+                new_deck_tex, new_frame_tex = set_frame_cite_marker(
+                    deck_tex, target.frame_tex, marker
+                )
+                await asyncio.to_thread(
+                    Path(deck.tex_path).write_text, new_deck_tex, encoding="utf-8"
+                )
+            except (OSError, ValueError):
+                new_frame_tex = target.frame_tex  # DB still updated below
+
+        await update_slide_grounding(
+            conn,
+            deck_id=deck.id,
+            slide_index=target.slide_index,
+            frame_tex=new_frame_tex,
+            source_sections_json=sections_json,
+        )
+    return {"ok": True, "source_sections": [ss.model_dump() for ss in resolved]}
 
 
 # ── F4.5 version history ─────────────────────────────────────────────────
@@ -533,7 +925,11 @@ async def restore_deck_version(
             await replace_deck_slides(
                 conn,
                 deck_id=fresh.id,
-                slides=build_deck_slides(result_tex, result_page_count),
+                slides=await with_grounding(
+                    build_deck_slides(result_tex, result_page_count),
+                    result_tex,
+                    conn,
+                ),
             )
             if bundled_notes:
                 for r in await get_deck_slides(conn, deck_id=fresh.id):

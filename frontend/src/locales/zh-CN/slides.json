@@ -27,6 +27,7 @@
     },
     "mask": {
       "updating": "更新幻灯片中…",
+      "loading": "加载幻灯片中…",
       "restoring": "还原版本中…"
     },
     "note": {
@@ -37,6 +38,29 @@
       "field": "演讲备注",
       "empty": "此幻灯片没有演讲备注"
     }
+  },
+  "editor": {
+    "editFrame": "编辑此张幻灯片的 LaTeX",
+    "editDeck": "编辑整份幻灯片的 LaTeX",
+    "scopeFrame": "正在编辑此张幻灯片",
+    "scopeDeck": "正在编辑整份幻灯片",
+    "save": "保存并重新编译",
+    "cancel": "取消",
+    "compileError": "编译失败 — 请修正 LaTeX 后重新保存"
+  },
+  "sources": {
+    "heading": "来源",
+    "empty": "综合内容 — 无单一来源",
+    "unsourced": "此章节未解析到来源片段",
+    "openHint": "在引用画布中打开此来源",
+    "remove": "移除此来源",
+    "add": "添加来源",
+    "selectPaper": "选择论文",
+    "selectSection": "选择章节",
+    "loadingSections": "加载中…",
+    "confirmAdd": "添加",
+    "cancelAdd": "取消",
+    "deckEditDisabled": "来源编辑仅限单张幻灯片 — 请使用“编辑此张幻灯片”"
   },
   "deckChip": {
     "fallbackTitle": "幻灯片",

@@ -50,19 +50,21 @@ from paperhub.agents.paper_digest import get_or_build_digest
 from paperhub.agents.report_pipeline import (
     author_deck_notes,
     classify_deck_command,
-    detect_slide_language,
+    detect_slide_meta,
     edit_frame,
     edit_preamble_block,
     edit_title_block,
-    parse_slide_budget,
     revise_tex,
+    target_slides_from_meta,
 )
+from paperhub.agents.sl_cite import with_grounding
 from paperhub.agents.sl_emit import run_sl_emit
 from paperhub.agents.sl_outline import run_sl_outline
 from paperhub.agents.sl_read import ReadResult, read_section_chunks
 from paperhub.agents.slide_agent import run_slide_agent
 from paperhub.agents.state import effective_query, response_language
 from paperhub.agents.style_resolver import resolve_preamble
+from paperhub.config import load_settings
 from paperhub.db.deck_slides import (
     DeckSlideRow,
     get_deck_slides,
@@ -442,17 +444,25 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
         instruction = effective_query(state) or state.get("user_message", "")
         deck = await get_deck(deps.conn, session_id=state["session_id"])
         if deck is None:
-            # GENERATE: detect an explicit slide-content language (else fall
-            # back to response_language downstream) + the length budget.
-            lang = await detect_slide_language(
+            # GENERATE: one LLM call extracts BOTH the explicit slide-content
+            # language (else fall back to response_language) AND the requested
+            # deck length (any language/unit → min/max page bounds). The outline
+            # only honors a length it's given as a CONCRETE number, so we compute
+            # the midpoint here and pass it as the target; an unstated length
+            # falls back to PAPERHUB_SLIDE_DEFAULT_LENGTH. (No regex — the old
+            # CJK-only parser silently returned 15 for "20-30 pages".)
+            meta = await detect_slide_meta(
                 adapter=deps.adapter,
                 tracer=deps.tracer,
                 model=deps.resolve_model,
                 instruction=instruction,
             )
-            if lang:
-                out["report_slide_language"] = lang
-            out["report_budget"] = parse_slide_budget(instruction)
+            if meta.language:
+                out["report_slide_language"] = meta.language
+            if meta.min_pages is not None or meta.max_pages is not None:
+                out["report_target_slides"] = target_slides_from_meta(
+                    meta, load_settings().slide_default_length
+                )
             return out
 
         rows = await get_deck_slides(deps.conn, deck_id=deck.id)
@@ -460,8 +470,10 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
             f"{r.page_start}. {_frame_title(r.frame_tex)}" for r in rows
         ) or "(no slides)"
         # Deck-scoped follow-up: classify the action AND detect a slide-content
-        # language request concurrently (both read only the instruction).
-        cmd, lang = await asyncio.gather(
+        # language request concurrently (both read only the instruction). Deck
+        # length is irrelevant on an existing-deck edit, so meta.min/max_pages
+        # are ignored here — only meta.language is used.
+        cmd, meta = await asyncio.gather(
             classify_deck_command(
                 adapter=deps.adapter,
                 tracer=deps.tracer,
@@ -471,7 +483,7 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
                 deck_outline=outline,
                 slide_attached=bool(state.get("slide_attached")),
             ),
-            detect_slide_language(
+            detect_slide_meta(
                 adapter=deps.adapter,
                 tracer=deps.tracer,
                 model=deps.resolve_model,
@@ -490,8 +502,8 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
             if tgt is not None and tgt < first_content_page:
                 cmd = cmd.model_copy(update={"action": "edit_title"})
         out["report_command"] = cmd
-        if lang:
-            out["report_slide_language"] = lang
+        if meta.language:
+            out["report_slide_language"] = meta.language
         return out
 
     async def _sl_qa(state: AgentState) -> AgentState:
@@ -841,9 +853,15 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
             await _flush_steps()
             return res
 
-        _budget = state.get("report_budget")
+        # Deck length: sl_resolve set report_target_slides to the midpoint of the
+        # LLM-extracted page request when the user named one; otherwise fall back
+        # to the configurable PAPERHUB_SLIDE_DEFAULT_LENGTH (.env or the runtime
+        # Settings panel, read live so a panel change hot-applies). The outline
+        # only honors a length it gets as a concrete number — prose in the task
+        # alone it ignores (it compresses to its own sense of "right").
         _target_slides: int = (
-            _budget.target_slide_count if _budget is not None else 15
+            state.get("report_target_slides")
+            or load_settings().slide_default_length
         )
 
         async with _stage_heartbeat(writer, run_id, "report:planning"):
@@ -1339,7 +1357,11 @@ def build_report_subgraph(deps: ReportDeps) -> Any:
             await replace_deck_slides(
                 deps.conn,
                 deck_id=fresh.id,
-                slides=build_deck_slides(result.tex, result.page_count),
+                slides=await with_grounding(
+                    build_deck_slides(result.tex, result.page_count),
+                    result.tex,
+                    deps.conn,
+                ),
             )
             # Restore notes onto the matching slide_index — but skip the
             # ``wipe`` set (slides whose content was rewritten this turn:

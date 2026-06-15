@@ -87,15 +87,6 @@ class SlidePlan(BaseModel):
     sections: list[PlannedSection]
 
 
-class SlideBudget(BaseModel):
-    """Deck length budget (F4 — SRS v2.21). Default 20 min ≈ 15 slides."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    target_slide_count: int = 15
-    depth: str = "standard"  # 'overview' | 'standard' | 'deep'
-
-
 class DeckCommand(BaseModel):
     """How to interpret a slides turn when a deck already exists (F4, v2.21)."""
 
@@ -131,15 +122,44 @@ class DeckCommand(BaseModel):
     )
 
 
-class TargetLanguage(BaseModel):
-    """The language the user EXPLICITLY asked the slide CONTENT to be written in
-    (v2.22). ``None`` when no language was named — callers fall back to the
-    router's ``response_language``. Distinct from the chat-reply language: the
-    user may write in Chinese yet ask for an English deck ("把簡報換成英文")."""
+class SlideMeta(BaseModel):
+    """Slide-request metadata an LLM parses from the user's instruction in ANY
+    language: the slide-CONTENT language they named, and the deck LENGTH they
+    asked for (as min/max page bounds — the deterministic midpoint is computed in
+    code, not by the model). Length is extracted, NOT regex-parsed: the model
+    reads "20-30 pages" / "20~30張" / "10 分鐘" in any language/unit, which a
+    CJK-only regex could not. All fields ``None`` when not named.
+
+    The fields are REQUIRED (no default) so Gemini's responseSchema emits them:
+    in a multi-field response it silently drops a defaulted optional (same lesson
+    as DeckCommand.target_page), losing the value even when the user named it."""
 
     model_config = ConfigDict(extra="forbid")
 
-    language: str | None = None
+    language: str | None = Field(
+        description=(
+            "The language NAME the user EXPLICITLY asked the SLIDE CONTENT to be "
+            "written in (any language, e.g. 'English', 'Traditional Chinese', "
+            "'Japanese'); null when no slide-content language was named. Do NOT "
+            "infer it from the language the user is merely TYPING in."
+        ),
+    )
+    min_pages: int | None = Field(
+        description=(
+            "Lower bound of the deck length the user requested, read in ANY "
+            "language and ANY unit (slides/pages/張/頁/ページ/장 / a talk "
+            "duration). SINGLE count ('30 slides', a '10-minute talk') -> set "
+            "min_pages == max_pages; RANGE ('20-30 pages', '20~30頁') -> the low "
+            "end. null when NO deck length was requested."
+        ),
+    )
+    max_pages: int | None = Field(
+        description=(
+            "Upper bound of the requested deck length (see min_pages). For a "
+            "single count, equal to min_pages; for a range, the high end; null "
+            "when no deck length was requested."
+        ),
+    )
 
 
 class DeckNoteEntry(BaseModel):
@@ -225,11 +245,14 @@ class AgentState(TypedDict, total=False):
     slide_context: str | None
     report_deck_id: int          # v2.18: set by sl_emit
     report_papers: list[dict[str, Any]]  # v2.18: enabled papers loaded by sl_resolve
-    report_budget: SlideBudget   # v2.21 (F4): GENERATE length budget
     report_command: DeckCommand  # v2.21 (F4): deck-scoped follow-up action
     # v2.22: TASK target language for the SLIDE CONTENT, detected from the
     # instruction (e.g. "把簡報換成英文" → "English"), independent of the
     # router's response_language (which is the chat-REPLY language). Empty/unset
     # → fall back to response_language. Consumed by _generate + _edit_slides.
     report_slide_language: str
+    # F6: concrete target content-slide count, set by sl_resolve from the LLM-
+    # extracted page request (midpoint of min/max). Unset when the user named no
+    # length → the outline falls back to PAPERHUB_SLIDE_DEFAULT_LENGTH.
+    report_target_slides: int
     report_outline: DeckOutline  # v2.33 (F6.1): cross-paper narrative plan, rendered 1:1

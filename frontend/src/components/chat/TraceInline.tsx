@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { fetchRunTrace } from "@/lib/api";
@@ -185,6 +185,18 @@ export function TraceResult({
 // ---------------------------------------------------------------------------
 // Row status → className helper (extracted to keep JSX readable)
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Heartbeat rows (step_index < 0) are synthetic, live-only "stage" beats — not
+// real tool_calls. Humanize the tool id into a phase label: "report:planning"
+// → "Planning". Derived from the literal tool id (a cosmetic transform), with
+// the raw id as the fallback.
+// ---------------------------------------------------------------------------
+function stageLabel(tool: string): string {
+  const name = tool.includes(":") ? tool.split(":").pop()! : tool;
+  if (!name) return tool;
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
 function rowClasses(status: ToolCallRecord["status"]): string {
   return `px-2 py-0.5 rounded ${
     status === "error"
@@ -230,6 +242,9 @@ export function TraceInline({
   // Prefer the streamed/replayed prop; fall back to what we fetched here.
   const shown = trace.length > 0 ? trace : records;
   const hasShown = shown.length > 0;
+  // Live heartbeat beats (step_index < 0) are not "steps" — count only the real
+  // tool_calls rows so the toggle reads "3 steps", not "4" with a beat in flight.
+  const realCount = shown.filter((r) => r.step_index >= 0).length;
 
   const loadTrace = async () => {
     setLoading(true);
@@ -276,10 +291,10 @@ export function TraceInline({
         aria-expanded={open}
       >
         <OuterIcon className="h-3 w-3" /> {t("trace.label")}
-        {hasShown && (
+        {realCount > 0 && (
           <>
             {" "}
-            · {t("trace.step", { count: shown.length })}
+            · {t("trace.step", { count: realCount })}
           </>
         )}
       </button>
@@ -302,6 +317,32 @@ export function TraceInline({
       {open && hasShown && (
         <ul className="mt-1 space-y-0.5 font-mono">
           {shown.map((r) => {
+            // Live heartbeat — a single in-progress phase indicator, not a
+            // clickable step. No model/latency/status/JSON; just a spinner,
+            // the phase name, and elapsed seconds.
+            if (r.step_index < 0) {
+              const rs = r.result_summary_json;
+              const elapsed =
+                rs && typeof rs.elapsed_s === "number" ? rs.elapsed_s : null;
+              return (
+                <li
+                  key="live-stage"
+                  data-stage="live"
+                  className="flex items-center gap-2 px-2 py-1 text-muted-foreground"
+                >
+                  <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden />
+                  <span className="font-medium text-foreground/80">
+                    {stageLabel(r.tool)}
+                    {"…"}
+                  </span>
+                  {elapsed != null && elapsed > 0 && (
+                    <span className="tabular-nums text-[11px] opacity-60">
+                      {elapsed}s
+                    </span>
+                  )}
+                </li>
+              );
+            }
             const key = `${r.branch}-${r.step_index}`;
             const isOpen = openSteps.has(key);
             const RowIcon = isOpen ? ChevronDown : ChevronRight;

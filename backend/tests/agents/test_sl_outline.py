@@ -346,6 +346,16 @@ async def test_clamp_bad_paper_figure_read(conn: aiosqlite.Connection) -> None:
                     figure_key="bad-key",             # NOT in digests
                     cites_reads=["73:NeverRead"],     # never fetched
                 ),
+                # A second VALID content slide so the outline isn't degenerate
+                # (>= 2 content) — keeps this test about CLAMPING, not the
+                # degenerate-output fallback (which would replace the outline).
+                OutlineSlideDraft(
+                    goal="Good slide",
+                    key_message="ok",
+                    content_form="bullets",
+                    paper_id=73,
+                    cites_reads=[],
+                ),
             ],
         ),
     )
@@ -381,6 +391,61 @@ async def test_clamp_bad_paper_figure_read(conn: aiosqlite.Connection) -> None:
     assert any("999" in d or "paper_id=999" in d for d in dropped)
     assert any("bad-key" in d or "figure_key" in d for d in dropped)
     assert any("NeverRead" in d or "neverread" in d.lower() for d in dropped)
+
+
+# ---------------------------------------------------------------------------
+# Test 6: degenerate-output gate — a title-only finalize falls back to minimal
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_degenerate_outline_falls_back_to_minimal(conn: aiosqlite.Connection) -> None:
+    """The model sometimes finalizes with a rich narrative but ZERO content
+    slides (just a title) — live runs 574/603 shipped a 1-page deck. The gate
+    must replace it with the per-paper minimal outline (>= 2 content slides) and
+    record the degeneration in 'dropped'."""
+    title_only = RoundAction(
+        action="finalize",
+        narrative_pattern="comparison",
+        outline=DeckOutlineDraft(
+            talk_title="A detailed comparison",
+            narrative_pattern="comparison",
+            audience_intent="compare",
+            narrative_arc="problem -> A -> B -> synthesis",  # rich arc...
+            slides=[  # ...but only the title slide
+                OutlineSlideDraft(
+                    goal="Title", key_message="Comparing A and B",
+                    content_form="title", cites_reads=[],
+                ),
+            ],
+        ),
+    )
+    adapter = _ScriptedAdapter([title_only])
+    tracer = _tracer(conn)
+
+    result = await run_sl_outline(
+        digests=_digests(),
+        task_description="Compare these papers",
+        response_language="English",
+        target_slides=15,
+        adapter=adapter,
+        tracer=tracer,
+        model="test-model",
+        read_fn=_ReadTracker({}),
+        max_rounds=4,
+    )
+
+    # Fallback gives title + one slide per paper + synthesis → >= 2 content.
+    structural = {"title", "section_divider", "agenda"}
+    content = [s for s in result.outline.slides if s.content_form not in structural]
+    assert len(content) >= 2, "degenerate outline must be replaced by minimal coverage"
+
+    async with conn.execute(
+        "SELECT result_summary_json FROM tool_calls ORDER BY step_index DESC LIMIT 1"
+    ) as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    dropped = json.loads(row[0])["dropped"]
+    assert any("degenerate" in d for d in dropped)
 
 
 # ---------------------------------------------------------------------------

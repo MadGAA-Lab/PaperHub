@@ -130,12 +130,34 @@ system: |
   agenda, section_divider, synthesis), compose it from the talk arc and
   talk_title/audience_intent/narrative_arc meta-fields.
 
+  SOURCE GROUNDING (one comment line per frame — for traceability, never shown
+  on the slide). As you write each frame, add ONE LaTeX comment naming the
+  source it came from, placed just inside \begin{{frame}}:
+    - Content frame  -> `% cite: <paper_id>:<section_name>` where paper_id is the
+      bundle's `paper_id` (the real id, NOT paper_idx) and section_name is the
+      `section` of the bundle excerpt you wrote the slide from. Multiple sources:
+      separate with `;`, e.g. `% cite: 47:Method; 53:Our Method: ReMoE`.
+    - Structural frame -> `% cite: title` (title page) / `% cite: agenda` /
+      `% cite: divider` (section_divider).
+    - A content slide you could NOT ground in any bundle section -> `% cite:
+      hallucination` (be honest — do not fake a section).
+  This marker is metadata only: it does NOT change what you put ON the slide and
+  does NOT relax the depth/detail expectations above. Write the deep slide first,
+  then tag where it came from. Use the EXACT section name from the bundle.
+
   Content form: render each slide in its stated form (the [form: ...] tag):
     - comparison_table  -> a real booktabs/tabular table (methods x axes) built
                            from the evidence; rows = methods, columns = metrics.
     - results           -> a small table or bullet list of quantified numbers
                            taken directly from the evidence.
-    - equation_focus    -> the equation in a math block + notation legend.
+    - equation_focus    -> the equation in a math block + notation legend. If the
+                           formula IS the point, you MAY wrap it in a full-width
+                           \begin{{block}}{{<short label>}} … \[ … \] … \end{{block}}
+                           for a focused, framed centerpiece (legend as bullets
+                           below); a clean bare \[ … \] is equally fine. If
+                           you do use a block, full-width ONLY — never inside
+                           \begin{{columns}} (that breaks the layout). Inline
+                           $...$ in bullets is always fine.
     - problem_statement -> concise 2-4 bullet framing of the problem.
     - concept_figure / method_walkthrough
                         -> use the slide's figure if one is given; otherwise you
@@ -153,6 +175,20 @@ system: |
   the previous slide", "as we saw before", connective lead-ins) ON the slide —
   that is spoken content for the speaker notes, not the deck. Write terse
   fragments from the Evidence, not paragraphs.
+
+  Caption/description placement (figures AND tables): when a figure or table has
+  a one-line description or takeaway, it goes BELOW the visual on its OWN line,
+  separated by a blank line so it is a clear bottom caption — NEVER on the same
+  line/row as the table or figure. The pattern is:
+
+      \begin{{center}} <table or \includegraphics> \end{{center}}
+      \par\vspace{{0.4em}}
+
+      {{\small <one-line description / takeaway>}}
+
+  The blank line + \par is REQUIRED — without it the caption can ride up beside
+  the table/figure instead of sitting at the bottom. Keep the caption to one
+  short line; richer explanation belongs in the speaker notes.
 
   Drawn-figure guardrail (HARD): an agent-drawn TikZ figure is a CONCEPTUAL
   SCHEMATIC ONLY — it must NEVER fabricate data, charts, or benchmark numbers.

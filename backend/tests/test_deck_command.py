@@ -4,9 +4,10 @@ import pytest
 
 from paperhub.agents.report_pipeline import (
     classify_deck_command,
-    detect_slide_language,
+    detect_slide_meta,
+    target_slides_from_meta,
 )
-from paperhub.models.domain import DeckCommand, TargetLanguage
+from paperhub.models.domain import DeckCommand, SlideMeta
 
 
 class _A:
@@ -37,23 +38,32 @@ async def test_edit_current_page(fake_tracer) -> None:
 
 
 @pytest.mark.asyncio
-async def test_detect_slide_language_explicit(fake_tracer) -> None:
-    lang = await detect_slide_language(
-        adapter=_A(TargetLanguage(language="English")), tracer=fake_tracer,
-        model="m", instruction="能幫我把簡報換成英文嗎",
+async def test_detect_slide_meta_explicit_language(fake_tracer) -> None:
+    meta = await detect_slide_meta(
+        adapter=_A(SlideMeta(language="English", min_pages=None, max_pages=None)),
+        tracer=fake_tracer, model="m", instruction="能幫我把簡報換成英文嗎",
     )
-    assert lang == "English"
+    assert meta.language == "English"
 
 
 @pytest.mark.asyncio
-async def test_detect_slide_language_none_when_unspecified(fake_tracer) -> None:
-    # No explicit deck-language request → None → caller falls back to
-    # response_language (the chat language).
-    lang = await detect_slide_language(
-        adapter=_A(TargetLanguage(language=None)), tracer=fake_tracer,
-        model="m", instruction="幫我做一份關於這篇論文的簡報",
+async def test_detect_slide_meta_none_when_unspecified(fake_tracer) -> None:
+    # No explicit deck-language/length request → all None → callers fall back to
+    # response_language + the configured default length.
+    meta = await detect_slide_meta(
+        adapter=_A(SlideMeta(language=None, min_pages=None, max_pages=None)),
+        tracer=fake_tracer, model="m", instruction="幫我做一份關於這篇論文的簡報",
     )
-    assert lang is None
+    assert meta.language is None and meta.min_pages is None
+
+
+def test_target_slides_from_meta_midpoint_and_default() -> None:
+    # Range → midpoint (for safety); single count → itself; none → default.
+    assert target_slides_from_meta(SlideMeta(language=None, min_pages=20, max_pages=30), 15) == 25
+    assert target_slides_from_meta(SlideMeta(language=None, min_pages=25, max_pages=25), 15) == 25
+    assert target_slides_from_meta(SlideMeta(language=None, min_pages=None, max_pages=None), 15) == 15
+    # One bound only → treat as a single count.
+    assert target_slides_from_meta(SlideMeta(language=None, min_pages=None, max_pages=18), 15) == 18
 
 
 @pytest.mark.asyncio

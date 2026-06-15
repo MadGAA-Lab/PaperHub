@@ -13,4 +13,5 @@ async def test_deck_slides_table_exists(tmp_path) -> None:
     assert cols == {
         "id", "deck_id", "slide_index", "frame_tex",
         "note_text", "note_language", "page_start", "page_end",
+        "source_sections_json",
     }

@@ -216,6 +216,21 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
         await conn.commit()
 
     # -----------------------------------------------------------------------
+    # F6 grounding: Idempotent column-add for deck_slides.source_sections_json —
+    # per-slide source traceback (JSON [{paper_id, section_name, chunk_ids}])
+    # resolved from each frame's % cite: marker. Pre-existing decks default to
+    # '[]' (ungrounded) until regenerated.
+    # -----------------------------------------------------------------------
+    async with conn.execute("PRAGMA table_info(deck_slides)") as cur:
+        cols = {row[1] for row in await cur.fetchall()}
+    if "source_sections_json" not in cols:
+        await conn.execute(
+            "ALTER TABLE deck_slides ADD COLUMN source_sections_json "
+            "TEXT NOT NULL DEFAULT '[]'"
+        )
+        await conn.commit()
+
+    # -----------------------------------------------------------------------
     # C4: Idempotent column-add migration for paper_content.abstract
     # (pre-existing DBs created before Plan C won't have this column).
     # -----------------------------------------------------------------------

@@ -77,6 +77,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # in the overlay, so the already-open `conn` stays valid + consistent.
         settings = load_settings()
         app.state.settings = settings
+        # Bound EVERY litellm completion (backstop for the per-call timeout the
+        # adapter passes) so an unavailable provider can't ride litellm's ~600 s
+        # default × num_retries and hang a turn for tens of minutes.
+        litellm.request_timeout = settings.llm_timeout_s  # type: ignore[attr-defined]
         # Reclaim storage from chats soft-deleted longer ago than the
         # retention window (their messages/runs/papers cascade away, and
         # their workspace/chat_session/<id>/ folder is rmtree'd).
@@ -273,7 +277,7 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://localhost:4173"],
-        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         # X-Paperhub-Session-Id is sent by the Memory Manager PATCH/DELETE
         # (FR-11) for ownership checks; without it in allow_headers the browser
         # CORS preflight is rejected and the request fails before reaching us.
