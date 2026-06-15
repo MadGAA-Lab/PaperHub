@@ -266,9 +266,10 @@ async def _copy_deck(
 
             await conn.execute(
                 "INSERT INTO deck_slides (deck_id, slide_index, frame_tex, note_text, "
-                "note_language, page_start, page_end) "
+                "note_language, page_start, page_end, source_sections_json) "
                 "SELECT ?, slide_index, frame_tex, note_text, note_language, "
-                "page_start, page_end FROM deck_slides WHERE deck_id = ?",
+                "page_start, page_end, source_sections_json "
+                "FROM deck_slides WHERE deck_id = ?",
                 (new_deck_id, deck[0]),
             )
     except Exception as exc:  # noqa: BLE001 — best-effort; a deck failure must not abort the fork
