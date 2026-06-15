@@ -170,6 +170,39 @@ async def test_put_frame_tex_recompiles_and_persists(
 
 
 @pytest.mark.asyncio
+async def test_put_frame_tex_drops_stale_preceding_grounding(
+    tmp_path: Path, app_with_db: tuple[Any, aiosqlite.Connection]
+) -> None:
+    """A manual frame edit must NOT inherit the old out-of-body % cite: marker —
+    grounding re-resolves from the user's new frame (here: unsourced)."""
+    app, conn = app_with_db
+    slides_dir = tmp_path / "chat_session" / "1" / "slides"
+    slides_dir.mkdir(parents=True)
+    # _DECK_TEX has `% cite: 7:Introduction` immediately before frame B (page 2).
+    (slides_dir / "deck.tex").write_text(_DECK_TEX, encoding="utf-8")
+    (slides_dir / "deck.pdf").write_bytes(b"%PDF\n")
+    await _seed_session(conn, 1)
+    await _seed_deck_with_slides(conn, session_id=1, slides_dir=slides_dir)
+
+    new_frame = "\\begin{frame}{Title B}\nHand-written, no source.\n\\end{frame}"
+    transport = ASGITransport(app=app)
+    with patch("paperhub.api.decks.compile_mod.compile_with_revise", _ok_compile()):
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            put = await client.put(
+                "/sessions/1/deck/slides/2/tex",
+                json={"frame_tex": new_frame},
+                headers=_HDR,
+            )
+            assert put.status_code == 200, put.text
+            slides = (await client.get("/sessions/1/deck/slides", headers=_HDR)).json()
+
+    edited = next(s for s in slides if s["page_start"] <= 2 <= s["page_end"])
+    # Stale `7:Introduction` grounding is gone — the slide is now unsourced.
+    assert edited["source_sections"] == []
+    assert "% cite: 7:Introduction" not in (slides_dir / "deck.tex").read_text()
+
+
+@pytest.mark.asyncio
 async def test_put_frame_tex_compile_failure_keeps_last_good(
     tmp_path: Path, app_with_db: tuple[Any, aiosqlite.Connection]
 ) -> None:

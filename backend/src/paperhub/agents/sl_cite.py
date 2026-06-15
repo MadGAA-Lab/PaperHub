@@ -122,6 +122,10 @@ async def with_grounding(
     BEFORE ``\\begin{frame}``, which frame extraction strips out. Each frame is
     matched to its slide by exact frame-body equality (group 2 == frame_tex),
     so title-drop / ordering never misaligns the grounding."""
+    # Keyed by exact frame-body string: two BYTE-IDENTICAL frames collapse to
+    # one entry and share the last one's grounding. Harmless in practice —
+    # structural frames resolve to [] and identical content frames carry
+    # identical cites — but it is an assumption, not a guarantee.
     by_frame: dict[str, str] = {}
     for m in _FRAME_BLOCK_RE.finditer(deck_tex):
         block = m.group(1) + m.group(2)

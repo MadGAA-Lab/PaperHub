@@ -421,6 +421,9 @@ async def _manual_recompile_and_persist(
     await upsert_deck(
         conn,
         session_id=session_id,
+        # run_id=None is deliberate: a manual edit is NOT a chat turn, so it
+        # stamps no `runs.deck_version_id` and gets no per-turn DeckChip on
+        # replay (version history still records it via the snapshot below).
         run_id=None,
         tex_path=str(deck_path),
         pdf_path=str(pdf_path) if pdf_ok else None,
@@ -491,7 +494,14 @@ async def edit_deck_frame(
             Path(deck.tex_path).read_text, encoding="utf-8"
         )
         try:
-            candidate = splice_frame(deck_tex, target.frame_tex, body.frame_tex)
+            # drop_preceding_cite: a hand-rewritten frame must NOT inherit the
+            # agent's out-of-body % cite: marker (it grounded the OLD content,
+            # and is invisible in the per-frame editor) — grounding re-resolves
+            # from the user's new frame instead. North-star traceback integrity.
+            candidate = splice_frame(
+                deck_tex, target.frame_tex, body.frame_tex,
+                drop_preceding_cite=True,
+            )
         except ValueError as exc:
             # Absent / ambiguous frame — surface as a 409 so the editor can tell
             # the user to use "Edit all deck" instead of guessing.
