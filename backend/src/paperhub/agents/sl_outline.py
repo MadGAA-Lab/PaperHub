@@ -414,6 +414,29 @@ async def run_sl_outline(
             narrative_pattern=narrative_pattern,
         )
 
+        # Degenerate-output gate: the model sometimes emits a finalize with a
+        # rich narrative_arc but almost NO content slides (just the title) — a
+        # catastrophic flake. The deck renders ~1:1, so it would ship a 1-2 page
+        # deck (live runs 574, 603). Fall back to a per-paper minimal outline
+        # that at least covers every paper. Low fixed floor: a CATASTROPHE
+        # backstop, NOT a depth enforcer (depth/length is the prompt's job).
+        _structural = {"title", "section_divider", "agenda"}
+        content_slides = [
+            s for s in outline.slides if s.content_form not in _structural
+        ]
+        if len(content_slides) < 2:
+            dropped.append(
+                f"outline-degenerate:{len(content_slides)}-content<2:fallback-minimal"
+            )
+            outline, fb_dropped = _resolve_outline(
+                _minimal_outline(digests, task_description),
+                reads_by_key=reads_by_key,
+                known_paper_ids=known_paper_ids,
+                known_fig_keys=known_fig_keys,
+                narrative_pattern="synthesis",
+            )
+            dropped.extend(fb_dropped)
+
         step.record_result(
             {
                 "talk_title": outline.talk_title,
