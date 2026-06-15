@@ -166,15 +166,15 @@ def _state() -> dict[str, Any]:
 
 class _NullAdapter:
     """F4.5 _generate does NOT call LlmAdapter (slide_agent + gather_context own
-    their litellm calls). _resolve still calls detect_slide_language via the
-    adapter for TargetLanguage; we accept that response_model and return None.
-    F6.1: sl_outline calls adapter.structured with RoundAction; return a
-    finalize action with a minimal valid outline so the GENERATE flow proceeds
-    without an LLM.
+    their litellm calls). _resolve still calls detect_slide_meta via the
+    adapter for SlideMeta; we accept that response_model and return all-None
+    (no explicit language/length). F6.1: sl_outline calls adapter.structured
+    with RoundAction; return a finalize action with a minimal valid outline so
+    the GENERATE flow proceeds without an LLM.
     """
 
     async def structured(self, *, response_model, **kw):  # type: ignore[no-untyped-def]
-        from paperhub.models.domain import TargetLanguage
+        from paperhub.models.domain import SlideMeta
         from paperhub.models.slide_domain import (
             DeckOutlineDraft,
             DigestSection,
@@ -182,8 +182,8 @@ class _NullAdapter:
             RoundAction,
         )
 
-        if response_model is TargetLanguage:
-            return TargetLanguage(language=None)
+        if response_model is SlideMeta:
+            return SlideMeta(language=None, min_pages=None, max_pages=None)
         if response_model is DigestSection:
             return DigestSection(name="stub", insight="stub insight")
         if response_model is RoundAction:

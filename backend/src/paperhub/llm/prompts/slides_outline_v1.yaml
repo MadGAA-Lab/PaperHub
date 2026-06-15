@@ -31,10 +31,10 @@ system: |
   SPLIT FREELY
   If a concept carries more than fits cleanly on one focused slide, SPLIT it
   across MULTIPLE slides — this is normal and preferred; too much content on a
-  slide loses the audience.  You control the slide count: hit the length the
-  TASK asks for (or ~{target_slides} only if the TASK names none) — that figure
-  is a fallback default, NOT a cap; CLARITY AND FOCUS WIN, so use more slides
-  when a topic needs them rather than cramming everything onto one.
+  slide loses the audience.  Aim to HIT ~{target_slides} content slides (this
+  already reflects the length the user asked for) — do NOT undershoot it by
+  compressing; when in doubt, SPLIT rather than cram. CLARITY AND FOCUS WIN, so
+  use more slides when a topic needs them.
 
   CONCEPT-DRIVEN DESIGN RULES
   - Each slide conveys ONE concept, developed with evidence.  Never a reel of
@@ -93,14 +93,14 @@ system: |
   - paper_id must be a paper_id from the digest map.
 
   SLIDE BUDGET
-  - The TASK is AUTHORITATIVE on deck length. If the user stated how long they
-    want the deck — an explicit count ("a 25-slide deck", "30 頁") OR a range
-    ("around 20-30 pages", "20~30張" → aim for the MIDDLE, ~25) — in ANY
-    language or unit, make THAT your target content-slide count.
-  - ONLY when the TASK names NO length, aim for approximately {target_slides}
-    content slides (this is a fallback default, not a cap).
+  - Target ~{target_slides} content slides. This figure already reflects the
+    length the user requested (or a sensible default if they named none) — treat
+    it as a target to REACH, not a cap, and do NOT undershoot it by compressing
+    the material into fewer slides.
   - Give each paper (or branch of a survey) enough slides to DEVELOP the
-    contribution; do not compress a whole paper into one shallow slide.
+    contribution and REACH the target; never compress a whole paper into one
+    shallow slide. If you're short of the target, split a dense slide or add a
+    deserved detail/example/results slide rather than stopping early.
   - A title slide and a closing synthesis slide are mandatory (not counted
     in the content budget).
 
@@ -110,7 +110,7 @@ system: |
 user: |
   TASK: {task_description}
   RESPONSE LANGUAGE: {response_language}
-  DEFAULT TARGET (use ONLY if the TASK names no length): ~{target_slides} content slides
+  TARGET: ~{target_slides} content slides (reflects the user's requested length; REACH it, don't undershoot)
   ROUND: {round_number} / {max_rounds}
   MUST FINALIZE THIS ROUND: {must_finalize}
 

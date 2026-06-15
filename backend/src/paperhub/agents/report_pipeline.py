@@ -21,7 +21,7 @@ from paperhub.llm.adapter import LlmAdapter
 from paperhub.models.domain import (
     DeckCommand,
     DeckNotesAuthor,
-    TargetLanguage,
+    SlideMeta,
 )
 from paperhub.tracing.tracer import Tracer
 
@@ -29,12 +29,12 @@ from paperhub.tracing.tracer import Tracer
 # optional language tag on the opening fence.
 _FENCE_RE = re.compile(r"^```[a-zA-Z]*\n?|\n?```$")
 
-# NOTE: deck-LENGTH parsing used to live here (a CJK-only regex
-# ``parse_slide_budget``). It was removed: it could not honor non-CJK units
-# ("pages"), ranges, or durations, and silently returned a wrong default that
-# CONTRADICTED the user's task (e.g. "20-30 pages" → 15). The outline now reads
-# the requested length straight from the task (any language), defaulting to ~15
-# only when none is named.
+# NOTE: deck-LENGTH is no longer regex-parsed (the old CJK-only
+# ``parse_slide_budget`` couldn't honor non-CJK units / ranges / durations and
+# returned a wrong default that contradicted the task). ``detect_slide_meta``
+# now EXTRACTS the requested length (any language) as min/max page bounds; the
+# caller computes the midpoint and passes a concrete target to the outline,
+# falling back to PAPERHUB_SLIDE_DEFAULT_LENGTH only when none is named.
 
 
 # --------------------------------------------------------------------------
@@ -116,26 +116,40 @@ async def classify_deck_command(
     return dec
 
 
-async def detect_slide_language(
+async def detect_slide_meta(
     *, adapter: LlmAdapter, tracer: Tracer, model: str, instruction: str,
-) -> str | None:
-    """Detect the language the user EXPLICITLY asked the SLIDE CONTENT to be in
-    (e.g. "把簡報換成英文" → "English"), independent of the chat-reply language.
-    Returns the language name, or ``None`` when none was named (caller falls
-    back to ``response_language``). Slot ``slides_target_language/v1``; traced as
+) -> SlideMeta:
+    """Extract, in ONE call (any language), the slide-content LANGUAGE the user
+    named (e.g. "把簡報換成英文" → "English") AND the deck LENGTH they requested
+    (as min/max page bounds). Returns a :class:`SlideMeta`; the caller derives
+    the slide language and the concrete target slide count (midpoint of min/max,
+    else the configured default). Slot ``slides_meta/v1``; traced as
     ``report:detect_language``."""
     async with tracer.step(
         agent="report", tool="report:detect_language", model=model
     ) as step:
         step.record_args({"instruction": instruction})
         out = await adapter.structured(
-            slot="slides_target_language/v1",
+            slot="slides_meta/v1",
             variables={"instruction": instruction},
-            response_model=TargetLanguage,
+            response_model=SlideMeta,
             model=model,
         )
         step.record_result(out.model_dump())
-    return out.language
+    return out
+
+
+def target_slides_from_meta(meta: SlideMeta, default: int) -> int:
+    """Concrete target content-slide count from the extracted page bounds: the
+    MIDPOINT of (min, max) when the user named a length (a single count has
+    min==max → itself; a range → the middle for safety), else ``default``."""
+    lo, hi = meta.min_pages, meta.max_pages
+    if lo is None and hi is None:
+        return default
+    lo = lo if lo is not None else hi
+    hi = hi if hi is not None else lo
+    assert lo is not None and hi is not None
+    return round((lo + hi) / 2)
 
 
 # --------------------------------------------------------------------------

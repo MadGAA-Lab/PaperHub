@@ -66,8 +66,12 @@ async def test_sl_qa_delegates_to_answer_callback(monkeypatch, tmp_path) -> None
         lambda **_kwargs: _async_return(DeckCommand(action="qa", target_page=None, note_language=None)),
     )
     monkeypatch.setattr(
-        rg, "detect_slide_language",
-        lambda **_kwargs: _async_return(None),
+        rg, "detect_slide_meta",
+        lambda **_kwargs: _async_return(
+            __import__("paperhub.models.domain", fromlist=["SlideMeta"]).SlideMeta(
+                language=None, min_pages=None, max_pages=None
+            )
+        ),
     )
     # Ensure _pdflatex_available doesn't gate the route (qa bypasses it anyway,
     # but _resolve has an early-exit guard: 'if not papers or not _pdflatex_available')
