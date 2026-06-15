@@ -1,9 +1,13 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 import { useCanvasStore } from "@/store/canvas";
-import { SourcesStrip } from "./SourcesStrip";
 import type { SlideSourceSection } from "@/types/domain";
+
+const mockGetPaperSections = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/api", () => ({ getPaperSections: mockGetPaperSections }));
+
+import { SourcesStrip } from "./SourcesStrip";
 
 const titleByPaperId = new Map<number, string>([[7, "Attention Is All You Need"]]);
 
@@ -57,5 +61,71 @@ describe("SourcesStrip", () => {
     render(<SourcesStrip sources={[]} titleByPaperId={titleByPaperId} />);
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
     expect(screen.getByText(/no single source/i)).toBeInTheDocument();
+  });
+
+  // ── edit mode: the per-slide reference editor ──────────────────────────
+
+  it("edit mode: × removes a source via onSetSources", () => {
+    const onSetSources = vi.fn();
+    const sources: SlideSourceSection[] = [
+      { paper_id: 7, section_name: "Introduction", chunk_ids: [101] },
+      { paper_id: 7, section_name: "Method", chunk_ids: [200] },
+    ];
+    render(
+      <SourcesStrip
+        sources={sources}
+        titleByPaperId={titleByPaperId}
+        editable
+        references={[{ paper_content_id: 7, title: "Attention Is All You Need" }]}
+        onSetSources={onSetSources}
+      />,
+    );
+    const removeButtons = screen.getAllByRole("button", { name: /Remove this source/i });
+    fireEvent.click(removeButtons[0]!);
+    // The remaining source is sent (Introduction removed).
+    expect(onSetSources).toHaveBeenCalledWith([
+      { paper_id: 7, section_name: "Method" },
+    ]);
+  });
+
+  it("edit mode: Add source picker resolves sections and adds one", async () => {
+    mockGetPaperSections.mockResolvedValue(["Introduction", "Method"]);
+    const onSetSources = vi.fn();
+    render(
+      <SourcesStrip
+        sources={[]}
+        titleByPaperId={titleByPaperId}
+        editable
+        references={[{ paper_content_id: 7, title: "Attention Is All You Need" }]}
+        onSetSources={onSetSources}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Add source/i }));
+    // Pick the paper → sections load from the picker.
+    fireEvent.change(screen.getByLabelText(/Select paper/i), {
+      target: { value: "7" },
+    });
+    await waitFor(() => expect(mockGetPaperSections).toHaveBeenCalledWith(7));
+    await screen.findByRole("option", { name: "Method" });
+    fireEvent.change(screen.getByLabelText(/Select section/i), {
+      target: { value: "Method" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Add$/i }));
+    expect(onSetSources).toHaveBeenCalledWith([
+      { paper_id: 7, section_name: "Method" },
+    ]);
+  });
+
+  it("edit mode: shows the Add control even when unsourced (synthesis)", () => {
+    render(
+      <SourcesStrip
+        sources={[]}
+        titleByPaperId={titleByPaperId}
+        editable
+        references={[{ paper_content_id: 7, title: "P" }]}
+        onSetSources={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /Add source/i })).toBeInTheDocument();
   });
 });

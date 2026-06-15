@@ -12,6 +12,7 @@ import type {
   DeckMeta,
   DeckSlideDetail,
   ManualEditResult,
+  SlideSourceSection,
   ToolCallRecord,
   ForkResult,
 } from "@/types/domain";
@@ -473,6 +474,28 @@ export async function putDeckTex(
     method: "PUT",
     body: JSON.stringify({ tex }),
   });
+}
+
+/** The section names of a paper, in document order — the deterministic picker
+ *  list for the per-slide Sources editor. */
+export async function getPaperSections(
+  paperContentId: number,
+): Promise<string[]> {
+  return apiFetch<string[]>(`/papers/content/${paperContentId}/sections`);
+}
+
+/** Set a slide's grounding from the structured Sources editor — deterministic,
+ *  NO recompile (the `% cite:` marker is a LaTeX comment). Returns the resolved
+ *  source sections (with chunk_ids). */
+export async function putSlideSources(
+  sessionId: number,
+  page: number,
+  sources: { paper_id: number; section_name: string }[],
+): Promise<{ ok: boolean; source_sections: SlideSourceSection[] }> {
+  return apiFetch<{ ok: boolean; source_sections: SlideSourceSection[] }>(
+    `/sessions/${sessionId}/deck/slides/${page}/sources`,
+    { method: "PUT", body: JSON.stringify({ sources }) },
+  );
 }
 
 /** Fetch a run's recorded agent trace (tool_calls), lazily, after a refresh

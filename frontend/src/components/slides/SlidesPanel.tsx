@@ -36,6 +36,7 @@ import {
   getDeckTexText,
   putFrameTex,
   putDeckTex,
+  putSlideSources,
 } from "@/lib/api";
 import { pushWidth } from "@/lib/stableWidth";
 import { Button } from "@/components/ui/button";
@@ -334,7 +335,8 @@ export function SlidesPanel({
         const tgt = (slidesSources ?? []).find(
           (s) => s.page_start <= clamped && clamped <= s.page_end,
         );
-        setEditorDraft(tgt?.frame_tex ?? "");
+        // Load the CONTENT (cite markers stripped) — the editor is content-only.
+        setEditorDraft(tgt?.content_tex ?? tgt?.frame_tex ?? "");
         setEditorErrorLog(null);
       }
     },
@@ -419,12 +421,27 @@ export function SlidesPanel({
   const canEdit = deck?.status === "ok" && !busy;
   const editing = editorMode !== "off";
 
-  // Enter "edit current frame" — load the owning slide's frame source.
+  // Enter "edit current frame" — load the slide CONTENT only (cite markers
+  // stripped; grounding is managed via the Sources reference editor below).
   const beginEditFrame = () => {
     if (!currentSlide) return;
     setEditorErrorLog(null);
-    setEditorDraft(currentSlide.frame_tex);
+    setEditorDraft(currentSlide.content_tex ?? currentSlide.frame_tex);
     setEditorMode(sessionId, "frame");
+  };
+
+  // Persist the current slide's grounding from the Sources reference editor —
+  // deterministic, NO recompile (the % cite: marker is a LaTeX comment). Then
+  // refresh the per-slide detail so the strip + chips reflect the new sources.
+  const setCurrentSlideSources = async (
+    pairs: { paper_id: number; section_name: string }[],
+  ) => {
+    await putSlideSources(sessionId, currentPage, pairs);
+    try {
+      setSlidesSources(sessionId, await getDeckSlides(sessionId));
+    } catch {
+      /* a transient refetch failure self-heals on the next load */
+    }
   };
   // Enter "edit all deck" — fetch the whole deck.tex as text.
   const beginEditDeck = async () => {
@@ -808,10 +825,28 @@ export function SlidesPanel({
         )}
       </div>
 
-      {/* Sources (this page): clickable cited-source chips under the slide
-          render, synced to the on-screen page → Citation Canvas (F6.2). */}
-      {file && (
-        <SourcesStrip sources={currentSources} titleByPaperId={titleByPaperId} />
+      {/* Sources (this page). Read mode (not editing): chips → Citation Canvas.
+          Editing the current frame: a deterministic reference editor (× / + Add).
+          Editing the whole deck: source editing is per-slide, so it's disabled
+          with a hint. */}
+      {file && editorMode !== "deck" && (
+        <SourcesStrip
+          sources={currentSources}
+          titleByPaperId={titleByPaperId}
+          editable={editorMode === "frame"}
+          references={references ?? []}
+          onSetSources={setCurrentSlideSources}
+        />
+      )}
+      {file && editorMode === "deck" && (
+        <div className="shrink-0 border-t border-border bg-muted/10 px-3 py-1.5">
+          <span className="text-[11px] italic text-muted-foreground">
+            {t(
+              "sources.deckEditDisabled",
+              "Source editing is per-slide — use Edit current frame",
+            )}
+          </span>
+        </div>
       )}
 
       {/* Draggable divider (outside Document — no pdfjs dependency) */}

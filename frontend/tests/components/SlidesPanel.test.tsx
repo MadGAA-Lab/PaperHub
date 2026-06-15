@@ -13,6 +13,7 @@ const SLIDES7: DeckSlideDetail[] = [
     page_start: 1,
     page_end: 1,
     frame_tex: "\\begin{frame}{One}a\\end{frame}",
+    content_tex: "\\begin{frame}{One}a\\end{frame}",
     source_sections: [
       { paper_id: 7, section_name: "Introduction", chunk_ids: [101] },
     ],
@@ -22,6 +23,7 @@ const SLIDES7: DeckSlideDetail[] = [
     page_start: 2,
     page_end: 2,
     frame_tex: "\\begin{frame}{Two}b\\end{frame}",
+    content_tex: "\\begin{frame}{Two}b\\end{frame}",
     source_sections: [],
   },
 ];
@@ -267,6 +269,7 @@ describe("SlidesPanel", () => {
   it("frame toggle opens the editor with the current frame; modes are exclusive", async () => {
     render(<SlidesPanel sessionId={7} speakerNotes={{}} />);
     fireEvent.click(await screen.findByRole("button", { name: /Edit this frame/i }));
+    // The editor loads CONTENT only (cite markers stripped).
     expect(await screen.findByLabelText("latex-source")).toHaveValue(
       "\\begin{frame}{One}a\\end{frame}",
     );
@@ -322,7 +325,7 @@ describe("SlidesPanel", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Edit this frame/i }));
     const ta = await screen.findByLabelText("latex-source");
     expect(ta).toHaveValue("\\begin{frame}{One}a\\end{frame}");
-    // Navigate to the next page → the editor reloads with page 2's frame.
+    // Navigate to the next page → the editor reloads with page 2's content.
     fireEvent.click(screen.getByRole("button", { name: /next slide/i }));
     await waitFor(() =>
       expect(screen.getByLabelText("latex-source")).toHaveValue(

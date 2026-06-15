@@ -52,7 +52,15 @@
     "heading": "Sources",
     "empty": "Synthesis — no single source",
     "unsourced": "No source chunks resolved for this section",
-    "openHint": "Open this source in the Citation Canvas"
+    "openHint": "Open this source in the Citation Canvas",
+    "remove": "Remove this source",
+    "add": "Add source",
+    "selectPaper": "Select paper",
+    "selectSection": "Select section",
+    "loadingSections": "Loading…",
+    "confirmAdd": "Add",
+    "cancelAdd": "Cancel",
+    "deckEditDisabled": "Source editing is per-slide — use Edit current frame"
   },
   "deckChip": {
     "fallbackTitle": "Slides",

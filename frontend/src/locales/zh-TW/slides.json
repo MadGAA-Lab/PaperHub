@@ -52,7 +52,15 @@
     "heading": "來源",
     "empty": "綜合內容 — 無單一來源",
     "unsourced": "此章節未解析到來源片段",
-    "openHint": "在引用畫布中開啟此來源"
+    "openHint": "在引用畫布中開啟此來源",
+    "remove": "移除此來源",
+    "add": "新增來源",
+    "selectPaper": "選擇論文",
+    "selectSection": "選擇章節",
+    "loadingSections": "載入中…",
+    "confirmAdd": "新增",
+    "cancelAdd": "取消",
+    "deckEditDisabled": "來源編輯僅限單張投影片 — 請使用「編輯此張投影片」"
   },
   "deckChip": {
     "fallbackTitle": "投影片",

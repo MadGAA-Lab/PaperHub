@@ -156,7 +156,11 @@ export interface DeckSlideDetail {
   slide_index: number;
   page_start: number;
   page_end: number;
+  /** The bare frame body (with any cite marker). */
   frame_tex: string;
+  /** What the LaTeX editor loads: the frame with `% cite:` markers STRIPPED —
+   *  the editor is content-only; grounding is managed via the Sources editor. */
+  content_tex: string;
   source_sections: SlideSourceSection[];
 }
 
