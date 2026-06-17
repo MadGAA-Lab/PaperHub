@@ -2,9 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship v2.37.0 — (A) a Stop button that cleanly cancels an in-flight chat turn (client abort → backend finalizes `runs.status='cancelled'`), and (B) a localized in-app changelog + "you just updated" toast + an optional GitHub update-available check.
+**Goal:** Ship v2.37.0 — (A) a **Stop button** that *instantly* retracts an in-flight chat turn and actually stops the backend generation, and (B) a localized in-app changelog + "you just updated" toast + an optional GitHub update-available check.
 
-**Architecture:** Two independent features touching disjoint code except shared i18n + the SRS. (A) reuses the already-present `AbortController` in `useChatStream`; `sse-starlette` already cancels the stream generator on disconnect, so the only backend change is catching `asyncio.CancelledError` to finalize the run + persist partial text. (B) ships a bundled `changelog.json` (localized, en-fallback), a `GET /version` endpoint that does a cached GitHub latest-release lookup gated by a settings toggle, a `ChangelogModal`, and a one-time announce toast.
+**Architecture:** Two independent features touching disjoint code except shared i18n + the SRS. (A) — the load-bearing insight (learned the hard way, see "Lessons" below): **the frontend must respond synchronously and immediately on click** — never wait for the abort to propagate back through `fetchEventSource`. On Stop, in one synchronous Zustand update, the turn is **retracted** (the streaming assistant bubble AND its paired user message are removed — never leave a user message without a response) and the user's text is dropped back into the composer; the stream is aborted; and `POST /chat/cancel` tells the backend to **cancel the running asyncio task** (interrupting the live LLM call) and **delete the orphaned turn's message** so it can't reappear on reload. (B) ships a bundled `changelog.json` (localized, en-fallback), a `GET /version` endpoint that does a cached GitHub latest-release lookup gated by a settings toggle, a `ChangelogModal`, and a one-time announce toast.
+
+**Lessons baked into Part A (do NOT repeat these mistakes):**
+1. **Immediacy is the whole feature.** The bug was never "cancel doesn't work" — the backend cancel always worked. It was that the UI didn't react *instantly*, so users clicked again, and a restore-then-resend path turned the second click into a duplicate send. The fix is a single synchronous store mutation on click. Do not rely on `AbortController` → `fetchEventSource` → catch; that library may *resolve* (not reject) on abort, leaving the bubble stuck "streaming".
+2. **Pair invariant.** A user message must NEVER exist without a paired assistant response — in the UI *and* in the DB. Retract removes both client-side; `/chat/cancel` deletes the server-side row.
+3. **No auto-reconnect / no over-engineering.** `/chat` is one-shot (the existing `onerror`-throws already prevents `fetch-event-source` retry). Do NOT add: partial-text persistence, an "explicit-cancel set", a silent-hang `onClose` handler, a reconnect sentinel, or a "Stopped" message bubble. The turn is *removed*, not shown as stopped.
+4. **Verify with a LIVE test, not just pytest.** pytest proves wiring; only a real `:8000` run proves the LLM call stack actually stops. Ship `scripts/live_abort_test.py`.
 
 **Tech Stack:** Backend — FastAPI, aiosqlite, httpx, `importlib.metadata`. Frontend — React 19 + TS strict, Zustand, react-i18next, Sonner, Base-UI Dialog, lucide-react. Tests — pytest (backend), Vitest + RTL + MSW (frontend).
 
@@ -16,16 +22,17 @@
 
 ## File Structure
 
-**Part A — Run cancellation:**
-- `backend/src/paperhub/api/chat.py` (modify) — `_finalise_cancelled` helper; `partial_chunks` accumulator at each token yield; `except asyncio.CancelledError` handler.
-- `backend/tests/test_chat_cancel.py` (create) — unit + generator-athrow integration tests.
-- `frontend/src/types/domain.ts` (modify) — `ChatMessage.status` gains `"cancelled"`.
-- `frontend/src/store/chat.ts` (modify) — `cancelMessage` + `cancelPendingAssistant` actions.
-- `frontend/src/hooks/useChatStream.ts` (modify) — `stop()` + `userStoppedRef`; abort → cancel, no throw.
-- `frontend/src/components/chat/Composer.tsx` (modify) — Stop button while streaming.
-- `frontend/src/components/chat/MessageBubble.tsx` (modify) — render `"cancelled"` status.
-- `frontend/src/pages/ChatPage.tsx` (modify) — wire `isStreaming` + `onStop`.
-- `frontend/src/locales/{en,zh-TW,zh-CN,ja}/chat.json` (modify) — `composer.stop`, `composer.stopped`.
+**Part A — Run cancellation (Stop):**
+- `backend/src/paperhub/api/chat.py` (modify) — a `_running_tasks[run_id]` registry (register the streaming task; pop in `finally`); a new `POST /chat/cancel` that `task.cancel()`s the run, `DELETE`s its messages, and marks the run `cancelled`. NO `_finalise_cancelled`, NO partial accumulation, NO `except CancelledError` finalize.
+- `backend/tests/test_chat_cancel.py` (create) — unit: endpoint cancels the task + deletes the turn's message + marks the run cancelled; a bare disconnect leaves it `running`.
+- `backend/scripts/live_abort_test.py` (create) — operator live test (real `:8000`): cancel mid-LLM-call → stream stops + run cancelled.
+- `frontend/src/store/chat.ts` (modify) — one `retractTurn(sessionId): string` action (remove the trailing assistant + paired user message; return the user text). No `cancelled` status, no "stopped" bubble.
+- `frontend/src/lib/api.ts` (modify) — `cancelRun(runId)` → `POST /chat/cancel`.
+- `frontend/src/hooks/useChatStream.ts` (modify) — track `runIdRef`/`sessionIdRef`; `stop()` synchronously: abort + `retractTurn` → `requestComposerText` + fire-and-forget `cancelRun`; swallow the user-stop abort error.
+- `frontend/src/components/chat/Composer.tsx` (modify) — Send→Stop (square, `type="button"`, tooltip + aria-label) while streaming.
+- `frontend/src/pages/ChatPage.tsx` (modify) — wire `isStreaming` + `onStop={stop}`.
+- `frontend/src/locales/{en,zh-TW,zh-CN,ja}/chat.json` (modify) — `composer.stop`, `composer.stopTooltip`.
+- (NOT touched: `MessageBubble.tsx`, `ChatMessage.status` — the cancelled turn is removed, never rendered.)
 
 **Part B — Version / changelog / update-check:**
 - `backend/src/paperhub/settings_registry.py` (modify) — `PAPERHUB_UPDATE_CHECK` bool field.
@@ -51,733 +58,188 @@
 
 # Part A — Run Cancellation (Stop)
 
-### Task A1: Backend — finalize a cancelled run + persist partial text
+**Design (per the Lessons above): the click does everything synchronously on the client; the backend kills the run + removes the orphan turn. No "cancelled" message is shown — the turn is *removed*.**
 
-**Files:**
-- Modify: `backend/src/paperhub/api/chat.py`
-- Test: `backend/tests/test_chat_cancel.py`
+### Task A1: Backend — `POST /chat/cancel` (kill the task + delete the orphan turn)
 
-- [ ] **Step 1: Write the failing unit test for `_finalise_cancelled`**
+**Files:** Modify `backend/src/paperhub/api/chat.py`; Create `backend/tests/test_chat_cancel.py`; Create `backend/scripts/live_abort_test.py`.
 
-Create `backend/tests/test_chat_cancel.py`:
+**Step 1 — task registry.** Module-level in `chat.py` (ensure `import asyncio`):
 
 ```python
-import asyncio
-
-import aiosqlite
-
-from paperhub.api.chat import _finalise_cancelled, _new_run
-from paperhub.config import load_settings
-from paperhub.db.migrate import apply_schema
-
-
-async def _seed_session(conn: aiosqlite.Connection) -> int:
-    await conn.execute("INSERT INTO chat_sessions DEFAULT VALUES")
-    await conn.commit()
-    async with conn.execute("SELECT last_insert_rowid()") as cur:
-        row = await cur.fetchone()
-    assert row is not None
-    return int(row[0])
-
-
-async def test_finalise_cancelled_sets_status_and_persists_partial(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("PAPERHUB_WORKSPACE", str(tmp_path))
-    settings = load_settings()
-    async with aiosqlite.connect(settings.db_path) as conn:
-        await apply_schema(conn)
-        session_id = await _seed_session(conn)
-        run_id = await _new_run(conn, session_id)
-
-        await _finalise_cancelled(conn, run_id, session_id, "partial answer so far")
-
-        async with conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)) as cur:
-            status_row = await cur.fetchone()
-        assert status_row is not None and status_row[0] == "cancelled"
-        async with conn.execute(
-            "SELECT content FROM messages WHERE run_id = ? AND role = 'assistant'", (run_id,)
-        ) as cur:
-            msg_row = await cur.fetchone()
-        assert msg_row is not None and msg_row[0] == "partial answer so far"
-
-
-async def test_finalise_cancelled_skips_empty_partial(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("PAPERHUB_WORKSPACE", str(tmp_path))
-    settings = load_settings()
-    async with aiosqlite.connect(settings.db_path) as conn:
-        await apply_schema(conn)
-        session_id = await _seed_session(conn)
-        run_id = await _new_run(conn, session_id)
-
-        await _finalise_cancelled(conn, run_id, session_id, "")
-
-        async with conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)) as cur:
-            status_row = await cur.fetchone()
-        assert status_row is not None and status_row[0] == "cancelled"
-        async with conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE run_id = ? AND role = 'assistant'", (run_id,)
-        ) as cur:
-            count_row = await cur.fetchone()
-        assert count_row is not None and count_row[0] == 0  # empty partial → no message
+# run_id -> the asyncio task streaming that run, so POST /chat/cancel can cancel
+# it (which interrupts the live LLM call at once). Process-local — fine for the
+# single-worker deployment. Popped in the stream's `finally`.
+_running_tasks: dict[int, "asyncio.Task[Any]"] = {}
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
-
-Run: `cd backend; uv run pytest tests/test_chat_cancel.py -v`
-Expected: FAIL — `ImportError: cannot import name '_finalise_cancelled'`.
-
-- [ ] **Step 3: Add the `_finalise_cancelled` helper**
-
-In `backend/src/paperhub/api/chat.py`, immediately after the existing `_finalise` function (ends ~line 164), add:
+**Step 2 — register + clean up.** In `stream_events()`, immediately after `run_id = await _new_run(conn, session_id)`:
 
 ```python
-async def _finalise_cancelled(
-    conn: aiosqlite.Connection,
-    run_id: int,
-    session_id: int,
-    partial_content: str,
-) -> None:
-    """Finalize a run cancelled by client disconnect (FR-15). Sets
-    ``runs.status='cancelled'`` and persists the partial assistant text only
-    when non-empty, so a Stop that lands before any token leaves no empty
-    bubble in cross-device replay (v2.15)."""
-    if partial_content:
+            task = asyncio.current_task()
+            if task is not None:
+                _running_tasks[run_id] = task
+```
+
+In the existing `finally:` block (the one that calls `reset_client_headers_context(headers_token)`), add:
+
+```python
+                _running_tasks.pop(run_id, None)
+```
+
+Do **NOT** add an `except asyncio.CancelledError` in the generator, no partial-token accumulation, no `_finalise_cancelled`. Let `CancelledError` propagate — the endpoint owns the DB side.
+
+**Step 3 — the endpoint** (add near the bottom of `chat.py`, after `EventSourceResponse(stream_events())` returns):
+
+```python
+class CancelRequest(BaseModel):
+    run_id: int
+
+
+@router.post("/chat/cancel")
+async def cancel_run(req: CancelRequest) -> dict[str, str]:
+    """Explicit user Stop (FR-15). THREE effects so the turn stops at once and
+    leaves no orphan:
+      (1) cancel the running asyncio task — interrupts the live LLM call NOW;
+      (2) DELETE the turn's messages — a user message must never be left without
+          a response (it would otherwise reappear on reload / cross-device);
+      (3) mark the run 'cancelled' (only while still 'running').
+    A bare disconnect (reload, network drop, teardown) never calls this, so it
+    is never cancelled."""
+    task = _running_tasks.get(req.run_id)
+    if task is not None and not task.done():
+        task.cancel()
+    settings = load_settings()
+    async with open_db(settings.db_path) as conn:
+        await conn.execute("DELETE FROM messages WHERE run_id = ?", (req.run_id,))
         await conn.execute(
-            "INSERT INTO messages (session_id, role, content, run_id) "
-            "VALUES (?, 'assistant', ?, ?)",
-            (session_id, partial_content, run_id),
+            "UPDATE runs SET finished_at = datetime('now'), status = 'cancelled' "
+            "WHERE id = ? AND status = 'running'",
+            (req.run_id,),
         )
-    await conn.execute(
-        "UPDATE runs SET finished_at = datetime('now'), status = 'cancelled' "
-        "WHERE id = ?",
-        (run_id,),
-    )
-    await conn.commit()
+        await conn.commit()
+    return {"status": "cancelled", "run_id": str(req.run_id)}
 ```
 
-- [ ] **Step 4: Run the unit tests to verify they pass**
+**Step 4 — unit tests** (`test_chat_cancel.py`), with an autouse fixture clearing `_running_tasks` between tests:
+- `cancel_run` cancels a registered task (an `asyncio.sleep(30)` stand-in) — assert `task.cancelled()`.
+- `cancel_run` deletes the run's messages and sets `runs.status='cancelled'` (seed a `running` run + a user message, call it, assert).
+- A `running` run that is NOT cancelled stays `running` (no endpoint call).
 
-Run: `cd backend; uv run pytest tests/test_chat_cancel.py -v`
-Expected: PASS (2 passed).
+**Step 5 — live test** (`scripts/live_abort_test.py`): open a real `/chat` SSE against `:8000`, capture the `run_id` from the `session` event, `POST /chat/cancel` ~4s in (mid-generation), and assert the stream stops promptly (close within ~1s) and the run is `cancelled`. This is the REQUIRED proof — pytest does not exercise the real LLM stack.
 
-- [ ] **Step 5: Add the partial-text accumulator + the CancelledError handler**
+Gates: `uv run pytest tests/test_chat_cancel.py`, `uv run ruff check src tests`, `uv run mypy src`.
+Commit: `feat(chat): POST /chat/cancel kills the run + deletes the orphaned turn (FR-15)`.
 
-In `chat.py`, ensure the module imports `asyncio` and `contextlib` (add either if missing near the top imports).
+### Task A2: Frontend store — `retractTurn`
 
-In `stream_events()`, declare the accumulator right after `last_emitted_step = -1` (~line 600):
+**Files:** Modify `frontend/src/store/chat.ts`; Test `frontend/tests/store/retractTurn.test.ts`.
 
-```python
-            last_emitted_step = -1
-            # Accumulate streamed tokens so a mid-stream cancel (FR-15) can
-            # persist the partial answer. Each token-yield site appends here.
-            partial_chunks: list[str] = []
-```
-
-At **every** `yield {"event": "token", ...}` site inside `stream_events` (the branches: chitchat ~654, clarify ~665, paper_qa ~785, library_stats/sql ~863, memory ~877, intercept ~903), add an append of the same text passed to `TokenEvent(... text=X)` immediately BEFORE the yield. Example for the chitchat branch:
-
-```python
-                        token_evt = TokenEvent(run_id=run_id, branch="", text=token)
-                        partial_chunks.append(token)
-                        yield {"event": "token",
-                               "data": token_evt.model_dump_json(exclude={"type"})}
-```
-
-Apply the identical one-line `partial_chunks.append(<text var>)` before each of the other token yields (`final_content`, `item`, etc. — append whatever variable that site passes as `text=`).
-
-Then add the cancellation handler BEFORE the existing `except Exception` block (~line 950). Order matters: `CancelledError` is a `BaseException`, so `except Exception` never catches it — the new handler must come first:
-
-```python
-            except asyncio.CancelledError:
-                # Client disconnected (Stop / navigation). sse-starlette cancels
-                # this generator task; persist what streamed + flip the run to
-                # 'cancelled' (closing the FR-09 stuck-'running' gap), then
-                # re-raise so sse-starlette completes teardown. Shielded so the
-                # DB write survives the in-flight cancellation.
-                with contextlib.suppress(Exception):
-                    await asyncio.shield(
-                        _finalise_cancelled(
-                            conn, run_id, session_id, "".join(partial_chunks),
-                        )
-                    )
-                raise
-            except Exception as exc:
-```
-
-- [ ] **Step 6: Write the generator-level integration test**
-
-Append to `backend/tests/test_chat_cancel.py`:
-
-```python
-import aiosqlite as _aiosqlite  # noqa: E402  (re-alias for clarity below)
-
-from starlette.requests import Request
-
-from paperhub.api.chat import chat_endpoint
-from paperhub.app import create_app
-from paperhub.models.chat import ChatRequest
-
-
-def _fake_request(app) -> Request:
-    return Request({"type": "http", "method": "POST", "headers": [], "app": app})
-
-
-async def test_chat_stream_cancel_marks_run_cancelled(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("PAPERHUB_WORKSPACE", str(tmp_path))
-    monkeypatch.setenv(
-        "PAPERHUB_ROUTER_MOCK",
-        '{"intent":"chitchat","model_tier":"small","confidence":0.9,"reasoning":"hi"}',
-    )
-    monkeypatch.setenv("PAPERHUB_CHITCHAT_MOCK", "Hello there, here is a partial answer")
-    settings = load_settings()
-    async with aiosqlite.connect(settings.db_path) as conn:
-        await apply_schema(conn)
-
-    app = create_app()
-    req = ChatRequest(session_id=None, user_message="hi", history=[])
-    resp = await chat_endpoint(req, _fake_request(app))
-    gen = resp.body_iterator
-
-    # Consume the first couple of events (session + at least one token), then
-    # simulate the sse-starlette disconnect cancellation.
-    await gen.__anext__()  # session event
-    await gen.__anext__()  # routing/token (enough to start the turn)
-    try:
-        await gen.athrow(asyncio.CancelledError())
-    except asyncio.CancelledError:
-        pass  # re-raised by the handler, as designed
-
-    async with aiosqlite.connect(settings.db_path) as conn:
-        async with conn.execute("SELECT status FROM runs ORDER BY id DESC LIMIT 1") as cur:
-            row = await cur.fetchone()
-    assert row is not None and row[0] == "cancelled"
-```
-
-If the chitchat path dereferences `request.app.state.mcp_registry`, set `app.state.mcp_registry = None` is insufficient — instead reuse the helper from `tests/test_chat_sse.py` (`_wire_test_app`) by importing it; the chitchat branch (router + chitchat mock) does not dispatch MCP, so a bare `create_app()` is expected to suffice.
-
-- [ ] **Step 7: Run the cancel tests to verify they pass**
-
-Run: `cd backend; uv run pytest tests/test_chat_cancel.py -v`
-Expected: PASS (3 passed).
-
-- [ ] **Step 8: Targeted gates**
-
-Run: `cd backend; uv run ruff check src tests; uv run mypy src`
-Expected: "All checks passed!" and "Success: no issues found".
-
-- [ ] **Step 9: Commit**
-
-```bash
-git add backend/src/paperhub/api/chat.py backend/tests/test_chat_cancel.py
-git commit -m "feat(chat): finalize cancelled runs and persist partial text (FR-15)"
-```
-
----
-
-### Task A2: Frontend store — `cancelled` status + cancel actions
-
-**Files:**
-- Modify: `frontend/src/types/domain.ts:182` (the `ChatMessage.status` union)
-- Modify: `frontend/src/store/chat.ts`
-- Test: `frontend/tests/store/chatCancel.test.ts`
-
-- [ ] **Step 1: Write the failing store test**
-
-Create `frontend/tests/store/chatCancel.test.ts`:
+Interface: `retractTurn: (sessionId: number) => string;`
 
 ```typescript
-import { beforeEach, describe, expect, it } from "vitest";
-import { useChatStore } from "@/store/chat";
-
-describe("chat store — cancel actions", () => {
-  beforeEach(() => {
-    useChatStore.getState().reset();
-  });
-
-  it("cancelMessage keeps partial content and sets status 'cancelled'", () => {
-    const s = useChatStore.getState();
-    const sid = s.newSession();
-    s.appendMessage(sid, { role: "user", content: "hi", run_id: null });
-    s.appendMessage(sid, { role: "assistant", content: "", run_id: 7, status: "streaming" });
-    s.appendToken(sid, 7, "partial so far");
-
-    s.cancelMessage(sid, 7);
-
-    const msg = useChatStore
-      .getState()
-      .sessions.find((x) => x.id === sid)!
-      .messages.find((m) => m.run_id === 7)!;
-    expect(msg.status).toBe("cancelled");
-    expect(msg.content).toBe("partial so far");
-  });
-
-  it("cancelPendingAssistant marks the last streaming assistant cancelled", () => {
-    const s = useChatStore.getState();
-    const sid = s.newSession();
-    s.appendMessage(sid, { role: "assistant", content: "", run_id: null, status: "streaming" });
-
-    s.cancelPendingAssistant(sid);
-
-    const msgs = useChatStore.getState().sessions.find((x) => x.id === sid)!.messages;
-    expect(msgs[msgs.length - 1]!.status).toBe("cancelled");
-  });
-});
-```
-
-- [ ] **Step 2: Run the test to verify it fails**
-
-Run: `cd frontend; npm test -- --run tests/store/chatCancel.test.ts`
-Expected: FAIL — `cancelMessage is not a function`.
-
-- [ ] **Step 3: Extend the `ChatMessage.status` union**
-
-In `frontend/src/types/domain.ts`, change the `ChatMessage.status` field:
-
-```typescript
-  status?: "streaming" | "ok" | "error" | "cancelled";
-```
-
-- [ ] **Step 4: Add the two actions to the store interface + implementation**
-
-In `frontend/src/store/chat.ts`, add to the `ChatState` interface (next to `errorMessage`):
-
-```typescript
-  cancelMessage: (sessionId: number, run_id: number) => void;
-  cancelPendingAssistant: (sessionId: number) => void;
-```
-
-And add the implementations after `errorMessage` (~line 298):
-
-```typescript
-      cancelMessage: (sessionId, run_id) =>
-        set((s) => {
-          const msg = s.sessions
-            .find((x) => x.id === sessionId)
-            ?.messages.find((m) => m.run_id === run_id && m.role === "assistant");
-          const trace = (msg?.trace ?? []).filter((r) => r.step_index >= 0);
-          return {
-            sessions: patchMessageByRunId(s.sessions, sessionId, run_id, {
-              status: "cancelled",
-              trace,
-            }),
-          };
-        }),
-
-      cancelPendingAssistant: (sessionId) =>
-        set((s) => ({
-          sessions: s.sessions.map((sess) =>
-            sess.id === sessionId
-              ? {
-                  ...sess,
-                  messages: sess.messages.map((m, i, arr) =>
-                    i === arr.length - 1 &&
-                    m.role === "assistant" &&
-                    (m.status === "streaming" || m.status === undefined)
-                      ? { ...m, status: "cancelled" }
-                      : m,
-                  ),
-                }
-              : sess,
-          ),
-        })),
-```
-
-- [ ] **Step 5: Run the test to verify it passes**
-
-Run: `cd frontend; npm test -- --run tests/store/chatCancel.test.ts`
-Expected: PASS.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add frontend/src/types/domain.ts frontend/src/store/chat.ts frontend/tests/store/chatCancel.test.ts
-git commit -m "feat(chat): add cancelled message state + cancel store actions (FR-15)"
-```
-
----
-
-### Task A3: Frontend hook — `stop()` + treat user abort as cancel
-
-**Files:**
-- Modify: `frontend/src/hooks/useChatStream.ts`
-- Test: `frontend/tests/hooks/useChatStreamStop.test.ts`
-
-- [ ] **Step 1: Write the failing hook test**
-
-Create `frontend/tests/hooks/useChatStreamStop.test.ts`:
-
-```typescript
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { renderHook, act } from "@testing-library/react";
-
-// Mock the SSE layer so we control when/how the stream rejects.
-const streamChatMock = vi.fn();
-vi.mock("@/lib/sse", () => ({ streamChat: (...args: unknown[]) => streamChatMock(...args) }));
-vi.mock("@/lib/api", () => ({ listSessionReferences: vi.fn().mockResolvedValue([]) }));
-
-import { useChatStream } from "@/hooks/useChatStream";
-import { useChatStore } from "@/store/chat";
-
-afterEach(() => {
-  streamChatMock.mockReset();
-  useChatStore.getState().reset();
-});
-
-it("stop() aborts and finalizes the streaming message as cancelled (no throw)", async () => {
-  const sid = useChatStore.getState().newSession();
-  useChatStore.getState().patchSessionBackendId(sid, 100);
-
-  // streamChat: emit a session event (gives a run_id), then a token, then hang
-  // until aborted — reject with an AbortError when the signal fires.
-  streamChatMock.mockImplementation((_body, handlers, signal: AbortSignal) => {
-    handlers.onEvent("session", { run_id: 5, session_id: 100 });
-    handlers.onEvent("token", { run_id: 5, branch: "", text: "partial" });
-    return new Promise((_resolve, reject) => {
-      signal.addEventListener("abort", () =>
-        reject(new DOMException("Aborted", "AbortError")),
-      );
-    });
-  });
-
-  const { result } = renderHook(() => useChatStream());
-  let sendPromise!: Promise<void>;
-  act(() => {
-    sendPromise = result.current.send(sid, "hello");
-  });
-  // Let the synchronous onEvent calls run.
-  await Promise.resolve();
-  act(() => result.current.stop());
-  await expect(sendPromise).resolves.toBeUndefined(); // does NOT throw
-
-  const msg = useChatStore
-    .getState()
-    .sessions.find((x) => x.id === sid)!
-    .messages.find((m) => m.run_id === 5)!;
-  expect(msg.status).toBe("cancelled");
-  expect(msg.content).toBe("partial");
-});
-```
-
-- [ ] **Step 2: Run the test to verify it fails**
-
-Run: `cd frontend; npm test -- --run tests/hooks/useChatStreamStop.test.ts`
-Expected: FAIL — `result.current.stop is not a function`.
-
-- [ ] **Step 3: Add `stop()` + the userStopped flag, and handle abort**
-
-In `frontend/src/hooks/useChatStream.ts`:
-
-Add a ref next to `abortRef` (~line 25):
-
-```typescript
-  const abortRef = useRef<AbortController | null>(null);
-  const userStoppedRef = useRef(false);
-```
-
-At the start of `send` (after `abortRef.current = new AbortController();`, ~line 30), reset the flag:
-
-```typescript
-    abortRef.current?.abort();
-    abortRef.current = new AbortController();
-    userStoppedRef.current = false;
-```
-
-Replace the outer `catch (err)` block (~lines 168-181) with abort-aware handling:
-
-```typescript
-    } catch (err) {
-      const aborted =
-        userStoppedRef.current ||
-        (err instanceof DOMException && err.name === "AbortError");
-      if (aborted && userStoppedRef.current) {
-        // Deliberate Stop (FR-15): finalize the partial answer as cancelled.
-        // An implicit abort-on-new-send leaves userStoppedRef false and falls
-        // through to the existing error path below.
-        if (runId !== null) {
-          store.getState().cancelMessage(sessionId, runId);
-        } else {
-          store.getState().cancelPendingAssistant(sessionId);
-        }
-        return; // swallow — not an error
+retractTurn: (sessionId) => {
+  let restored = "";
+  set((s) => ({
+    sessions: s.sessions.map((sess) => {
+      if (sess.id !== sessionId) return sess;
+      const msgs = [...sess.messages];
+      // Drop the trailing streaming assistant placeholder...
+      if (msgs.length > 0 && msgs[msgs.length - 1]!.role === "assistant") {
+        msgs.pop();
       }
-      // fetchEventSource may throw synchronously before onerror fires
-      // (e.g. CORS preflight reject, immediate connection refused).
-      if (!handledInline && runId === null) {
-        const msg = err instanceof Error ? err.message : String(err);
-        store.getState().failPendingAssistant(sessionId, msg);
+      // ...and the paired user message (never leave a user message without a
+      // response), returning its text so the caller restores it to the composer.
+      if (msgs.length > 0 && msgs[msgs.length - 1]!.role === "user") {
+        restored = msgs[msgs.length - 1]!.content;
+        msgs.pop();
       }
-      if (!handledInline) {
-        throw err;
-      }
-    }
+      return { ...sess, messages: msgs };
+    }),
+  }));
+  return restored;
+},
 ```
 
-Add `stop` to the returned API and wrap it in `useCallback`. Replace the `return { send };` (~line 184):
+Test: append `[user "hi", assistant "" streaming]`, call `retractTurn(sid)` → `messages.length === 0` and the return value `=== "hi"`.
+
+Commit: `feat(chat): retractTurn store action removes the in-flight pair (FR-15)`.
+
+### Task A3: Frontend hook — synchronous `stop()` (the crux)
+
+**Files:** Modify `frontend/src/lib/api.ts`; Modify `frontend/src/hooks/useChatStream.ts`; Test `frontend/tests/hooks/useChatStreamStop.test.ts`.
+
+`api.ts`:
+
+```typescript
+/** Explicit user Stop (FR-15): cancel the backend run. */
+export async function cancelRun(runId: number): Promise<void> {
+  await apiFetch<{ status: string }>(`/chat/cancel`, {
+    method: "POST",
+    body: JSON.stringify({ run_id: runId }),
+  });
+}
+```
+
+`useChatStream.ts`:
+- Add refs near `abortRef`: `const userStoppedRef = useRef(false); const runIdRef = useRef<number|null>(null); const sessionIdRef = useRef<number|null>(null);`
+- At the start of `send`: `userStoppedRef.current = false; runIdRef.current = null; sessionIdRef.current = sessionId;`
+- Wherever `runId` is first assigned from an event (`session`/`tool_step`/`routing_decision`/`search_results`), also set `runIdRef.current = runId;`
+- Replace the return with `{ send, stop }`, and add:
 
 ```typescript
   const stop = useCallback(() => {
     userStoppedRef.current = true;
+    const rid = runIdRef.current;
+    const sid = sessionIdRef.current;
+    // SYNCHRONOUS + IMMEDIATE — the UI must react in this same tick. Do NOT wait
+    // for the abort to propagate through fetchEventSource (it may resolve, not
+    // reject, on abort). 1) cut the stream, 2) retract the in-flight pair and
+    // drop the user's text back into the composer (instant exit from the
+    // "generating" state — and a user message is never left without a reply),
+    // 3) tell the backend to stop the run + delete its orphaned message.
     abortRef.current?.abort();
-  }, []);
-
-  return { send, stop };
+    if (sid !== null) {
+      const restored = store.getState().retractTurn(sid);
+      if (restored) store.getState().requestComposerText(restored);
+    }
+    if (rid !== null) void cancelRun(rid).catch(() => undefined);
+  }, [store]);
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- In the outer `catch (err)`: add at the top `if (userStoppedRef.current) return;` (the turn was already retracted; swallow the abort). Keep the existing non-stop error handling below it.
+- Do NOT add an `onClose` handler, a `streamCompleted` flag, or any reconnect sentinel in `sse.ts`.
 
-Run: `cd frontend; npm test -- --run tests/hooks/useChatStreamStop.test.ts`
-Expected: PASS.
+Test (the key one): mock `@/lib/sse` so `streamChat` emits `session`+`token` then returns a promise that **resolves** on abort (the worst case). After `send` + `stop()`, assert the session has **0 messages** and `composerDraft === "hello"`. Mock `@/lib/api` `cancelRun` to a resolved `vi.fn`.
 
-- [ ] **Step 5: Targeted typecheck/lint**
+Commit: `feat(chat): synchronous stop() retracts the turn instantly + cancels the run (FR-15)`.
 
-Run: `cd frontend; npm run typecheck; npm run lint`
-Expected: no errors. (`tsc -b` prints errors but exits 0 — READ the output, don't trust the exit code.)
+### Task A4: Composer — Stop button (+ tooltip, all four locales)
 
-- [ ] **Step 6: Commit**
+**Files:** Modify `frontend/src/components/chat/Composer.tsx`; Modify `frontend/src/locales/{en,zh-TW,zh-CN,ja}/chat.json`; Test `frontend/tests/components/ComposerStop.test.tsx`.
 
-```bash
-git add frontend/src/hooks/useChatStream.ts frontend/tests/hooks/useChatStreamStop.test.ts
-git commit -m "feat(chat): useChatStream.stop() cancels the turn without erroring (FR-15)"
-```
+- Props: `isStreaming?: boolean`, `onStop?: () => void`.
+- While `isStreaming`, render a Stop button instead of Send — `type="button"`, `onClick={onStop}`, `aria-label={t("composer.stop")}`, a `<Square>` icon, NOT disabled — wrapped in the same `Tooltip`/`TooltipTrigger`/`TooltipContent` pattern the other composer buttons use, with `t("composer.stopTooltip")`.
+- i18n (under `composer`): `stop` = en "Stop" / zh-TW·zh-CN "停止" / ja "停止"; `stopTooltip` = en "Stop generating" / zh-TW·zh-CN "停止生成" / ja "生成を停止".
+
+Test: with `isStreaming`, a `/stop/i` button shows and calls `onStop`; idle shows Send, not Stop. Parity test stays green.
+
+Commit: `feat(chat): Composer Stop button + tooltip while streaming (FR-15)`.
+
+### Task A5: Wire Stop through ChatPage
+
+**Files:** Modify `frontend/src/pages/ChatPage.tsx`.
+
+`const { send, stop } = useChatStream();` and pass `isStreaming={isStreaming}` + `onStop={stop}` to `<Composer>` (the existing `isStreaming` boolean already drives `disabled`).
+
+Commit: `feat(chat): wire the Stop control through ChatPage (FR-15)`.
+
+### Part A verification (REQUIRED — do all three before "done")
+1. **Unit**: `test_chat_cancel.py` + `retractTurn`/`stop`/`ComposerStop` tests green; backend ruff+mypy, frontend typecheck+lint clean.
+2. **LIVE** (`uv run python scripts/live_abort_test.py` against the user's `:8000`): cancel mid-LLM-call → stream stops promptly + run `cancelled`.
+3. **Browser** (the gate that actually matters): long turn → **one** Stop click → the assistant bubble AND the user message vanish instantly, the sentence is back in the input, the composer is idle; the backend stops generating; a second click cannot resend; a reload shows no orphan user message. Ask the user to confirm this visually.
 
 ---
-
-### Task A4: Frontend Composer — Stop button while streaming
-
-**Files:**
-- Modify: `frontend/src/components/chat/Composer.tsx`
-- Test: `frontend/tests/components/ComposerStop.test.tsx`
-
-- [ ] **Step 1: Write the failing component test**
-
-Create `frontend/tests/components/ComposerStop.test.tsx`:
-
-```typescript
-import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { Composer } from "@/components/chat/Composer";
-
-describe("Composer Stop button (FR-15)", () => {
-  it("shows Stop while streaming and calls onStop", async () => {
-    const onStop = vi.fn();
-    render(<Composer onSubmit={vi.fn()} disabled isStreaming onStop={onStop} />);
-    const stop = screen.getByRole("button", { name: /stop/i });
-    await userEvent.click(stop);
-    expect(onStop).toHaveBeenCalledOnce();
-  });
-
-  it("shows Send (not Stop) when idle", () => {
-    render(<Composer onSubmit={vi.fn()} disabled={false} />);
-    expect(screen.queryByRole("button", { name: /stop/i })).toBeNull();
-    expect(screen.getByRole("button", { name: /send/i })).toBeInTheDocument();
-  });
-});
-```
-
-- [ ] **Step 2: Run the test to verify it fails**
-
-Run: `cd frontend; npm test -- --run tests/components/ComposerStop.test.tsx`
-Expected: FAIL — no Stop button.
-
-- [ ] **Step 3: Add the props + render the Stop button**
-
-In `Composer.tsx`, import `Square` from lucide:
-
-```typescript
-import {
-  BookOpen,
-  BrainCircuit,
-  Mic,
-  Presentation,
-  Columns2,
-  Send,
-  Square,
-} from "lucide-react";
-```
-
-Add to `Props` (after `slideChip`):
-
-```typescript
-  /** True while a turn is streaming — swaps Send for a Stop control (FR-15). */
-  isStreaming?: boolean;
-  /** Cancels the in-flight turn (wired to useChatStream.stop). */
-  onStop?: () => void;
-```
-
-Destructure them in the component signature (with defaults):
-
-```typescript
-  slideChip = null,
-  isStreaming = false,
-  onStop,
-}: Props) {
-```
-
-Replace the submit `<Button type="submit" ...>` block (~lines 351-359) with a Stop/Send switch:
-
-```typescript
-                {isStreaming ? (
-                  <Button
-                    type="button"
-                    size="icon"
-                    onClick={onStop}
-                    aria-label={t("composer.stop")}
-                    className="h-8 w-8 rounded-full"
-                  >
-                    <Square className="h-4 w-4" />
-                  </Button>
-                ) : (
-                  <Button
-                    type="submit"
-                    size="icon"
-                    disabled={disabled || value.trim().length === 0}
-                    aria-label={t("composer.send")}
-                    className="h-8 w-8 rounded-full"
-                  >
-                    <Send className="h-4 w-4" />
-                  </Button>
-                )}
-```
-
-- [ ] **Step 4: Add the i18n keys (all four locales)**
-
-In `frontend/src/locales/en/chat.json`, under `"composer"`, add:
-
-```json
-    "stop": "Stop",
-    "stopped": "Stopped",
-```
-
-In `frontend/src/locales/zh-TW/chat.json` (composer): `"stop": "停止"`, `"stopped": "已停止"`.
-In `frontend/src/locales/zh-CN/chat.json` (composer): `"stop": "停止"`, `"stopped": "已停止"`.
-In `frontend/src/locales/ja/chat.json` (composer): `"stop": "停止"`, `"stopped": "停止しました"`.
-
-- [ ] **Step 5: Run the test + parity to verify**
-
-Run: `cd frontend; npm test -- --run tests/components/ComposerStop.test.tsx src/locales/parity.test.ts`
-Expected: PASS.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add frontend/src/components/chat/Composer.tsx frontend/src/locales frontend/tests/components/ComposerStop.test.tsx
-git commit -m "feat(chat): Composer Stop button + i18n while streaming (FR-15)"
-```
-
----
-
-### Task A5: Frontend MessageBubble — render the cancelled state
-
-**Files:**
-- Modify: `frontend/src/components/chat/MessageBubble.tsx`
-- Test: `frontend/tests/components/MessageBubbleCancelled.test.tsx`
-
-- [ ] **Step 1: Read the existing status handling**
-
-Open `frontend/src/components/chat/MessageBubble.tsx` and locate where `status === "error"` is handled and where the assistant `content` (markdown) is rendered for the `"ok"`/`"streaming"` case. The cancelled branch renders content identically to `ok`, then appends a muted "Stopped" chip.
-
-- [ ] **Step 2: Write the failing test**
-
-Create `frontend/tests/components/MessageBubbleCancelled.test.tsx`:
-
-```typescript
-import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
-import { MessageBubble } from "@/components/chat/MessageBubble";
-import type { ChatMessage } from "@/types/domain";
-
-describe("MessageBubble — cancelled (FR-15)", () => {
-  it("renders partial content plus a Stopped marker", () => {
-    const msg: ChatMessage = {
-      role: "assistant",
-      content: "partial answer that was interrupted",
-      run_id: 9,
-      status: "cancelled",
-    };
-    render(<MessageBubble message={msg} />);
-    expect(screen.getByText(/partial answer that was interrupted/)).toBeInTheDocument();
-    expect(screen.getByText(/stopped/i)).toBeInTheDocument();
-  });
-});
-```
-
-(If `MessageBubble` requires more props than `message`, supply the minimal extras the existing tests in `frontend/tests/components/` already pass — mirror a sibling MessageBubble test.)
-
-- [ ] **Step 3: Run the test to verify it fails**
-
-Run: `cd frontend; npm test -- --run tests/components/MessageBubbleCancelled.test.tsx`
-Expected: FAIL — no "Stopped" text.
-
-- [ ] **Step 4: Render the cancelled marker**
-
-In `MessageBubble.tsx`, ensure the content body renders for `status === "cancelled"` exactly as for `"ok"` (extend any `status === "ok"` / non-error condition to also accept `"cancelled"`). Then, after the content body for an assistant message, add a muted marker shown only when cancelled. Use the `chat` namespace `t` already used in the file (or add `const { t } = useTranslation("chat");` if not present):
-
-```tsx
-{message.role === "assistant" && message.status === "cancelled" && (
-  <div className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground">
-    <Square className="h-3 w-3" />
-    {t("composer.stopped")}
-  </div>
-)}
-```
-
-Import `Square` from `lucide-react` in this file if not already imported.
-
-- [ ] **Step 5: Run the test to verify it passes**
-
-Run: `cd frontend; npm test -- --run tests/components/MessageBubbleCancelled.test.tsx`
-Expected: PASS.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add frontend/src/components/chat/MessageBubble.tsx frontend/tests/components/MessageBubbleCancelled.test.tsx
-git commit -m "feat(chat): render the stopped state on cancelled messages (FR-15)"
-```
-
----
-
-### Task A6: Wire Stop into ChatPage
-
-**Files:**
-- Modify: `frontend/src/pages/ChatPage.tsx`
-
-- [ ] **Step 1: Pull `stop` from the hook**
-
-In `ChatPage.tsx`, change the hook destructure (~line 54):
-
-```typescript
-  const { send, stop } = useChatStream();
-```
-
-- [ ] **Step 2: Pass `isStreaming` + `onStop` to the Composer**
-
-In the `<Composer ... />` usage (~line 264), add:
-
-```tsx
-        <Composer
-          onSubmit={handleSubmit}
-          disabled={isStreaming || setupRequired}
-          isStreaming={isStreaming}
-          onStop={stop}
-          setupRequired={setupRequired}
-```
-
-(leave the remaining props unchanged.)
-
-- [ ] **Step 3: Verify typecheck/lint + the broad frontend chat suite**
-
-Run: `cd frontend; npm run typecheck; npm run lint; npm test -- --run tests/components/ComposerStop.test.tsx tests/hooks/useChatStreamStop.test.ts`
-Expected: clean + green.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add frontend/src/pages/ChatPage.tsx
-git commit -m "feat(chat): wire the Stop control through ChatPage (FR-15)"
-```
-
----
-
 # Part B — Version / Changelog / Update-check
 
 ### Task B1: Backend — `PAPERHUB_UPDATE_CHECK` setting
