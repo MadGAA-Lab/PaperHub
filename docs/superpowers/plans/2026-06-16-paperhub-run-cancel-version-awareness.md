@@ -59,6 +59,16 @@
 
 # Part A — Run Cancellation (Stop)
 
+> **⚠️ SUPERSEDED (2026-06-17).** This Part A (client-side retract; disconnect ends the turn) was
+> replaced after the user clarified the requirement: **a disconnect must NOT cancel a run, a
+> returning client must reattach, and only the explicit Stop button cancels.** That needs
+> server-side resumable streaming, which is specced in
+> [`2026-06-17-paperhub-resumable-streaming-design.md`](2026-06-17-paperhub-resumable-streaming-design.md)
+> and planned task-by-task in
+> [`2026-06-17-paperhub-resumable-streaming-plan.md`](2026-06-17-paperhub-resumable-streaming-plan.md).
+> **Implement Part A from those documents, not the sections below.** Part B (version/changelog)
+> below is unaffected and still ships as written.
+
 **Design (per the Lessons above): the click does everything synchronously on the client; the backend kills the run + removes the orphan turn. No "cancelled" message is shown — the turn is *removed*.**
 
 **PAIR INVARIANT (hard rule, drives A1/A3/A6).** A user message must NEVER be displayed alone. Every user message is paired with an assistant element in exactly one of three states:
