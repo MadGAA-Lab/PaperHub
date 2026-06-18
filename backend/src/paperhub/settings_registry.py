@@ -214,6 +214,12 @@ SETTINGS_REGISTRY: list[SettingField] = [
                  default="http://127.0.0.1:8002", restart_required=True, group="marker"),
     SettingField("PAPERHUB_INPROCESS_MARKER", "integrations", "In-process Marker", "bool",
                  default="0", restart_required=True, group="marker"),
+    # ── Update check ────────────────────────────────────────────────────
+    SettingField("PAPERHUB_UPDATE_CHECK", "integrations", "Check for updates", "bool",
+                 default="1",
+                 help="Let PaperHub ask GitHub whether a newer release exists and "
+                      "show an in-app notice. Turn off to disable all outbound "
+                      "update checks (no network egress)."),
     # ── Slides ──────────────────────────────────────────────────────────
     SettingField("PAPERHUB_SLIDE_STYLE_PROFILE", "system", "Slide style profile", "enum",
                  default="default", choices=("default", "metropolis_minimal")),

@@ -1,0 +1,11 @@
+{
+  "title": "What's New",
+  "currentVersion": "You're on v{{version}}",
+  "updateAvailable": "Update available: v{{version}}",
+  "updateHint": "Update with:",
+  "copy": "Copy",
+  "copied": "Copied",
+  "viewRelease": "View release",
+  "update": "Update",
+  "close": "Close"
+}

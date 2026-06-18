@@ -2,6 +2,7 @@ import i18n from "i18next";
 import LanguageDetector from "i18next-browser-languagedetector";
 import { initReactI18next } from "react-i18next";
 
+import enAbout from "../locales/en/about.json";
 import enCanvas from "../locales/en/canvas.json";
 import enChat from "../locales/en/chat.json";
 import enCommon from "../locales/en/common.json";
@@ -10,6 +11,7 @@ import enReferences from "../locales/en/references.json";
 import enSettings from "../locales/en/settings.json";
 import enSlides from "../locales/en/slides.json";
 import enStates from "../locales/en/states.json";
+import jaAbout from "../locales/ja/about.json";
 import jaCanvas from "../locales/ja/canvas.json";
 import jaChat from "../locales/ja/chat.json";
 import jaCommon from "../locales/ja/common.json";
@@ -18,6 +20,7 @@ import jaReferences from "../locales/ja/references.json";
 import jaSettings from "../locales/ja/settings.json";
 import jaSlides from "../locales/ja/slides.json";
 import jaStates from "../locales/ja/states.json";
+import zhCNAbout from "../locales/zh-CN/about.json";
 import zhCNCanvas from "../locales/zh-CN/canvas.json";
 import zhCNChat from "../locales/zh-CN/chat.json";
 import zhCNCommon from "../locales/zh-CN/common.json";
@@ -26,6 +29,7 @@ import zhCNReferences from "../locales/zh-CN/references.json";
 import zhCNSettings from "../locales/zh-CN/settings.json";
 import zhCNSlides from "../locales/zh-CN/slides.json";
 import zhCNStates from "../locales/zh-CN/states.json";
+import zhTWAbout from "../locales/zh-TW/about.json";
 import zhTWCanvas from "../locales/zh-TW/canvas.json";
 import zhTWChat from "../locales/zh-TW/chat.json";
 import zhTWCommon from "../locales/zh-TW/common.json";
@@ -49,6 +53,7 @@ export const LANGUAGE_ENDONYMS: Record<SupportedLanguage, string> = {
 // to each locale folder as the string-extraction pass progresses (Task D1).
 const resources = {
   en: {
+    about: enAbout,
     common: enCommon,
     settings: enSettings,
     chat: enChat,
@@ -59,6 +64,7 @@ const resources = {
     states: enStates,
   },
   "zh-TW": {
+    about: zhTWAbout,
     common: zhTWCommon,
     settings: zhTWSettings,
     chat: zhTWChat,
@@ -69,6 +75,7 @@ const resources = {
     states: zhTWStates,
   },
   "zh-CN": {
+    about: zhCNAbout,
     common: zhCNCommon,
     settings: zhCNSettings,
     chat: zhCNChat,
@@ -79,6 +86,7 @@ const resources = {
     states: zhCNStates,
   },
   ja: {
+    about: jaAbout,
     common: jaCommon,
     settings: jaSettings,
     chat: jaChat,
@@ -98,6 +106,7 @@ void i18n
     fallbackLng: "en",
     supportedLngs: [...SUPPORTED_LANGUAGES],
     ns: [
+      "about",
       "common",
       "settings",
       "chat",
