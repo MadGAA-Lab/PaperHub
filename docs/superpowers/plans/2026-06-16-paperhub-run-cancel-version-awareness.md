@@ -1,10 +1,12 @@
 # Run Cancellation + Version/Changelog Awareness Implementation Plan
 
 > **🔀 SEQUENCING + PART B ADJUSTMENTS (2026-06-18). READ FIRST.**
-> All work stays on **one branch** (`feat/run-cancel-version-redo`) — no split branches. Order:
-> 1. **Build Part B (version notification) FIRST**, then **early-merge to `main`** so CD can test it
->    (release **v2.37.0**). 2. **Then build Part A** (abort / resumable streaming, per the resumable
->    docs) on the same branch → a later release.
+> All work stays on **one branch** (`feat/run-cancel-version-redo`) — no split branches. **Both
+> parts ship as the SAME version, v2.37.0.** Order:
+> 1. **Build Part B (version notification) FIRST**, then do an **early merge to `main` purely to
+>    exercise CI/CD** (NOT a release — the version bump / release ceremony happens once everything is
+>    done). 2. **Then build Part A** (abort / resumable streaming, per the resumable docs) on the
+>    same branch. 3. **Release v2.37.0** covering both.
 >
 > **Part B adjustments agreed with the user (override the Part B sections below where they conflict):**
 > - **Badge-only update cue.** A small dot on the account/profile icon appears **only when a newer
@@ -15,9 +17,9 @@
 > - **Account menu:** version + an **About** entry (opens the ChangelogModal) + an **Update** button
 >   shown when `update_available` (opens the modal's update row: release link + copy
 >   `docker compose pull …`). B5 i18n: drop the toast-only keys `updatedToast` / `whatsNewAction`.
-> - **`changelog.json` (B3):** the **v2.37.0** entry describes **version awareness only** (this
->   changelog + the update badge) — NOT the Stop button (that ships later with Part A as v2.38.0).
->   Keep the prior v2.36.0 entry.
+> - **`changelog.json` (B3):** ONE **v2.37.0** entry covers BOTH features. For now (Part B) write
+>   the **version-awareness** highlight (this changelog + the update badge); the **Stop/abort**
+>   highlight is appended to the *same* v2.37.0 entry when Part A lands. Keep the prior v2.36.0 entry.
 > - Part A sections below are **superseded** by the resumable-streaming docs (see the banner at
 >   "# Part A"); ignore them until stage 2.
 
