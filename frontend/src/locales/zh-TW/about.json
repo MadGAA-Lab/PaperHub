@@ -1,0 +1,11 @@
+{
+  "title": "更新內容",
+  "currentVersion": "目前版本 v{{version}}",
+  "updateAvailable": "有新版本可用：v{{version}}",
+  "updateHint": "升級指令：",
+  "copy": "複製",
+  "copied": "已複製",
+  "viewRelease": "查看發行版本",
+  "update": "更新",
+  "close": "關閉"
+}

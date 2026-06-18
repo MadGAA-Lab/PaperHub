@@ -1,0 +1,11 @@
+{
+  "title": "新着情報",
+  "currentVersion": "現在のバージョン v{{version}}",
+  "updateAvailable": "アップデートがあります：v{{version}}",
+  "updateHint": "アップグレードコマンド：",
+  "copy": "コピー",
+  "copied": "コピーしました",
+  "viewRelease": "リリースを見る",
+  "update": "アップデート",
+  "close": "閉じる"
+}
