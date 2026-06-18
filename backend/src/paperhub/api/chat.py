@@ -995,6 +995,85 @@ async def run_agent(
                 reset_client_headers_context(headers_token)
 
 
+async def _terminal_events_from_db(
+    conn: aiosqlite.Connection,
+    run_id: int,
+    status: str,
+    since: int,
+) -> list[dict[str, Any]]:
+    """Build synthetic terminal events from persisted DB state.
+
+    Only emits when ``since == 0`` (a client already past cursor 0 needs
+    nothing more from the DB fallback).  Returns a list of event dicts with
+    ``{"event": <type>, "data": <json string>}`` — the same shape the live
+    SSE path emits.
+    """
+    if since != 0:
+        return []
+
+    if status == "cancelled":
+        return []
+
+    # Fetch the assistant message row for this run.
+    async with conn.execute(
+        "SELECT id, content FROM messages "
+        "WHERE run_id = ? AND role = 'assistant' "
+        "ORDER BY id DESC LIMIT 1",
+        (run_id,),
+    ) as cur:
+        row = await cur.fetchone()
+
+    if status == "ok":
+        if row is None:
+            return []
+        msg_id, content = int(row[0]), str(row[1])
+        final_evt = FinalEvent(
+            run_id=run_id, branch="", message_id=msg_id, content=content,
+        )
+        return [
+            {
+                "event": final_evt.type,
+                "data": final_evt.model_dump_json(exclude={"type"}),
+            }
+        ]
+
+    if status == "error":
+        content = str(row[1]) if row is not None else "An error occurred."
+        err_evt = ErrorEvent(run_id=run_id, branch="", message=content)
+        return [
+            {
+                "event": err_evt.type,
+                "data": err_evt.model_dump_json(exclude={"type"}),
+            }
+        ]
+
+    # status == "interrupted" (or any unrecognised terminal)
+    return [
+        {
+            "event": "interrupted",
+            "data": json.dumps({"run_id": run_id}),
+        }
+    ]
+
+
+@router.get("/chat/runs/{run_id}/events")
+async def run_events(run_id: int, since: int = 0) -> dict[str, object]:
+    handle = broker.get(run_id)
+    if handle is not None:
+        events, cursor = handle.events_since(since)
+        return {"status": handle.status, "events": events, "next_cursor": cursor}
+    # Handle absent: evicted after terminal, or lost to a restart → DB fallback.
+    settings = load_settings()
+    async with open_db(settings.db_path) as conn:
+        async with conn.execute(
+            "SELECT status FROM runs WHERE id = ?", (run_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        status = str(row[0]) if row else "interrupted"
+        events = await _terminal_events_from_db(conn, run_id, status, since)
+    return {"status": status, "events": events, "next_cursor": since + len(events)}
+
+
 class CancelRequest(BaseModel):
     run_id: int
 

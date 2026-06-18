@@ -491,3 +491,46 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
             "INSERT INTO paper_content_fts(paper_content_fts) VALUES ('rebuild')"
         )
         await conn.commit()
+
+    # -----------------------------------------------------------------------
+    # A4 / FR-15: Expand runs.status CHECK to include 'interrupted'.
+    # Pre-existing DBs have CHECK (status IN ('running','ok','error','cancelled'))
+    # — the startup reconciler (A5) needs to write 'interrupted', so the
+    # constraint must be widened. Rebuild using the 12-step SQLite pattern.
+    # Guard: skip when the DDL already contains 'interrupted'.
+    # -----------------------------------------------------------------------
+    async with conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='runs'"
+    ) as cur:
+        runs_ddl_row = await cur.fetchone()
+    if runs_ddl_row and "interrupted" not in runs_ddl_row[0]:
+        await conn.execute("BEGIN")
+        try:
+            await conn.execute("""
+                CREATE TABLE runs_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL
+                        REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                    routing_decision_json TEXT,
+                    search_results_json TEXT,
+                    deck_version_id TEXT,
+                    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    finished_at TEXT,
+                    status TEXT NOT NULL DEFAULT 'running'
+                        CHECK (status IN
+                            ('running', 'ok', 'error', 'cancelled', 'interrupted'))
+                )
+            """)
+            await conn.execute(
+                "INSERT INTO runs_new "
+                "(id, session_id, routing_decision_json, search_results_json, "
+                "deck_version_id, started_at, finished_at, status) "
+                "SELECT id, session_id, routing_decision_json, search_results_json, "
+                "deck_version_id, started_at, finished_at, status FROM runs"
+            )
+            await conn.execute("DROP TABLE runs")
+            await conn.execute("ALTER TABLE runs_new RENAME TO runs")
+            await conn.execute("COMMIT")
+        except Exception:
+            await conn.execute("ROLLBACK")
+            raise
