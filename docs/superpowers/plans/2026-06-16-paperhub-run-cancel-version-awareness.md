@@ -1,5 +1,26 @@
 # Run Cancellation + Version/Changelog Awareness Implementation Plan
 
+> **🔀 SEQUENCING + PART B ADJUSTMENTS (2026-06-18). READ FIRST.**
+> All work stays on **one branch** (`feat/run-cancel-version-redo`) — no split branches. Order:
+> 1. **Build Part B (version notification) FIRST**, then **early-merge to `main`** so CD can test it
+>    (release **v2.37.0**). 2. **Then build Part A** (abort / resumable streaming, per the resumable
+>    docs) on the same branch → a later release.
+>
+> **Part B adjustments agreed with the user (override the Part B sections below where they conflict):**
+> - **Badge-only update cue.** A small dot on the account/profile icon appears **only when a newer
+>   GitHub release exists** (`update_available`). **No passive pop-ups** — nothing opens a modal or
+>   toast on its own; the changelog opens only on click.
+> - **DROP B7 entirely** (the auto "you just updated" toast). With B7 gone, the loader's `semverGt`
+>   (B3) has no consumer — **omit `semverGt`** + its test; keep `CHANGELOG` + `localizedHighlights`.
+> - **Account menu:** version + an **About** entry (opens the ChangelogModal) + an **Update** button
+>   shown when `update_available` (opens the modal's update row: release link + copy
+>   `docker compose pull …`). B5 i18n: drop the toast-only keys `updatedToast` / `whatsNewAction`.
+> - **`changelog.json` (B3):** the **v2.37.0** entry describes **version awareness only** (this
+>   changelog + the update badge) — NOT the Stop button (that ships later with Part A as v2.38.0).
+>   Keep the prior v2.36.0 entry.
+> - Part A sections below are **superseded** by the resumable-streaming docs (see the banner at
+>   "# Part A"); ignore them until stage 2.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship v2.37.0 — (A) a **Stop button** that *instantly* retracts an in-flight chat turn and actually stops the backend generation, and (B) a localized in-app changelog + "you just updated" toast + an optional GitHub update-available check.
