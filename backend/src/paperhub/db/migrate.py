@@ -9,14 +9,65 @@ import aiosqlite
 _LOG = logging.getLogger(__name__)
 
 
+async def _fk_safe_rebuild(
+    conn: aiosqlite.Connection,
+    *,
+    old_table: str,
+    new_table: str,
+    create_new_sql: str,
+    copy_sql: str,
+    recreate_sql: tuple[str, ...] = (),
+) -> None:
+    """SQLite table rebuild that cannot fire FK cascades on the implicit DROP.
+
+    On SQLite, ``DROP TABLE <parent>`` performs an implicit DELETE of its rows,
+    which FIRES foreign-key actions on child tables when ``PRAGMA foreign_keys``
+    is ON — e.g. cascade-deleting ``tool_calls`` (ON DELETE CASCADE) or NULLing
+    ``messages.run_id`` (ON DELETE SET NULL) when ``runs`` is rebuilt. The
+    standard 12-step rebuild must therefore run with enforcement OFF.
+
+    ``PRAGMA foreign_keys`` CANNOT be toggled inside a transaction (it is a
+    silent no-op there), so this brackets the BEGIN/COMMIT: OFF is issued
+    BEFORE ``BEGIN`` and ON is restored AFTER ``COMMIT``. After committing we
+    run ``PRAGMA foreign_key_check`` (which inspects without mutating) and raise
+    on any violation, so a genuinely broken rebuild still fails loudly instead
+    of leaving dangling references. Callers MUST NOT wrap this in their own
+    transaction (the OFF pragma would no-op).
+    """
+    await conn.execute("PRAGMA foreign_keys = OFF")
+    await conn.execute("BEGIN")
+    try:
+        await conn.execute(create_new_sql)
+        await conn.execute(copy_sql)
+        await conn.execute(f"DROP TABLE {old_table}")
+        await conn.execute(f"ALTER TABLE {new_table} RENAME TO {old_table}")
+        for sql in recreate_sql:
+            await conn.execute(sql)
+        await conn.execute("COMMIT")
+    except Exception:
+        await conn.execute("ROLLBACK")
+        await conn.execute("PRAGMA foreign_keys = ON")
+        raise
+    async with conn.execute("PRAGMA foreign_key_check") as cur:
+        violations = await cur.fetchall()
+    await conn.execute("PRAGMA foreign_keys = ON")
+    if violations:
+        raise RuntimeError(
+            f"FK check failed after rebuilding {old_table}: {violations}"
+        )
+
+
 async def _rebuild_papers_table(conn: aiosqlite.Connection) -> None:
     """Rebuild the papers table to add ON DELETE RESTRICT to paper_content_id FK.
 
-    Uses the standard SQLite 12-step table rebuild wrapped in a transaction.
+    Uses the FK-safe 12-step SQLite rebuild so the implicit DROP can't fire
+    foreign-key actions on any (current or future) child of ``papers``.
     """
-    await conn.execute("BEGIN")
-    try:
-        await conn.execute("""
+    await _fk_safe_rebuild(
+        conn,
+        old_table="papers",
+        new_table="papers_new",
+        create_new_sql="""
             CREATE TABLE papers_new (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
@@ -26,26 +77,23 @@ async def _rebuild_papers_table(conn: aiosqlite.Connection) -> None:
                 added_at TEXT NOT NULL DEFAULT (datetime('now')),
                 UNIQUE (session_id, paper_content_id)
             )
-        """)
-        await conn.execute(
+        """,
+        copy_sql=(
             "INSERT INTO papers_new "
             "SELECT id, session_id, paper_content_id, enabled, added_at FROM papers"
-        )
-        await conn.execute("DROP TABLE papers")
-        await conn.execute("ALTER TABLE papers_new RENAME TO papers")
-        await conn.execute("COMMIT")
-    except Exception:
-        await conn.execute("ROLLBACK")
-        raise
+        ),
+    )
 
 
 async def _rebuild_messages_table(conn: aiosqlite.Connection) -> None:
     """Rebuild the messages table to add REFERENCES runs(id) ON DELETE SET NULL
     to run_id, replacing the bare integer column.
     """
-    await conn.execute("BEGIN")
-    try:
-        await conn.execute("""
+    await _fk_safe_rebuild(
+        conn,
+        old_table="messages",
+        new_table="messages_new",
+        create_new_sql="""
             CREATE TABLE messages_new (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
@@ -54,17 +102,12 @@ async def _rebuild_messages_table(conn: aiosqlite.Connection) -> None:
                 run_id INTEGER REFERENCES runs(id) ON DELETE SET NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
-        """)
-        await conn.execute(
+        """,
+        copy_sql=(
             "INSERT INTO messages_new "
             "SELECT id, session_id, role, content, run_id, created_at FROM messages"
-        )
-        await conn.execute("DROP TABLE messages")
-        await conn.execute("ALTER TABLE messages_new RENAME TO messages")
-        await conn.execute("COMMIT")
-    except Exception:
-        await conn.execute("ROLLBACK")
-        raise
+        ),
+    )
 
 
 async def purge_deleted_sessions(
@@ -402,12 +445,15 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
         decks_cols = {row[1] for row in await cur.fetchall()}
 
     if "theme" in decks_cols or "current_version_id" not in decks_cols:
-        # Atomic rebuild — mirrors _rebuild_papers_table / _rebuild_messages_table.
-        # executescript auto-commits each statement, so an interruption between
-        # INSERT and DROP could leave decks_new orphaned and trip the next run.
-        await conn.execute("BEGIN")
-        try:
-            await conn.execute("""
+        # FK-safe atomic rebuild — the implicit DROP of `decks` would otherwise
+        # cascade-delete its deck_slides children (ON DELETE CASCADE) while
+        # foreign_keys is ON; _fk_safe_rebuild brackets that with the pragma OFF
+        # and a post-commit foreign_key_check.
+        await _fk_safe_rebuild(
+            conn,
+            old_table="decks",
+            new_table="decks_new",
+            create_new_sql="""
                 CREATE TABLE decks_new (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
@@ -424,8 +470,8 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
                     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                     UNIQUE (session_id)
                 )
-            """)
-            await conn.execute(
+            """,
+            copy_sql=(
                 "INSERT INTO decks_new ("
                 "id, session_id, run_id, tex_path, pdf_path, speaker_notes_json, "
                 "plan_json, page_count, current_version_id, "
@@ -434,13 +480,8 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
                 "plan_json, page_count, NULL, "
                 "contributing_paper_ids_json, status, created_at, updated_at "
                 "FROM decks"
-            )
-            await conn.execute("DROP TABLE decks")
-            await conn.execute("ALTER TABLE decks_new RENAME TO decks")
-            await conn.execute("COMMIT")
-        except Exception:
-            await conn.execute("ROLLBACK")
-            raise
+            ),
+        )
 
     # -----------------------------------------------------------------------
     # F4.5: memories.metadata column — a JSON blob the style_resolver uses to
@@ -504,9 +545,16 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
     ) as cur:
         runs_ddl_row = await cur.fetchone()
     if runs_ddl_row and "interrupted" not in runs_ddl_row[0]:
-        await conn.execute("BEGIN")
-        try:
-            await conn.execute("""
+        # FK-safe rebuild — `runs` is the PARENT of tool_calls (ON DELETE
+        # CASCADE) and messages/decks (ON DELETE SET NULL). The naive DROP-with-
+        # foreign_keys-ON cascade-deleted real trace history on a live
+        # workspace; _fk_safe_rebuild disables enforcement around the swap and
+        # verifies integrity with foreign_key_check afterwards.
+        await _fk_safe_rebuild(
+            conn,
+            old_table="runs",
+            new_table="runs_new",
+            create_new_sql="""
                 CREATE TABLE runs_new (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id INTEGER NOT NULL
@@ -520,17 +568,12 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
                         CHECK (status IN
                             ('running', 'ok', 'error', 'cancelled', 'interrupted'))
                 )
-            """)
-            await conn.execute(
+            """,
+            copy_sql=(
                 "INSERT INTO runs_new "
                 "(id, session_id, routing_decision_json, search_results_json, "
                 "deck_version_id, started_at, finished_at, status) "
                 "SELECT id, session_id, routing_decision_json, search_results_json, "
                 "deck_version_id, started_at, finished_at, status FROM runs"
-            )
-            await conn.execute("DROP TABLE runs")
-            await conn.execute("ALTER TABLE runs_new RENAME TO runs")
-            await conn.execute("COMMIT")
-        except Exception:
-            await conn.execute("ROLLBACK")
-            raise
+            ),
+        )
