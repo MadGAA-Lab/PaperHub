@@ -716,15 +716,13 @@ export const useChatStore = create<ChatState>()(
                 );
               }
               break;
-            case "tool_step":
-              if (run_id !== null) {
-                store.appendTrace(
-                  sessionId,
-                  run_id,
-                  data as unknown as import("@/types/domain").ToolCallRecord,
-                );
+            case "tool_step": {
+              const rec = (data as { record?: ToolCallRecord }).record;
+              if (rec && typeof rec.run_id === "number") {
+                store.appendTrace(sessionId, rec.run_id, rec);
               }
               break;
+            }
             case "search_results":
               if (run_id !== null && Array.isArray(data.candidates)) {
                 store.setSearchResults(
