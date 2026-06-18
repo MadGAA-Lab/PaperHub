@@ -51,7 +51,7 @@ export function ChatPage() {
   const sessions = useChatStore((s) => s.sessions);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const newSession = useChatStore((s) => s.newSession);
-  const { send } = useChatStream();
+  const { send, stop } = useChatStream();
 
   const slidesOpen = useSlidesStore((s) => s.open);
   const slidesEverOpened = useSlidesStore((s) => s.everOpened);
@@ -264,6 +264,8 @@ export function ChatPage() {
         <Composer
           onSubmit={handleSubmit}
           disabled={isStreaming || setupRequired}
+          isStreaming={isStreaming}
+          onStop={stop}
           setupRequired={setupRequired}
           onOpenSettings={openSettings}
           memoryOpen={memoryOpen}

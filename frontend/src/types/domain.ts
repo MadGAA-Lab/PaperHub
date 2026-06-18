@@ -262,3 +262,10 @@ export interface VersionInfo {
   html_url: string | null;
   checked_at: string | null;
 }
+
+/** GET /chat/runs/{id}/events?since={cursor} payload (FR-15). */
+export interface RunEventsResponse {
+  status: string;
+  events: { event: string; data: string }[];
+  next_cursor: number;
+}

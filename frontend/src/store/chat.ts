@@ -92,6 +92,10 @@ interface ChatState {
     candidates: SearchResultCandidate[],
   ) => void;
   setDeckOnMessage: (sessionId: number, deck: DeckEventData | null) => void;
+  /** Remove the trailing streaming assistant placeholder AND its paired user
+   *  message (never leave a user message without a reply). Returns the user
+   *  message text so the caller can restore it to the composer. */
+  retractTurn: (sessionId: number) => string;
   ensureBackendSession: (sessionId: number) => Promise<number>;
   // Cross-device sync (backend is source of truth)
   reconcileBackendSessions: (summaries: SessionSummary[]) => void;
@@ -392,6 +396,26 @@ export const useChatStore = create<ChatState>()(
           composerDraft: text,
           composerFocusSeq: s.composerFocusSeq + 1,
         })),
+
+      retractTurn: (sessionId) => {
+        let restored = "";
+        set((s) => ({
+          sessions: s.sessions.map((sess) => {
+            if (sess.id !== sessionId) return sess;
+            const msgs = [...sess.messages];
+            // drop the trailing streaming assistant placeholder...
+            if (msgs.length > 0 && msgs[msgs.length - 1]!.role === "assistant") msgs.pop();
+            // ...and its paired user message (never leave a user msg without a reply),
+            // returning its text so the caller restores it to the composer.
+            if (msgs.length > 0 && msgs[msgs.length - 1]!.role === "user") {
+              restored = msgs[msgs.length - 1]!.content;
+              msgs.pop();
+            }
+            return { ...sess, messages: msgs };
+          }),
+        }));
+        return restored;
+      },
 
       reset: () =>
         set({
