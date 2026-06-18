@@ -124,10 +124,19 @@ export function useRunReattach(): void {
       void poll();
     }, POLL_INTERVAL_MS);
 
-    // Stop polling when the tab is hidden.
+    // Stop polling when the tab is hidden; resume when it becomes visible again
+    // (unless already settled by a terminal response).
     const handleVisibilityChange = (): void => {
       if (document.hidden) {
         stopPolling();
+      } else if (!settledRef.current) {
+        // Tab is visible again and the run hasn't finished — re-arm the poller.
+        void poll();
+        if (intervalRef.current === null) {
+          intervalRef.current = setInterval(() => {
+            void poll();
+          }, POLL_INTERVAL_MS);
+        }
       }
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);

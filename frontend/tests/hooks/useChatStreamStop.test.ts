@@ -115,6 +115,47 @@ describe("useChatStream stop()", () => {
     expect(mockCancelRun).toHaveBeenCalledTimes(1);
   });
 
+  it("reattach: stop() fires cancelRun(77) and retracts the pair when send() never ran", () => {
+    // Simulates a page refresh where the user reattaches to an in-flight run.
+    // send() was NOT called this render — sessionIdRef and runIdRef are null.
+    // stop() must resolve sid from activeSessionId and rid from the trailing
+    // processing message's run_id.
+    const RUN_ID = 77;
+
+    const sessionId = useChatStore.getState().newSession();
+    // Seed the store: activeSessionId + trailing processing assistant with run_id.
+    useChatStore.setState({ activeSessionId: sessionId });
+    useChatStore.getState().appendMessage(sessionId, {
+      role: "user",
+      content: "question after refresh",
+      run_id: RUN_ID,
+    });
+    useChatStore.getState().appendMessage(sessionId, {
+      role: "assistant",
+      content: "",
+      run_id: RUN_ID,
+      status: "processing",
+    });
+
+    const { result } = renderHook(() => useChatStream());
+    // send() is never called — refs are null.
+
+    act(() => {
+      result.current.stop();
+    });
+
+    // cancelRun must be called with the run_id from the processing message.
+    expect(mockCancelRun).toHaveBeenCalledWith(RUN_ID);
+    expect(mockCancelRun).toHaveBeenCalledTimes(1);
+
+    // retractTurn must have removed both messages (0 remaining).
+    const session = useChatStore.getState().sessions.find((s) => s.id === sessionId)!;
+    expect(session.messages).toHaveLength(0);
+
+    // Composer restored to the user message text.
+    expect(useChatStore.getState().composerDraft).toBe("question after refresh");
+  });
+
   it("stop() before any session event: retracts pair, does NOT call cancelRun", async () => {
     const USER_TEXT = "hello";
 

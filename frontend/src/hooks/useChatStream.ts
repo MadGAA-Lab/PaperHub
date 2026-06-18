@@ -197,14 +197,21 @@ export function useChatStream() {
   const stop = useCallback(() => {
     // SYNCHRONOUS + IMMEDIATE — react in this same tick; do NOT await the abort.
     userStoppedRef.current = true;
-    const sid = sessionIdRef.current;
+    // Resolve sid: prefer the ref set by send(); fall back to activeSessionId
+    // so Stop works on a reattached/refreshed turn where send() never ran.
+    const sid = sessionIdRef.current ?? store.getState().activeSessionId;
     let rid = runIdRef.current;
     if (rid === null && sid !== null) {
-      // hydrated/reattached turn with no live ref: use the trailing streaming
-      // assistant's run_id (A10 extends this to "processing").
+      // No live ref: use the trailing streaming/processing assistant's run_id.
+      // "processing" covers the reattach case (hydrateSessionMessages injects
+      // a processing placeholder whose run_id points at the in-flight backend run).
       const sess = store.getState().sessions.find((s) => s.id === sid);
       const last = sess?.messages[sess.messages.length - 1];
-      if (last?.role === "assistant" && last.status === "streaming" && last.run_id != null) {
+      if (
+        last?.role === "assistant" &&
+        (last.status === "streaming" || last.status === "processing") &&
+        last.run_id != null
+      ) {
         rid = last.run_id;
       }
     }

@@ -12,6 +12,7 @@ import type {
   DeckEventData,
 } from "@/types/domain";
 import { createBackendSession } from "@/lib/api";
+import { useSlidesStore } from "@/store/slides";
 
 interface ChatState {
   sessions: ChatSession[];
@@ -732,12 +733,18 @@ export const useChatStore = create<ChatState>()(
                 );
               }
               break;
-            case "deck":
-              store.setDeckOnMessage(
-                sessionId,
-                data as unknown as import("@/types/domain").DeckEventData,
-              );
+            case "deck": {
+              const d = data as unknown as import("@/types/domain").DeckEventData;
+              store.setDeckOnMessage(sessionId, d);
+              // Mirror the live SSE path: also push the deck into the slides
+              // store so the Slides panel receives it on reattach.
+              const slidesStore = useSlidesStore.getState();
+              slidesStore.setDeck(d.session_id, d);
+              if (slidesStore.currentPageBySession[d.session_id] === undefined) {
+                slidesStore.setCurrentPage(d.session_id, 1);
+              }
               break;
+            }
             // "session" + unknown events: no-op (placeholder carries run_id)
             default:
               break;
