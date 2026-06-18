@@ -103,6 +103,12 @@ interface ChatState {
     sessionId: number,
     messages: BackendMessage[],
   ) => void;
+  /** A10 D7: Shared event dispatcher used by both the live SSE path and the
+   *  reattach poller — single source of truth for event→store mutations. */
+  applyRunEvent: (
+    sessionId: number,
+    event: { event: string; data: string },
+  ) => void;
 }
 
 function deriveTitle(content: string): string {
@@ -627,25 +633,121 @@ export const useChatStore = create<ChatState>()(
             if (sess.messages.some((m) => m.status === "streaming")) return sess;
             const mapped: ChatMessage[] = messages
               .filter((m) => m.role === "user" || m.role === "assistant")
-              .map((m) => ({
-                role: m.role as "user" | "assistant",
-                content: m.content,
-                run_id: m.run_id,
-                status: "ok" as const,
-                ...(m.routing_decision
-                  ? { routing_decision: m.routing_decision }
-                  : {}),
-                ...(m.search_results
-                  ? { search_results: m.search_results }
-                  : {}),
-                // Carry the replayed deck so the in-chat DeckChip survives a
-                // refresh — the message record is the robust source of truth
-                // (no race with a separate deck fetch).
-                ...(m.deck ? { deck: m.deck } : {}),
-              }));
+              .map((m) => {
+                // A10: derive status from run_status for assistant rows.
+                // interrupted → "interrupted"; error → "error"; else "ok".
+                let status: ChatMessage["status"] = "ok";
+                if (m.role === "assistant") {
+                  if (m.run_status === "interrupted") status = "interrupted";
+                  else if (m.run_status === "error") status = "error";
+                }
+                return {
+                  role: m.role as "user" | "assistant",
+                  content: m.content,
+                  run_id: m.run_id,
+                  status,
+                  ...(m.routing_decision
+                    ? { routing_decision: m.routing_decision }
+                    : {}),
+                  ...(m.search_results
+                    ? { search_results: m.search_results }
+                    : {}),
+                  // Carry the replayed deck so the in-chat DeckChip survives a
+                  // refresh — the message record is the robust source of truth
+                  // (no race with a separate deck fetch).
+                  ...(m.deck ? { deck: m.deck } : {}),
+                };
+              });
+            // A10: Pair-invariant placeholder — if the last message is a user
+            // whose run_status === "running" with no following assistant row,
+            // append a synthetic processing placeholder so Stop shows and the
+            // reattach poller has something to drive.
+            const last = mapped[mapped.length - 1];
+            const lastBackend = messages.filter(
+              (m) => m.role === "user" || m.role === "assistant",
+            )[mapped.length - 1];
+            if (
+              last !== undefined &&
+              last.role === "user" &&
+              lastBackend?.run_status === "running"
+            ) {
+              mapped.push({
+                role: "assistant",
+                content: "",
+                run_id: last.run_id,
+                status: "processing",
+              });
+            }
             return { ...sess, messages: mapped };
           }),
         })),
+
+      applyRunEvent: (sessionId, event) => {
+        // A10 D7: thin dispatcher — parse the SSE data and route to the
+        // EXISTING store mutations so the poller has identical fidelity to
+        // the live SSE path. Wrap parse in try/catch to swallow malformed events.
+        try {
+          const data = JSON.parse(event.data) as Record<string, unknown>;
+          const store = get();
+          const run_id =
+            typeof data.run_id === "number" ? data.run_id : null;
+          switch (event.event) {
+            case "token":
+              if (run_id !== null && typeof data.text === "string") {
+                store.appendToken(sessionId, run_id, data.text);
+              }
+              break;
+            case "final":
+              if (run_id !== null && typeof data.content === "string") {
+                store.finaliseMessage(sessionId, run_id, data.content);
+              }
+              break;
+            case "error":
+              if (run_id !== null && typeof data.message === "string") {
+                store.errorMessage(sessionId, run_id, data.message);
+              }
+              break;
+            case "routing_decision":
+              if (run_id !== null && data.decision !== undefined) {
+                store.setRouting(
+                  sessionId,
+                  run_id,
+                  data.decision as import("@/types/domain").RoutingDecision,
+                );
+              }
+              break;
+            case "tool_step":
+              if (run_id !== null) {
+                store.appendTrace(
+                  sessionId,
+                  run_id,
+                  data as unknown as import("@/types/domain").ToolCallRecord,
+                );
+              }
+              break;
+            case "search_results":
+              if (run_id !== null && Array.isArray(data.candidates)) {
+                store.setSearchResults(
+                  sessionId,
+                  run_id,
+                  data.candidates as import("@/types/domain").SearchResultCandidate[],
+                );
+              }
+              break;
+            case "deck":
+              store.setDeckOnMessage(
+                sessionId,
+                data as unknown as import("@/types/domain").DeckEventData,
+              );
+              break;
+            // "session" + unknown events: no-op (placeholder carries run_id)
+            default:
+              break;
+          }
+        } catch {
+          // Ignore malformed events — don't let a single bad payload kill reattach.
+        }
+      },
     }),
     {
       name: "paperhub-chat-v1",

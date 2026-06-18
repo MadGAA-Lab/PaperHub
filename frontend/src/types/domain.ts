@@ -229,6 +229,9 @@ export interface BackendMessage {
    *  replayed so the in-chat DeckChip survives a refresh (null for non-slide
    *  turns). On replay `contributing_papers` entries are `{id}` only. */
   deck?: DeckEventData | null;
+  /** A10: The run's terminal status (or "running" if still in progress).
+   *  Drives interrupted/error status mapping on hydrate + processing placeholder. */
+  run_status?: string | null;
 }
 
 export type MemoryStatus = "active" | "superseded";

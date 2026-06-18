@@ -17,6 +17,7 @@ import { useSessionsSync } from "@/hooks/useSessionsSync";
 import { useDeckSync } from "@/hooks/useDeckSync";
 import { useCloseCanvasOnSessionChange } from "@/hooks/useCloseCanvasOnSessionChange";
 import { useCanvasResize } from "@/hooks/useCanvasResize";
+import { useRunReattach } from "@/hooks/useRunReattach";
 import { getDeck, updateDeckNote } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -44,6 +45,7 @@ export function ChatPage() {
   useSessionsSync();
   useReferencesSync();
   useDeckSync();
+  useRunReattach();
   const canvasOpen = useCanvasStore((s) => s.open);
   const toggleCanvas = useCanvasStore((s) => s.toggleCanvas);
   const closeCanvas = useCanvasStore((s) => s.closeCanvas);
