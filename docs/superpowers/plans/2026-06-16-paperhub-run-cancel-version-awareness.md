@@ -65,16 +65,15 @@
 - `backend/tests/test_version_endpoint.py` (create).
 - `frontend/nginx.conf` (modify) — proxy `/version`.
 - `frontend/src/changelog/changelog.json` (create) — localized release entries.
-- `frontend/src/lib/changelog.ts` (create) — typed loader + `localizedHighlights` + `semverGt`.
+- `frontend/src/lib/changelog.ts` (create) — typed loader + `localizedHighlights` (NO `semverGt` — B7 dropped).
 - `frontend/src/types/domain.ts` (modify) — `VersionInfo`, `ChangelogEntry`.
 - `frontend/src/lib/api.ts` (modify) — `getVersion()`.
 - `frontend/src/store/version.ts` (create) — `info` + `changelogOpen` + `fetchVersion`.
 - `frontend/src/locales/{en,zh-TW,zh-CN,ja}/about.json` (create) — modal chrome.
 - `frontend/src/lib/i18n.ts` (modify) — register the `about` namespace.
-- `frontend/src/hooks/useVersionAnnounce.ts` (create) — one-time toast.
 - `frontend/src/components/about/ChangelogModal.tsx` (create).
-- `frontend/src/components/layout/AccountMenu.tsx` (modify) — About → opens modal; update dot.
-- `frontend/src/App.tsx` (modify) — fetch version once + `useVersionAnnounce()` + mount `<ChangelogModal/>`.
+- `frontend/src/components/layout/AccountMenu.tsx` (modify) — About → opens modal; update dot; conditional Update item.
+- `frontend/src/App.tsx` (modify) — fetch version once + mount `<ChangelogModal/>` (NO toast hook — B7 dropped).
 - `.claude/skills/paperhub-merge-prep/SKILL.md` (modify) — add the changelog-entry step.
 - `frontend/tests/...` — colocated tests per component/hook.
 
@@ -602,6 +601,11 @@ git commit -m "feat(api): GET /version with cached GitHub update check (FR-16)"
 
 ### Task B3: Frontend — bundled changelog data + loader
 
+> **ADJUSTED (per the top banner): OMIT `semverGt` + its test.** B7 is dropped, so
+> nothing consumes `semverGt`. Build ONLY `CHANGELOG` + `localizedHighlights`. The
+> `semverGt`/`parse` snippets and the `semverGt` test case below are STRUCK — do not
+> implement them.
+
 **Files:**
 - Create: `frontend/src/changelog/changelog.json`
 - Create: `frontend/src/lib/changelog.ts`
@@ -642,20 +646,16 @@ Create `frontend/src/changelog/changelog.json` (newest-first; en source-of-truth
     "date": "2026-06-16",
     "highlights": {
       "en": [
-        "Stop button — instantly cancel an in-flight answer; your question drops back into the composer so you can edit and resend.",
-        "What's New + version awareness — this changelog, a one-time toast after you update, and an optional 'update available' notice with the upgrade command."
+        "What's New + version awareness — an in-app changelog and an optional 'update available' notice with the one-line upgrade command."
       ],
       "zh-TW": [
-        "停止按鈕 — 可立即中止生成中的回答；您的問題會退回輸入框，方便修改後重新送出。",
-        "更新資訊 — 此更新紀錄、更新後的一次性提示，以及可選的「有新版本」通知與升級指令。"
+        "更新資訊 — 內建更新紀錄，以及可選的「有新版本」通知與一行升級指令。"
       ],
       "zh-CN": [
-        "停止按钮 — 可立即中止生成中的回答；你的问题会退回输入框，便于修改后重新发送。",
-        "更新信息 — 此更新日志、更新后的一次性提示，以及可选的“有新版本”通知与升级命令。"
+        "更新信息 — 内置更新日志，以及可选的“有新版本”通知与一行升级命令。"
       ],
       "ja": [
-        "停止ボタン — 生成中の回答を即座に中断できます。質問は入力欄に戻るので、修正して再送信できます。",
-        "更新情報 — この変更履歴、更新後の一度きりの通知、そして任意の「アップデートあり」通知とアップグレードコマンド。"
+        "更新情報 — アプリ内の変更履歴と、任意の「アップデートあり」通知＋ワンライナーのアップグレードコマンド。"
       ]
     }
   },
@@ -690,7 +690,7 @@ Create `frontend/tests/lib/changelog.test.ts`:
 
 ```typescript
 import { describe, expect, it } from "vitest";
-import { CHANGELOG, localizedHighlights, semverGt } from "@/lib/changelog";
+import { CHANGELOG, localizedHighlights } from "@/lib/changelog";
 
 describe("changelog loader", () => {
   it("exposes newest-first entries", () => {
@@ -702,12 +702,6 @@ describe("changelog loader", () => {
     expect(localizedHighlights(entry, "ja").length).toBeGreaterThan(0);
     // An unknown locale falls back to en.
     expect(localizedHighlights(entry, "fr")).toEqual(entry.highlights.en);
-  });
-
-  it("semverGt compares versions", () => {
-    expect(semverGt("2.37.0", "2.36.0")).toBe(true);
-    expect(semverGt("2.36.0", "2.37.0")).toBe(false);
-    expect(semverGt("2.37.0", "2.37.0")).toBe(false);
   });
 });
 ```
@@ -731,24 +725,9 @@ export const CHANGELOG: ChangelogEntry[] = data as ChangelogEntry[];
 export function localizedHighlights(entry: ChangelogEntry, lng: string): string[] {
   return entry.highlights[lng] ?? entry.highlights.en ?? [];
 }
-
-/** True when semver `a` is strictly greater than `b` (major.minor.patch). */
-export function semverGt(a: string, b: string): boolean {
-  const pa = parse(a);
-  const pb = parse(b);
-  for (let i = 0; i < 3; i++) {
-    if (pa[i]! > pb[i]!) return true;
-    if (pa[i]! < pb[i]!) return false;
-  }
-  return false;
-}
-
-function parse(v: string): [number, number, number] {
-  const parts = v.replace(/^v/, "").split(".").slice(0, 3);
-  const n = parts.map((p) => parseInt(p.replace(/\D/g, ""), 10) || 0);
-  return [n[0] ?? 0, n[1] ?? 0, n[2] ?? 0];
-}
 ```
+
+(NO `semverGt`/`parse` — B7 is dropped, so nothing consumes them.)
 
 If `tsconfig`/Vite needs JSON module resolution, it is already enabled (the i18n catalogs import JSON). No config change expected.
 
@@ -857,8 +836,7 @@ git commit -m "feat(about): getVersion() API client (FR-16)"
   "copy": "Copy",
   "copied": "Copied",
   "viewRelease": "View release",
-  "updatedToast": "Updated to v{{version}}",
-  "whatsNewAction": "What's new",
+  "update": "Update",
   "close": "Close"
 }
 ```
@@ -874,8 +852,7 @@ git commit -m "feat(about): getVersion() API client (FR-16)"
   "copy": "複製",
   "copied": "已複製",
   "viewRelease": "查看發行版本",
-  "updatedToast": "已更新至 v{{version}}",
-  "whatsNewAction": "查看更新",
+  "update": "更新",
   "close": "關閉"
 }
 ```
@@ -891,8 +868,7 @@ git commit -m "feat(about): getVersion() API client (FR-16)"
   "copy": "复制",
   "copied": "已复制",
   "viewRelease": "查看发行版本",
-  "updatedToast": "已更新至 v{{version}}",
-  "whatsNewAction": "查看更新",
+  "update": "更新",
   "close": "关闭"
 }
 ```
@@ -908,8 +884,7 @@ git commit -m "feat(about): getVersion() API client (FR-16)"
   "copy": "コピー",
   "copied": "コピーしました",
   "viewRelease": "リリースを見る",
-  "updatedToast": "v{{version}} に更新しました",
-  "whatsNewAction": "新着情報",
+  "update": "アップデート",
   "close": "閉じる"
 }
 ```
@@ -1037,7 +1012,16 @@ git commit -m "feat(about): version store (info + changelog modal state) (FR-16)
 
 ---
 
-### Task B7: Frontend — version-announce toast hook
+### Task B7: Frontend — version-announce toast hook — ❌ DROPPED
+
+> **DROPPED (per the top banner).** No passive pop-ups: the update cue is the
+> badge-only dot on the account icon (B9) plus the click-to-open ChangelogModal.
+> Do **not** create `useVersionAnnounce.ts`, its test, or any Sonner toast, and do
+> **not** wire `useVersionAnnounce()` into `App.tsx` (B9 Step 4). The entire task
+> below is superseded — skip it. (`semverGt` had no other consumer, hence B3's
+> omission.)
+
+The original toast-hook spec is retained below for history only — it is NOT to be built.
 
 **Files:**
 - Create: `frontend/src/hooks/useVersionAnnounce.ts`
@@ -1395,7 +1379,21 @@ Replace the disabled About `Menu.Item` (~lines 111-113) with a clickable one:
             <Menu.Item className={`${ITEM_CLASS} gap-2`} onClick={openChangelog}>
               {t("about")} · v{APP_VERSION}
             </Menu.Item>
+            {updateAvailable && (
+              <Menu.Item
+                className={`${ITEM_CLASS} gap-2 text-amber-600 dark:text-amber-400`}
+                onClick={openChangelog}
+              >
+                {t("about:update")}
+              </Menu.Item>
+            )}
 ```
+
+The Update item is shown only when `update_available`; it opens the same
+ChangelogModal, whose amber update row carries the release link + the copyable
+`docker compose pull …` command (B8). Use `t("about:update")` (the `about`
+namespace key added in B5) — the account-menu `t` is otherwise the `common`
+namespace, so key it explicitly.
 
 Add an update dot to the trigger avatar (so it shows even when the menu is closed). Inside `<Menu.Trigger>`, wrap the avatar `<span>` so the dot overlays it:
 
@@ -1420,18 +1418,18 @@ In `frontend/src/App.tsx`: import `useEffect`, the store, the hook, and the moda
 ```tsx
 import { useEffect } from "react";
 import { ChangelogModal } from "@/components/about/ChangelogModal";
-import { useVersionAnnounce } from "@/hooks/useVersionAnnounce";
 import { useVersionStore } from "@/store/version";
 ```
 
 ```tsx
-  useVersionAnnounce();
+  // Fetch /version once at startup. NO useVersionAnnounce / toast (B7 dropped) —
+  // the only update cue is the account-icon dot + click-to-open ChangelogModal.
   useEffect(() => {
     void useVersionStore.getState().fetchVersion();
   }, []);
 ```
 
-and render `<ChangelogModal />` once at the top level of the app's JSX (a sibling of the router/layout, so it overlays everything). Place the `useVersionAnnounce()` + `useEffect` inside the existing root function component (alongside other hooks); follow App.tsx's current structure.
+and render `<ChangelogModal />` once at the top level of the app's JSX (a sibling of the router/layout, so it overlays everything). Place the version-fetch `useEffect` inside the existing root function component (alongside other hooks); follow App.tsx's current structure. (No `useVersionAnnounce()` — B7 dropped.)
 
 - [ ] **Step 5: Run the tests + parity**
 
@@ -1512,7 +1510,7 @@ Expected: all green; production build succeeds.
 
 **Spec coverage (FR-15):** Stop button (A4) ✓; synchronous client retract on click — abort the stream + remove the in-flight pair, swallowing the abort error (A2+A3) ✓; explicit `POST /chat/cancel` cancels the running asyncio task, marks `runs.status='cancelled'` (only while `running`), and DELETEs the orphan turn's messages so it never reappears (A1) ✓; the question is restored to the composer, the turn is REMOVED (no "Stopped" bubble; MessageBubble untouched) ✓; distinguish deliberate Stop from a bare disconnect via the explicit endpoint — a disconnect stays `running` (A1) ✓; pair invariant on reload/cross-device via processing placeholder + run_id-resolved Stop (A6) ✓.
 
-**Spec coverage (FR-16):** bundled localized `changelog.json` outside the t() namespaces (B3) ✓; `about` chrome namespace × 4 locales (B5) ✓; `GET /version` cached GitHub check, failure-swallowing, repo-slug env override, toggle-gated default-on (B1+B2) ✓; nginx proxy (B2) ✓; About→`ChangelogModal` + update dot (B8+B9) ✓; one-time announce toast w/ localStorage `lastSeen`, silent first-load (B7) ✓; `update_available` row w/ copy-paste command + release link, no in-app execution (B8) ✓; merge-prep step (B10) ✓.
+**Spec coverage (FR-16):** bundled localized `changelog.json` outside the t() namespaces (B3) ✓; `about` chrome namespace × 4 locales (B5) ✓; `GET /version` cached GitHub check, failure-swallowing, repo-slug env override, toggle-gated default-on (B1+B2) ✓; nginx proxy (B2) ✓; About→`ChangelogModal` + badge-only update dot + conditional Update item (B8+B9) ✓; **B7 auto-toast DROPPED** (badge-only cue per the top banner — no passive pop-ups; `semverGt` omitted with it) ✓; `update_available` row w/ copy-paste command + release link, no in-app execution (B8) ✓; merge-prep step (B10) ✓.
 
 **Placeholder scan:** every code step contains complete code; the one "inspect the existing file" step (B8 Dialog shell) is read-then-integrate with the exact snippet + i18n key provided. MessageBubble is NOT touched (the turn is removed, never rendered as "stopped").
 
