@@ -1031,7 +1031,7 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> EventSourceRespon
         try:
             for past in replay:
                 yield past
-            while True:
+            while not (handle.done.is_set() and q.empty()):
                 evt = await q.get()
                 if evt is None:  # terminal sentinel from mark_terminal
                     break

@@ -238,3 +238,59 @@ async def test_second_subscriber_replays_full_sequence(
     # The terminal sentinel is delivered to a fresh subscriber on next emit/None.
     handle.mark_terminal(handle.status, now=0.0)  # idempotent; already terminal
     handle.unsubscribe(q)
+
+
+# ---------------------------------------------------------------------------
+# (4) Regression: subscriber must not block when the run is already terminal.
+#
+# Before the fix the drain loop was ``while True: evt = await q.get()`` — if
+# the run reached terminal BEFORE subscribe() was called, mark_terminal had
+# already fanned the ``None`` sentinel to the *old* subscriber set (empty at
+# that point), so the fresh queue ``q`` never received None and the coroutine
+# blocked forever.  The fix changes the guard to:
+#
+#     while not (handle.done.is_set() and q.empty()):
+#
+# so a terminal handle with an empty queue exits immediately without blocking.
+# ---------------------------------------------------------------------------
+async def test_subscriber_does_not_block_when_run_already_terminal() -> None:
+    """The drain loop must exit without waiting when the run is already done."""
+    from paperhub.api.run_broker import RunBroker
+
+    broker = RunBroker()
+    handle = broker.register(run_id=9999)
+
+    # Emit a couple of real events then a final, simulating a completed run.
+    handle.emit({"event": "session", "data": '{"run_id":9999}'})
+    handle.emit({"event": "token", "data": '{"text":"hello"}'})
+    handle.emit({"event": "final", "data": '{"content":"hello"}'})
+
+    # Mark terminal with NO live subscribers — this is the race condition: the
+    # None sentinel goes to nobody, so a LATER subscribe() gets a dead queue.
+    handle.mark_terminal("ok", now=0.0)
+
+    # Replicate the exact subscriber() drain logic from chat_endpoint.
+    async def drain() -> list[dict[str, Any]]:
+        q = handle.subscribe()
+        replay = list(handle.events)
+        collected: list[dict[str, Any]] = []
+        try:
+            for past in replay:
+                collected.append(past)
+            while not (handle.done.is_set() and q.empty()):
+                evt = await q.get()
+                if evt is None:
+                    break
+                collected.append(evt)
+        finally:
+            handle.unsubscribe(q)
+        return collected
+
+    # Must complete within 2 s; a blocked ``await q.get()`` raises TimeoutError.
+    collected = await asyncio.wait_for(drain(), timeout=2.0)
+
+    # Should yield exactly the three events emitted before terminal.
+    assert len(collected) == 3, f"expected 3 events, got {len(collected)}: {collected}"
+    assert collected[0]["event"] == "session"
+    assert collected[1]["event"] == "token"
+    assert collected[2]["event"] == "final"
