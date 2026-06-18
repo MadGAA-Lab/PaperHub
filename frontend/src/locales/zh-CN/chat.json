@@ -72,6 +72,7 @@
   },
   "bubble": {
     "retry": "重试",
+    "interrupted": "生成已中断",
     "copy": "复制消息",
     "fork": "从此消息分叉",
     "forkTitle": "从此处分叉 — 新建对话并编辑此消息"

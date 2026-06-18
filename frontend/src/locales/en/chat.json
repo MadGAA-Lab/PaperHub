@@ -72,6 +72,7 @@
   },
   "bubble": {
     "retry": "Retry",
+    "interrupted": "Generation was interrupted.",
     "copy": "Copy message",
     "fork": "Fork from this message",
     "forkTitle": "Fork from here — branch a new chat and edit this message"

@@ -115,7 +115,9 @@ export function ChatPage() {
   const backendSessionId = activeSession?.backend_session_id ?? null;
 
   const isStreaming =
-    activeSession?.messages.some((m) => m.status === "streaming") ?? false;
+    activeSession?.messages.some(
+      (m) => m.status === "streaming" || m.status === "processing",
+    ) ?? false;
 
   // First-run gate: lock the composer only on a definitive config problem
   // (missing / rejected key) — NOT on a transient readiness blip (e.g. the

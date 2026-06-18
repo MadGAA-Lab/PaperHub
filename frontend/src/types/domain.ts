@@ -179,7 +179,7 @@ export interface ChatMessage {
   run_id: number | null;
   routing_decision?: RoutingDecision;
   trace?: ToolCallRecord[];
-  status?: "streaming" | "ok" | "error";
+  status?: "streaming" | "processing" | "ok" | "error" | "interrupted";
   error?: string;
   search_results?: SearchResultCandidate[];
   deck?: DeckEventData;
