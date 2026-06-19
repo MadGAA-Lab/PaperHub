@@ -33,8 +33,13 @@ _OVERFULL_VBOX_RE = re.compile(r"Overfull \\vbox")
 # ``% !TeX program = xelatex`` magic comment the LLM emits for CJK decks.
 _XELATEX_TRIGGERS = ("xecjk", "fontspec", "ctex", "% !tex program = xelatex")
 
-_XECJK_RE = re.compile(r"\\usepackage(?:\[[^\]]*\])?\{xeCJK\}", re.IGNORECASE)
-_FONTSPEC_RE = re.compile(r"\\usepackage(?:\[[^\]]*\])?\{fontspec\}", re.IGNORECASE)
+# Possessive quantifiers (``*+`` / ``?+``) keep the optional ``[options]`` scan
+# linear on uncontrolled (LLM-/paper-sourced) input — a bare ``[`` with no
+# closing ``]`` can otherwise drive polynomial backtracking (CodeQL
+# py/polynomial-redos). Semantics are unchanged: ``[^\]]`` already excludes
+# ``]``, so giving those chars back never produces a different valid match.
+_XECJK_RE = re.compile(r"\\usepackage(?:\[[^\]]*+\])?+\{xeCJK\}", re.IGNORECASE)
+_FONTSPEC_RE = re.compile(r"\\usepackage(?:\[[^\]]*+\])?+\{fontspec\}", re.IGNORECASE)
 # Default CJK font shipped by the image's fonts-noto-cjk package. Covers
 # Simplified + Traditional + Japanese + Korean glyphs (Noto CJK is unified).
 _DEFAULT_CJK_FONT = "Noto Serif CJK SC"

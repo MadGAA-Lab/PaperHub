@@ -132,9 +132,18 @@ def sanitize_frametitles(beamer_code: str) -> str:
     if not beamer_code:
         return ""
 
-    # Fix common LLM errors: \end{...> and \begin{...> where > should be }
-    beamer_code = re.sub(r"\\end\{([^}]+)>", r"\\end{\1}", beamer_code)
-    beamer_code = re.sub(r"\\begin\{([^}]+)>", r"\\begin{\1}", beamer_code)
+    # Fix common LLM errors: \end{...> and \begin{...> where > should be }.
+    # The captured group is an environment name, so the class is restricted to
+    # the characters a name can contain — explicitly EXCLUDING the structural
+    # delimiters ``}``, ``>``, ``{``, backslash and whitespace. That keeps each
+    # match a single bounded word that cannot run across the next ``\end{`` /
+    # ``\begin{`` token: without the backslash exclusion ``[^}>]+`` would scan
+    # the whole remaining string at every ``\end{`` start, which is quadratic
+    # on uncontrolled input (CodeQL py/polynomial-redos). The possessive ``++``
+    # seals any residual backtracking. Stopping at the first ``>`` is also the
+    # intended repair (the first ``>`` is the mistaken brace).
+    beamer_code = re.sub(r"\\end\{([^}>{\\\s]++)>", r"\\end{\1}", beamer_code)
+    beamer_code = re.sub(r"\\begin\{([^}>{\\\s]++)>", r"\\begin{\1}", beamer_code)
 
     # Ensure commonly needed packages are loaded after \documentclass
     # These are often used by LLMs but not explicitly loaded
@@ -171,7 +180,7 @@ def sanitize_frametitles(beamer_code: str) -> str:
     if packages_to_ensure or math_macros:
         additions = "\n".join(packages_to_ensure + math_macros)
         # Find position after \documentclass{beamer} or \documentclass[...]{beamer}
-        docclass_pattern = re.compile(r"(\\documentclass(?:\[[^\]]*\])?\{beamer\})")
+        docclass_pattern = re.compile(r"(\\documentclass(?:\[[^\]]*+\])?+\{beamer\})")
         match = docclass_pattern.search(beamer_code)
         if match:
             insert_pos = match.end()
@@ -188,7 +197,12 @@ def sanitize_frametitles(beamer_code: str) -> str:
         sanitized_title = re.sub(r"(?<!\\)&", r"\\&", title)
         return f"{begin_frame}{sanitized_options}{{{sanitized_title}}}"
 
-    pattern_frame = re.compile(r"(\\begin\{frame})\s*(\[[^]]*])?\s*\{([^}]*)}")
+    # The optional ``[options]`` carries its own leading whitespace so the two
+    # ``\s*`` runs are never adjacent — adjacent ``\s*…\s*`` partitions a long
+    # whitespace run ambiguously and backtracks polynomially on uncontrolled
+    # input (CodeQL py/polynomial-redos). Possessive quantifiers seal it; the
+    # collapse semantics are unchanged (group 2 = options, group 3 = title).
+    pattern_frame = re.compile(r"(\\begin\{frame})(?:\s*(\[[^]]*+]))?+\s*+\{([^}]*+)}")
     beamer_code = pattern_frame.sub(repl_frame, beamer_code)
 
     # 2) Sanitize explicit \frametitle commands
@@ -207,8 +221,15 @@ def sanitize_frametitles(beamer_code: str) -> str:
 
         return f"{command}{sanitized_overlay}{sanitized_short_title}{{{sanitized_main_title}}}"
 
+    # Same de-ambiguation as pattern_frame: each optional argument owns its
+    # leading whitespace so no two ``\s*`` runs are ever adjacent, and every
+    # quantifier is possessive — linear on uncontrolled input (CodeQL
+    # py/polynomial-redos). The title body is ``[^}]*+`` (up to the first
+    # closing brace, newlines included) which is exactly the old lazy
+    # ``(.*?)}`` under re.DOTALL, so re.DOTALL is no longer needed. Groups:
+    # 1=\frametitle, 2=<overlay>, 3=[short title], 4={main title}.
     pattern = re.compile(
-        r"(\\frametitle)\s*(<[^>]*>)?\s*(\[[^]]*])?\s*\{(.*?)}", re.DOTALL
+        r"(\\frametitle)(?:\s*(<[^>]*+>))?+(?:\s*(\[[^]]*+]))?+\s*+\{([^}]*+)}"
     )
 
     return pattern.sub(repl, beamer_code)

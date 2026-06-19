@@ -40,3 +40,34 @@ def test_frame_roundtrip() -> None:
 
 def test_sanitize_frametitles_escapes_ampersand() -> None:
     assert "\\&" in sanitize_frametitles("\\frametitle{Cats & Dogs}")
+
+
+def test_sanitize_frametitles_options_and_overlay_preserved() -> None:
+    # Overlay <...>, short-title [...], and the main {...} all survive, with
+    # ampersands escaped in each — guards the de-ambiguated frametitle regex.
+    out = sanitize_frametitles("\\frametitle <1-> [A & B] {Main & Title}")
+    assert "<1->" in out and "A \\& B" in out and "Main \\& Title" in out
+
+
+def test_sanitize_frame_env_title_escaped() -> None:
+    out = sanitize_frametitles("\\begin{frame}[fragile]{X & Y}\\end{frame}")
+    assert "[fragile]" in out and "X \\& Y" in out
+
+
+def test_sanitize_repairs_first_mistaken_gt_only() -> None:
+    # \end{frame> and \begin{itemize> are two independent typos; each is
+    # repaired at its OWN first '>', not swallowed together.
+    out = sanitize_frametitles("\\end{frame> \\begin{itemize>")
+    assert "\\end{frame}" in out and "\\begin{itemize}" in out
+
+
+def test_sanitize_frametitles_linear_on_pathological_input() -> None:
+    # Unterminated frametitle with a long whitespace run must not backtrack
+    # super-linearly (CodeQL py/polynomial-redos). Bound the wall time well
+    # under any backtracking blow-up.
+    import time
+
+    payload = "\\frametitle " + " " * 200_000 + "X"
+    start = time.perf_counter()
+    sanitize_frametitles(payload)
+    assert time.perf_counter() - start < 1.0
