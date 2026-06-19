@@ -133,13 +133,17 @@ def sanitize_frametitles(beamer_code: str) -> str:
         return ""
 
     # Fix common LLM errors: \end{...> and \begin{...> where > should be }.
-    # The class excludes ``>`` (the mistaken brace) so the match stops at the
-    # FIRST ``>`` — the intended repair target — and stays linear on
-    # uncontrolled input (env names never contain ``>``); ``[^}]+`` would
-    # backtrack polynomially since ``>`` is in the class (CodeQL
-    # py/polynomial-redos).
-    beamer_code = re.sub(r"\\end\{([^}>]+)>", r"\\end{\1}", beamer_code)
-    beamer_code = re.sub(r"\\begin\{([^}>]+)>", r"\\begin{\1}", beamer_code)
+    # The captured group is an environment name, so the class is restricted to
+    # the characters a name can contain — explicitly EXCLUDING the structural
+    # delimiters ``}``, ``>``, ``{``, backslash and whitespace. That keeps each
+    # match a single bounded word that cannot run across the next ``\end{`` /
+    # ``\begin{`` token: without the backslash exclusion ``[^}>]+`` would scan
+    # the whole remaining string at every ``\end{`` start, which is quadratic
+    # on uncontrolled input (CodeQL py/polynomial-redos). The possessive ``++``
+    # seals any residual backtracking. Stopping at the first ``>`` is also the
+    # intended repair (the first ``>`` is the mistaken brace).
+    beamer_code = re.sub(r"\\end\{([^}>{\\\s]++)>", r"\\end{\1}", beamer_code)
+    beamer_code = re.sub(r"\\begin\{([^}>{\\\s]++)>", r"\\begin{\1}", beamer_code)
 
     # Ensure commonly needed packages are loaded after \documentclass
     # These are often used by LLMs but not explicitly loaded
