@@ -86,21 +86,53 @@ jobs:
     needs: images
     runs-on: ubuntu-latest
     steps:
+      # Needed so we can read frontend/src/changelog/changelog.json — the SAME
+      # highlights the in-app ChangelogModal shows (FR-16) — and reuse them as
+      # the Release notes, so the user-facing changelog lives in ONE place.
+      - uses: actions/checkout@v5
+
       - name: Derive version (strip leading v)
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      - name: Compose release notes from the in-app changelog
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          file="frontend/src/changelog/changelog.json"
+          # English highlights for THIS version, as markdown bullets. `// empty`
+          # yields nothing when the version has no entry (older tags / hotfixes
+          # that skipped the changelog) — the notes then fall back to header +
+          # image refs + GitHub's auto-generated "What's Changed".
+          highlights="$(jq -r --arg v "$VERSION" \
+            '(.[] | select(.version == $v) | .highlights.en[] | "- " + .) // empty' "$file")"
+          {
+            echo "## PaperHub ${REF_NAME}"
+            echo
+            if [ -n "$highlights" ]; then
+              echo "### What's new"
+              echo "$highlights"
+              echo
+            fi
+            echo "Container images on GHCR (also tagged \`latest\`):"
+            echo
+            echo '```'
+            echo "ghcr.io/${OWNER}/paperhub-backend:${VERSION}"
+            echo "ghcr.io/${OWNER}/paperhub-frontend:${VERSION}"
+            echo "ghcr.io/${OWNER}/paperhub-marker:${VERSION}"
+            echo '```'
+          } > "${RUNNER_TEMP}/RELEASE_BODY.md"
+          echo "----- composed release body -----"
+          cat "${RUNNER_TEMP}/RELEASE_BODY.md"
+          echo "body_path=${RUNNER_TEMP}/RELEASE_BODY.md" >> "$GITHUB_OUTPUT"
+        id: notes
+
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
+          # Curated changelog highlights (composed above) lead; GitHub appends
+          # its auto-generated "What's Changed" PR list after the body.
           generate_release_notes: true
-          body: |
-            ## PaperHub ${{ github.ref_name }}
-
-            Container images on GHCR (also tagged `latest`):
-
-            ```
-            ghcr.io/${{ github.repository_owner }}/paperhub-backend:${{ steps.ver.outputs.version }}
-            ghcr.io/${{ github.repository_owner }}/paperhub-frontend:${{ steps.ver.outputs.version }}
-            ghcr.io/${{ github.repository_owner }}/paperhub-marker:${{ steps.ver.outputs.version }}
-            ```
+          body_path: ${{ steps.notes.outputs.body_path }}
